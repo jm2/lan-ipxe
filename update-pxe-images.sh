@@ -164,7 +164,7 @@ if [ "$ENABLE_TFTP_BOOTSTRAP" = "true" ]; then
     echo "Downloading iPXE binaries to $TFTP_DIR..."
     # x86_64
     echo "  [x86_64] ipxe.efi"
-    curl -sL -o "$TFTP_DIR/ipxe.efi" "https://boot.ipxe.org/ipxe.efi"
+    curl -sL -o "$TFTP_DIR/ipxe.efi" "http://boot.ipxe.org/x86_64-efi/ipxe.efi"
     echo "  [Legacy] undionly.kpxe"
     curl -sL -o "$TFTP_DIR/undionly.kpxe" "https://boot.ipxe.org/undionly.kpxe"
     # AArch64 (ARM64) - using ipxe.org stock
