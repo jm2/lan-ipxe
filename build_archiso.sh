@@ -6,7 +6,7 @@ set -e
 # ==========================================
 BASE_DIR="$(dirname "$(realpath "$0")")"
 PROFILE_DIR="$BASE_DIR/custom_archiso"
-WORK_DIR="/tmp/archiso-work"
+WORK_DIR="/var/tmp/archiso-work"
 
 # Output Directory Logic
 if [ -w "/srv/http/pxe" ]; then
@@ -81,12 +81,10 @@ terminology
 nvidia-open
 nvidia-utils
 mesa
-lib32-mesa
 vulkan-radeon
 vulkan-intel
 vulkan-mesa-layers
 libva-mesa-driver
-mesa-vdpau
 xf86-video-amdgpu
 xf86-video-intel
 xf86-video-nouveau
@@ -105,6 +103,9 @@ sed -i 's|^Include = /etc/pacman.d/mirrorlist|Server = https://plug-mirror.rcac.
 # --- Profile Definition ---
 echo "Updating profile definition..."
 sed -i 's|iso_name="archlinux"|iso_name="archlinux-custom"|' "$PROFILE_DIR/profiledef.sh"
+# Switch to zstd compression for faster build
+sed -i "s|airootfs_image_tool_options=('-comp' 'xz' '-Xbcj' 'x86' '-b' '1M' '-Xdict-size' '1M')|airootfs_image_tool_options=('-comp' 'zstd' '-b' '1M')|" "$PROFILE_DIR/profiledef.sh"
+
 # Add permissions for our custom scripts
 # Insert before the closing parenthesis of file_permissions
 sed -i '/^)/i \  ["/usr/local/bin/choose-desktop.sh"]="0:0:755"' "$PROFILE_DIR/profiledef.sh"
