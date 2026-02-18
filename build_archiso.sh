@@ -244,9 +244,9 @@ mkdir -p "$OUT_DIR"
 # Cleaning work dir
 rm -rf "$WORK_DIR"
 
-# Cleaning profile dir
-rm -rf "$PROFILE_DIR"
-
 mkarchiso -v -w "$WORK_DIR" -o "$OUT_DIR" "$PROFILE_DIR"
+
+# Cleaning profile dir (after build)
+rm -rf "$PROFILE_DIR"
 
 echo "Build Complete!"
