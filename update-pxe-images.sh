@@ -319,7 +319,7 @@ item clonezilla           Clonezilla Live (Netboot)
 EOF
 
 if [ "$ENABLE_LOCAL_ARCH" = "true" ]; then
-    echo "item lan-image            LAN Gaming Image (Local)" >> "$IPXE_FILE"
+    echo "item lan-image            Arch Linux LAN Gaming Image (Local)" >> "$IPXE_FILE"
 fi
 
 cat >> "$IPXE_FILE" <<EOF
@@ -339,7 +339,7 @@ EOF
 
 if [ "$ENABLE_CUSTOM_ARCHISO" = "true" ]; then
     cat >> "$IPXE_FILE" <<EOF
-item --gap --             ------------------------- Arch Linux (Custom) ----------------
+item --gap --             ------------------------- Arch Linux (archiso) ----------------
 item arch-gnome           Arch Linux (GNOME)
 item arch-kde             Arch Linux (KDE Plasma)
 item arch-xfce            Arch Linux (XFCE)
@@ -450,25 +450,23 @@ imgargs vmlinuz initrd=initrd.img root=live:\${live_url} rd.live.image rd.live.o
 boot || shell
 EOF
 
-# ==================== ARCH LINUX (CUSTOM) ====================
+# ==================== ARCH LINUX (ARCHISO) ====================
 if [ "$ENABLE_CUSTOM_ARCHISO" = "true" ]; then
     cat >> "$IPXE_FILE" <<EOF
 :arch-common
-# Artifacts are in http://<server>/pxe/archiso/arch/
-# mkarchiso output structure: <OUT_DIR>/arch/boot/x86_64/vmlinuz-linux
-set arch_http http://${PXE_SERVER}/pxe/archiso/arch/boot/x86_64
+# Artifacts are in http://<server>/pxe/archiso/
+# We extracted vmlinuz-linux and initramfs-linux.img to the root of archiso/ during build
+set arch_http http://${PXE_SERVER}/pxe/archiso
 set arch_iso_label ARCH_$(date +%Y%m)
 
 kernel \${arch_http}/vmlinuz-linux
 initrd \${arch_http}/initramfs-linux.img
-# archisobasedir matches the directory inside archiso/ (default: arch)
+# archisobasedir matches the directory inside the ISO (default: arch)
 # archisolabel must match the one in profiledef.sh (ARCH_YYYYMM)
-# miso_http_url or similar is not standard archiso, it uses cow_spacesize etc.
-# But for http fetching of the squashfs, standard archiso usually wants correct ip=dhcp and maybe path?
-# Standard archiso via HTTP usually requires:
-# archiso_http_srv=http://${PXE_SERVER}/pxe/archiso/
-# This tells it where to look for 'arch/x86_64/airootfs.sfs'
-imgargs vmlinuz-linux initrd=initramfs-linux.img archisobasedir=arch archisolabel=\${arch_iso_label} archiso_http_srv=http://${PXE_SERVER}/pxe/archiso/ desktop=\${desktop_env} ip=dhcp cow_spacesize=4G copytoram=n
+# We use archiso_http_srv to point to the directory containing the ISO or extracted files
+# If booting from valid copy-to-ram ISO, we might need imgargs adjustment.
+# For now, pointing to the folder.
+imgargs vmlinuz-linux initrd=initramfs-linux.img archisobasedir=arch archisolabel=\${arch_iso_label} archiso_http_srv=\${arch_http}/ desktop=\${desktop_env} ip=dhcp BOOTIF=01-\${mac:hexhyp} cow_spacesize=4G copytoram=n
 boot || shell
 
 :arch-gnome
@@ -492,9 +490,6 @@ set desktop_env enlightenment
 goto arch-common
 EOF
 fi
-
-# ==================== MANJARO (REMOVED) ====================
-# :manjaro-gnome ...
 
 # ============================================================================
 #                               ARM64 LABELS

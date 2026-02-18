@@ -247,6 +247,17 @@ rm -rf "$WORK_DIR"
 
 mkarchiso -v -w "$WORK_DIR" -o "$OUT_DIR" "$PROFILE_DIR"
 
+# Copy Kernel and Initrd to OUT_DIR for PXE
+echo "Copying kernel and initrd to $OUT_DIR..."
+cp "$WORK_DIR/iso/arch/boot/x86_64/vmlinuz-linux" "$OUT_DIR/"
+cp "$WORK_DIR/iso/arch/boot/x86_64/initramfs-linux.img" "$OUT_DIR/"
+
+# Copy airootfs.sfs (Required for HTTP Boot)
+echo "Copying airootfs.sfs to $OUT_DIR/arch/x86_64/..."
+mkdir -p "$OUT_DIR/arch/x86_64"
+cp "$WORK_DIR/iso/arch/x86_64/airootfs.sfs" "$OUT_DIR/arch/x86_64/"
+cp "$WORK_DIR/iso/arch/x86_64/airootfs.sha512" "$OUT_DIR/arch/x86_64/"
+
 # Cleaning work dir (after build)
 rm -rf "$WORK_DIR"
 
