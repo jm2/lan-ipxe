@@ -47,6 +47,33 @@ cp -r /usr/share/archiso/configs/releng/* "$PROFILE_DIR/"
 echo "Adding custom packages..."
 cat >> "$PROFILE_DIR/packages.x86_64" <<EOF
 # Custom Packages
+7zip
+alsa-firmware
+sof-firmware
+alsa-oss
+alsa-plugins
+pipewire-alsa
+archiso
+bash-completion
+clang
+cmake
+colordiff
+cronie
+dkms
+flashrom
+gcc
+gcc-libs
+gsmartcontrol
+gst-plugin-va
+gst-plugins-ugly
+htop
+iperf
+iperf3
+linux-headers
+llvm
+mediainfo
+meld
+base-devel
 vim
 networkmanager
 openssh
@@ -57,6 +84,7 @@ rsync
 gparted
 # GNOME
 gnome
+gnome-extra
 gdm
 # KDE Plasma
 plasma
@@ -81,13 +109,21 @@ terminology
 nvidia-open
 nvidia-utils
 mesa
+mesa-utils
 vulkan-radeon
 vulkan-intel
+vulkan-nouveau
+vulkan-swrast
+vulkan-virtio
 vulkan-mesa-layers
-libva-mesa-driver
+libva-intel-driver
+intel-media-driver
+libva-nvidia-driver
+nvidia-vaapi-driver
 xf86-video-amdgpu
 xf86-video-intel
 xf86-video-nouveau
+xf86-video-vesa
 wayland
 xorg-server
 xorg-xinit
