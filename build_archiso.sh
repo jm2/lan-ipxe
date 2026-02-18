@@ -242,10 +242,13 @@ EOF
 echo "Starting build..."
 mkdir -p "$OUT_DIR"
 
-# Cleaning work dir
+# Cleaning work dir (before build)
 rm -rf "$WORK_DIR"
 
 mkarchiso -v -w "$WORK_DIR" -o "$OUT_DIR" "$PROFILE_DIR"
+
+# Cleaning work dir (after build)
+rm -rf "$WORK_DIR"
 
 # Cleaning profile dir (after build)
 rm -rf "$PROFILE_DIR"
