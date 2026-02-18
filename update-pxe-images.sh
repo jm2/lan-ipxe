@@ -10,10 +10,10 @@ TFTP_DIR="/srv/tftp"
 
 ENABLE_LOCAL_ARCH="false"        # Set to "true" to copy local Arch Kernel/Initrd
 ENABLE_TFTP_BOOTSTRAP="false"    # Set to "true" to download iPXE binaries to TFTP_DIR
+ENABLE_CUSTOM_ARCHISO="false"    # Set to "true" to enable Custom Archiso Menu
 
 PURDUE_MIRROR="https://plug-mirror.rcac.purdue.edu"
 FEDORA_MIRROR_BASE="https://plug-mirror.rcac.purdue.edu/fedora/fedora/linux/releases"
-MANJARO_MIRROR="http://mirrors.gigenet.com/manjaro" # Chicago-based mirror
 NETBOOT_XYZ_URL="https://boot.netboot.xyz"
 
 # ==========================================
@@ -146,14 +146,6 @@ get_rocky_iso() {
     curl -sL "${PURDUE_MIRROR}/rocky/${ver}/${live_dir}/${arch}/" | grep -oP "$iso_pattern" | head -n 1
 }
 
-# --- Manjaro ---
-get_manjaro_version() {
-    echo "26.0"
-}
-get_manjaro_iso() {
-    echo "" 
-}
-
 # ==========================================
 # 1. TFTP Bootstrapping
 # ==========================================
@@ -231,15 +223,6 @@ ROCKY_ISO_GNOME_X86=$(get_rocky_iso "$ROCKY_VER_X86" "gnome" "x86_64")
 ROCKY_ISO_KDE_X86=$(get_rocky_iso "$ROCKY_VER_X86" "kde" "x86_64")
 ROCKY_ISO_XFCE_X86=$(get_rocky_iso "$ROCKY_VER_X86" "xfce" "x86_64")
 echo "  Rocky (x86_64):   $ROCKY_VER_X86 (G: $ROCKY_ISO_GNOME_X86)"
-
-MANJARO_VER_X86=$(get_manjaro_version)
-if [ -z "$MANJARO_VER_X86" ]; then
-    MANJARO_VER_X86="26.0" # Fallback
-fi
-MANJARO_ISO_GNOME_X86=$(get_manjaro_iso "$MANJARO_VER_X86" "gnome")
-MANJARO_ISO_KDE_X86=$(get_manjaro_iso "$MANJARO_VER_X86" "kde") 
-MANJARO_ISO_XFCE_X86=$(get_manjaro_iso "$MANJARO_VER_X86" "xfce")
-echo "  Manjaro (x86_64): $MANJARO_VER_X86"
 
 # ==========================================
 # 5. Version Scrape (ARM64)
@@ -352,10 +335,20 @@ item --gap --             ------------------------- Rocky Linux ----------------
 item rocky-gnome          Rocky ${ROCKY_VER_X86} (GNOME)
 item rocky-kde            Rocky ${ROCKY_VER_X86} (KDE)
 item rocky-xfce           Rocky ${ROCKY_VER_X86} (XFCE)
-item --gap --             ------------------------- Manjaro ----------------------------
-item manjaro-gnome        Manjaro ${MANJARO_VER_X86} (GNOME)
-item manjaro-kde          Manjaro ${MANJARO_VER_X86} (KDE)
-item manjaro-xfce         Manjaro ${MANJARO_VER_X86} (XFCE)
+EOF
+
+if [ "$ENABLE_CUSTOM_ARCHISO" = "true" ]; then
+    cat >> "$IPXE_FILE" <<EOF
+item --gap --             ------------------------- Arch Linux (Custom) ----------------
+item arch-gnome           Arch Linux (GNOME)
+item arch-kde             Arch Linux (KDE Plasma)
+item arch-xfce            Arch Linux (XFCE)
+item arch-sway            Arch Linux (Sway)
+item arch-enlightenment   Arch Linux (Enlightenment)
+EOF
+fi
+
+cat >> "$IPXE_FILE" <<EOF
 item --gap --             ------------------------- Network Tools ----------------------
 item netbootxyz           Netboot.xyz
 item shell                iPXE Shell
@@ -455,29 +448,53 @@ kernel \${mirror}/images/pxeboot/vmlinuz
 initrd \${mirror}/images/pxeboot/initrd.img
 imgargs vmlinuz initrd=initrd.img root=live:\${live_url} rd.live.image rd.live.overlay.overlayfs=1 ip=dhcp
 boot || shell
+EOF
 
-# ==================== MANJARO (x86_64) ====================
-:manjaro-gnome
-set manjaro_tag 26.0.2-260206-linux618-917f9a0a
-goto manjaro-boot-x86
+# ==================== ARCH LINUX (CUSTOM) ====================
+if [ "$ENABLE_CUSTOM_ARCHISO" = "true" ]; then
+    cat >> "$IPXE_FILE" <<EOF
+:arch-common
+# Artifacts are in http://<server>/pxe/archiso/arch/
+# mkarchiso output structure: <OUT_DIR>/arch/boot/x86_64/vmlinuz-linux
+set arch_http http://${PXE_SERVER}/pxe/archiso/arch/boot/x86_64
+set arch_iso_label ARCH_$(date +%Y%m)
 
-:manjaro-kde
-set manjaro_tag 26.0.2-260206-linux618-df3b24fa
-goto manjaro-boot-x86
-
-:manjaro-xfce
-set manjaro_tag 26.0.2-260206-linux618-93c4b57e
-goto manjaro-boot-x86
-
-:manjaro-boot-x86
-set gh_base https://github.com/netbootxyz/manjaro-squash/releases/download/\${manjaro_tag}
-kernel \${gh_base}/vmlinuz
-initrd \${gh_base}/initrd
-# Manjaro Netboot assets behave like live media, often served via HTTP
-imgargs vmlinuz initrd=initrd misobasedir=manjaro misolabel=MANJARO_LIVE miso_http_url=\${gh_base}/ driver=free nouveau.modeset=1 i915.modeset=1 radeon.modeset=1
+kernel \${arch_http}/vmlinuz-linux
+initrd \${arch_http}/initramfs-linux.img
+# archisobasedir matches the directory inside archiso/ (default: arch)
+# archisolabel must match the one in profiledef.sh (ARCH_YYYYMM)
+# miso_http_url or similar is not standard archiso, it uses cow_spacesize etc.
+# But for http fetching of the squashfs, standard archiso usually wants correct ip=dhcp and maybe path?
+# Standard archiso via HTTP usually requires:
+# archiso_http_srv=http://${PXE_SERVER}/pxe/archiso/
+# This tells it where to look for 'arch/x86_64/airootfs.sfs'
+imgargs vmlinuz-linux initrd=initramfs-linux.img archisobasedir=arch archisolabel=\${arch_iso_label} archiso_http_srv=http://${PXE_SERVER}/pxe/archiso/ desktop=\${desktop_env} ip=dhcp cow_spacesize=4G copytoram=n
 boot || shell
 
+:arch-gnome
+set desktop_env gnome
+goto arch-common
+
+:arch-kde
+set desktop_env kde
+goto arch-common
+
+:arch-xfce
+set desktop_env xfce
+goto arch-common
+
+:arch-sway
+set desktop_env sway
+goto arch-common
+
+:arch-enlightenment
+set desktop_env enlightenment
+goto arch-common
 EOF
+fi
+
+# ==================== MANJARO (REMOVED) ====================
+# :manjaro-gnome ...
 
 # ============================================================================
 #                               ARM64 LABELS
