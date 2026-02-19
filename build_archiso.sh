@@ -119,7 +119,6 @@ vulkan-mesa-layers
 libva-intel-driver
 intel-media-driver
 libva-nvidia-driver
-nvidia-vaapi-driver
 xf86-video-amdgpu
 xf86-video-intel
 xf86-video-nouveau
