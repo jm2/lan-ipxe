@@ -47,6 +47,10 @@ cp -r /usr/share/archiso/configs/releng/* "$PROFILE_DIR/"
 echo "Adding custom packages..."
 cat >> "$PROFILE_DIR/packages.x86_64" <<EOF
 # Custom Packages
+haveged
+rng-tools
+polkit
+gnome-keyring
 7zip
 alsa-firmware
 sof-firmware
@@ -143,19 +147,64 @@ sed -i "s|airootfs_image_tool_options=('-comp' 'xz' '-Xbcj' 'x86' '-b' '1M' '-Xd
 
 # Add permissions for our custom scripts
 # Insert before the closing parenthesis of file_permissions
-sed -i '/^)/i \  ["/usr/local/bin/choose-desktop.sh"]="0:0:755"' "$PROFILE_DIR/profiledef.sh"
+sed -i '/^)/i \  ["/usr/local/bin/configure-desktop.sh"]="0:0:755"' "$PROFILE_DIR/profiledef.sh"
+sed -i '/^)/i \  ["/usr/lib/systemd/system-generators/archiso-desktop-generator"]="0:0:755"' "$PROFILE_DIR/profiledef.sh"
 
 # ==========================================
 # 3. Inject Custom Files
 # ==========================================
 echo "Injecting custom scripts and configs..."
 
-# --- choose-desktop.sh ---
-mkdir -p "$PROFILE_DIR/airootfs/usr/local/bin"
-cat > "$PROFILE_DIR/airootfs/usr/local/bin/choose-desktop.sh" <<'EOF'
-#!/bin/bash
+# --- archiso-desktop-generator ---
+mkdir -p "$PROFILE_DIR/airootfs/usr/lib/systemd/system-generators"
+cat > "$PROFILE_DIR/airootfs/usr/lib/systemd/system-generators/archiso-desktop-generator" <<'EOF'
+#!/bin/sh
+
+# Generator for desktop selection
+# Arguments: normal-dir early-dir late-dir
+NORMAL_DIR="$1"
 
 # Parse cmdline
+for arg in $(cat /proc/cmdline); do
+    case $arg in
+        desktop=*)
+            DESKTOP="${arg#*=}"
+            ;;
+    esac
+done
+
+# Default to gnome if not set
+if [ -z "$DESKTOP" ]; then
+   DESKTOP="gnome"
+fi
+
+# Determine service based on desktop
+case "$DESKTOP" in
+    gnome) DM="gdm" ;;
+    kde|plasma) DM="sddm" ;;
+    xfce) DM="lightdm" ;;
+    sway) DM="sddm" ;;
+    enlightenment) DM="sddm" ;;
+    *) DM="" ;;
+esac
+
+if [ -n "$DM" ]; then
+    # Create symlink to enable the display manager
+    mkdir -p "$NORMAL_DIR"
+    ln -sf "/usr/lib/systemd/system/$DM.service" "$NORMAL_DIR/display-manager.service"
+    
+    # Set default target to graphical
+    ln -sf "/usr/lib/systemd/system/graphical.target" "$NORMAL_DIR/default.target"
+fi
+EOF
+chmod +x "$PROFILE_DIR/airootfs/usr/lib/systemd/system-generators/archiso-desktop-generator"
+
+# --- configure-desktop.sh ---
+mkdir -p "$PROFILE_DIR/airootfs/usr/local/bin"
+cat > "$PROFILE_DIR/airootfs/usr/local/bin/configure-desktop.sh" <<'EOF'
+#!/bin/bash
+
+# Parse cmdline to get desktop choice for autologin config
 for arg in $(cat /proc/cmdline); do
     case $arg in
         desktop=*)
@@ -168,15 +217,6 @@ if [ -z "$DESKTOP" ]; then
     DESKTOP="gnome"
 fi
 
-echo "Selected Desktop: $DESKTOP"
-
-enable_dm() {
-    local dm=$1
-    echo "Enabling $dm..."
-    systemctl enable "$dm.service" --force
-    systemctl set-default graphical.target
-}
-
 configure_live_user() {
     if ! id "live" &>/dev/null; then
         useradd -m -G wheel -s /bin/bash live
@@ -188,6 +228,7 @@ configure_live_user() {
 
 configure_autologin() {
     local dm=$1
+    echo "Configuring autologin for $dm..."
     case $dm in
         gdm)
             mkdir -p /etc/gdm
@@ -222,41 +263,37 @@ CONF
 
 configure_live_user
 
+# Identify DM to configure autologin
 case "$DESKTOP" in
-    gnome) enable_dm gdm; configure_autologin gdm ;;
-    kde|plasma) enable_dm sddm; configure_autologin sddm ;;
-    xfce) enable_dm lightdm; configure_autologin lightdm ;;
-    sway) enable_dm sddm; configure_autologin sddm ;;
-    enlightenment) enable_dm sddm; configure_autologin sddm ;;
-    *) echo "Unknown desktop. Fallback to multi-user."; systemctl set-default multi-user.target ;;
+    gnome) configure_autologin gdm ;;
+    kde|plasma) configure_autologin sddm ;;
+    xfce) configure_autologin lightdm ;;
+    sway) configure_autologin sddm ;;
+    enlightenment) configure_autologin sddm ;;
 esac
-
-if [ "$DESKTOP" != "unknown" ]; then
-    systemctl isolate graphical.target
-fi
 EOF
-chmod +x "$PROFILE_DIR/airootfs/usr/local/bin/choose-desktop.sh"
+chmod +x "$PROFILE_DIR/airootfs/usr/local/bin/configure-desktop.sh"
 
-# --- choose-desktop.service ---
+# --- configure-desktop.service ---
 mkdir -p "$PROFILE_DIR/airootfs/etc/systemd/system"
-cat > "$PROFILE_DIR/airootfs/etc/systemd/system/choose-desktop.service" <<EOF
+cat > "$PROFILE_DIR/airootfs/etc/systemd/system/configure-desktop.service" <<EOF
 [Unit]
-Description=Choose Desktop Environment based on Kernel cmdline
+Description=Configure Desktop Autologin
 Before=display-manager.service
-After=systemd-user-sessions.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/choose-desktop.sh
+ExecStart=/usr/local/bin/configure-desktop.sh
 RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# Symlink service
+# Symlink service and haveged
 mkdir -p "$PROFILE_DIR/airootfs/etc/systemd/system/multi-user.target.wants"
-ln -sf ../choose-desktop.service "$PROFILE_DIR/airootfs/etc/systemd/system/multi-user.target.wants/choose-desktop.service"
+ln -sf ../configure-desktop.service "$PROFILE_DIR/airootfs/etc/systemd/system/multi-user.target.wants/configure-desktop.service"
+ln -sf /usr/lib/systemd/system/haveged.service "$PROFILE_DIR/airootfs/etc/systemd/system/multi-user.target.wants/haveged.service"
 
 # --- mkinitcpio.conf (Modules/Hooks) ---
 mkdir -p "$PROFILE_DIR/airootfs/etc/mkinitcpio.conf.d"
