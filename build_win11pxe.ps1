@@ -20,7 +20,7 @@ param(
     [string]$OutPath = ".\win11_netboot.vhdx",
 
     [Parameter(Mandatory = $false)]
-    [long]$SizeBytes = 64GB,
+    [long]$SizeBytes = 128GB,
 
     [Parameter(Mandatory = $false)]
     [int]$ImageIndex = 6 # Windows 11 Pro is typically index 6 on standard media
@@ -64,14 +64,14 @@ try {
     # Recommended UEFI partition layout
     Write-Host ">>> Creating EFI Partition..." -ForegroundColor Cyan
     $efiPartition = New-Partition -DiskNumber $diskNumber -Size 100MB -GptType "{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}" -AssignDriveLetter
-    $efiVolume = Format-Volume -Partition $efiPartition -FileSystem FAT32 -NewFileSystemLabel "System"
+    Format-Volume -Partition $efiPartition -FileSystem FAT32 -NewFileSystemLabel "System"
 
     Write-Host ">>> Creating MSR Partition..." -ForegroundColor Cyan
     New-Partition -DiskNumber $diskNumber -Size 16MB -GptType "{e3c9e316-0b5c-4db8-817d-f92df00215ae}" | Out-Null
 
     Write-Host ">>> Creating Windows Partition..." -ForegroundColor Cyan
     $winPartition = New-Partition -DiskNumber $diskNumber -UseMaximumSize -AssignDriveLetter
-    $winVolume = Format-Volume -Partition $winPartition -FileSystem NTFS -NewFileSystemLabel "Windows"
+    Format-Volume -Partition $winPartition -FileSystem NTFS -NewFileSystemLabel "Windows"
 
     $efiDrivePath = "$($efiPartition.DriveLetter):\"
     $winDrivePath = "$($winPartition.DriveLetter):\"
