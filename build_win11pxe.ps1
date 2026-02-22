@@ -97,31 +97,53 @@ try {
     $winDir = Join-Path $winDrivePath "Windows"
     & bcdboot "$winDir" /s "$efiDrivePath" /f UEFI
 
-    Write-Host ">>> Injecting iSCSI Boot Settings into Offline Registry..." -ForegroundColor Cyan
+    Write-Host ">>> Injecting iSCSI and Network Boot Settings..." -ForegroundColor Cyan
     # Load the offline SYSTEM registry hive directly from the applied image
     $sysHivePath = Join-Path $winDir "System32\config\SYSTEM"
     $tempHiveName = "VHDX_Temp_SYSTEM"
     
-    reg load "HKLM\$tempHiveName" "$sysHivePath"
+    reg load "HKLM\$tempHiveName" "$sysHivePath" | Out-Null
 
-    # Set MSiSCSI service to start at boot (Start = 0)
-    $scsiRegPath = "HKLM:\$tempHiveName\ControlSet001\Services\MSiSCSI"
-    if (Test-Path $scsiRegPath) {
-        Set-ItemProperty -Path $scsiRegPath -Name "Start" -Value 0 -Type DWord
-        Write-Host "Set MSiSCSI Start to 0"
-    }
-    else {
-        Write-Warning "Could not find MSiSCSI service in offline registry."
+    # 1. Core iSCSI and Network Stack Services (Universally Required)
+    $coreServices = @("MSiSCSI", "NDIS", "Tcpip", "netfs")
+    foreach ($service in $coreServices) {
+        $regPath = "HKLM:\$tempHiveName\ControlSet001\Services\$service"
+        if (Test-Path $regPath) {
+            Set-ItemProperty -Path $regPath -Name "Start" -Value 0 -Type DWord
+            Set-ItemProperty -Path $regPath -Name "BootFlags" -Value 1 -Type DWord
+            Write-Host "Promoted Core Stack: $service"
+        }
     }
 
-    # Force NDIS to start at boot
-    $ndisRegPath = "HKLM:\$tempHiveName\ControlSet001\Services\NDIS"
-    if (Test-Path $ndisRegPath) {
-        Set-ItemProperty -Path $ndisRegPath -Name "Start" -Value 0 -Type DWord
-        Write-Host "Set NDIS Start to 0"
-    }
-    else {
-        Write-Warning "Could not find NDIS service in offline registry."
+    # 2. Targeted Enterprise & Prosumer NIC Drivers
+    $nicDrivers = @(
+        # --- 2.5GbE, 5GbE, & 10GbE Prosumer/Workstation ---
+        "e2fexpress",             # Intel 2.5GbE (I225-V / I226-V)
+        "rt640x64",               # Realtek PCIe 1G/2.5G/5G/10G (RTL8125, RTL8126, RTL8127)
+        "rtump64x64", "rtux64w10",# Realtek USB 2.5G/5G/10G (RTL8156, RTL8157, RTL8159)
+        "rtnetcx",                # Realtek NetAdapterCx (Next-Gen Windows 11 Driver)
+        "aqnic650", "aqnic",      # Marvell/Aquantia 2.5/5/10GbE (AQC107 / AQC113)
+        
+        # --- 10/40/100GbE Enterprise ---
+        "mlx5", "mlx4eth",        # Mellanox ConnectX-3, 4, 5, 6
+        "ixgbe", "ixgben", "ixv", # Intel 10GbE (82599/X540)
+        "i40ea", "i40eb",         # Intel 10/40GbE (X710/XL710)
+        "ice",                    # Intel 100GbE (E810 series)
+        "qfle3", "qevb", "bxvbd", # QLogic/Broadcom NetXtreme and FastLinQ
+        "cxgb4",                  # Chelsio 10/40GbE
+
+        # --- Standard 1GbE Fallbacks ---
+        "e1dexpress",             # Intel 1GbE (I219-V / I211-AT)
+        "e1r68x64"                # Intel 1GbE (I210)
+    )
+
+    foreach ($driver in $nicDrivers) {
+        $regPath = "HKLM:\$tempHiveName\ControlSet001\Services\$driver"
+        if (Test-Path $regPath) {
+            Set-ItemProperty -Path $regPath -Name "Start" -Value 0 -Type DWord
+            Set-ItemProperty -Path $regPath -Name "BootFlags" -Value 1 -Type DWord
+            Write-Host "Promoted NIC Driver: $driver"
+        }
     }
 
     # Optional: Enable TCPIP wait for network
