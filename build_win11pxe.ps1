@@ -130,10 +130,95 @@ try {
         Set-ItemProperty -Path $tcpipRegPath -Name "PollBootPartitionTimeout" -Value 30000 -Type DWord
     }
 
+    # Disable BitLocker automatic device encryption
+    $bitLockerRegPath = "HKLM:\$tempHiveName\ControlSet001\Control\BitLocker"
+    if (-not (Test-Path $bitLockerRegPath)) { New-Item -Path $bitLockerRegPath -Force | Out-Null }
+    Set-ItemProperty -Path $bitLockerRegPath -Name "PreventDeviceEncryption" -Value 1 -Type DWord
+    Write-Host "Disabled BitLocker automatic device encryption"
+
+    # Bypass TPM/SecureBoot/RAM checks (LabConfig)
+    $labConfigPath = "HKLM:\$tempHiveName\Setup\LabConfig"
+    if (-not (Test-Path $labConfigPath)) { New-Item -Path $labConfigPath -Force | Out-Null }
+    Set-ItemProperty -Path $labConfigPath -Name "BypassTPMCheck" -Value 1 -Type DWord
+    Set-ItemProperty -Path $labConfigPath -Name "BypassSecureBootCheck" -Value 1 -Type DWord
+    Set-ItemProperty -Path $labConfigPath -Name "BypassRAMCheck" -Value 1 -Type DWord
+    Set-ItemProperty -Path $labConfigPath -Name "BypassStorageCheck" -Value 1 -Type DWord
+    Write-Host "Injected LabConfig bypasses for TPM/RAM/SecureBoot"
+
     # Ensure registry finishes writing
     [gc]::collect()
     Start-Sleep -Seconds 2
     reg unload "HKLM\$tempHiveName"
+
+    Write-Host ">>> Injecting OOBE Settings into Offline SOFTWARE Registry..." -ForegroundColor Cyan
+    $softHivePath = Join-Path $winDir "System32\config\SOFTWARE"
+    $tempSoftName = "VHDX_Temp_SOFTWARE"
+    reg load "HKLM\$tempSoftName" "$softHivePath"
+
+    # Remove requirement for an online Microsoft account (BypassNRO)
+    $oobeRegPath = "HKLM:\$tempSoftName\Microsoft\Windows\CurrentVersion\OOBE"
+    if (-not (Test-Path $oobeRegPath)) { New-Item -Path $oobeRegPath -Force | Out-Null }
+    Set-ItemProperty -Path $oobeRegPath -Name "BypassNRO" -Value 1 -Type DWord
+    Write-Host "Injected BypassNRO (Skip Microsoft Account)"
+
+    [gc]::collect()
+    Start-Sleep -Seconds 2
+    reg unload "HKLM\$tempSoftName"
+
+    Write-Host ">>> Creating unattend.xml for User Experience (Local Account, Privacy, Region)..." -ForegroundColor Cyan
+    $currentCulture = (Get-Culture).Name
+    $unattendXml = @"
+<?xml version="1.0" encoding="utf-8"?>
+<unattend xmlns="urn:schemas-microsoft-com:unattend">
+    <settings pass="oobeSystem">
+        <component name="Microsoft-Windows-International-Core" processorArchitecture="amd64" language="neutral" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" publicKeyToken="31bf3856ad364e35" versionScope="nonSxS">
+            <InputLocale>$currentCulture</InputLocale>
+            <SystemLocale>$currentCulture</SystemLocale>
+            <UILanguage>$currentCulture</UILanguage>
+            <UILanguageFallback>en-US</UILanguageFallback>
+            <UserLocale>$currentCulture</UserLocale>
+        </component>
+        <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" language="neutral" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" publicKeyToken="31bf3856ad364e35" versionScope="nonSxS">
+            <OOBE>
+                <HideEULAPage>true</HideEULAPage>
+                <HideLocalAccountScreen>true</HideLocalAccountScreen>
+                <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+                <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+                <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+                <NetworkLocation>Home</NetworkLocation>
+                <ProtectYourPC>3</ProtectYourPC>
+            </OOBE>
+            <UserAccounts>
+                <LocalAccounts>
+                    <LocalAccount wcm:action="add">
+                        <Password>
+                            <Value></Value>
+                            <PlainText>true</PlainText>
+                        </Password>
+                        <Description>Local Admin</Description>
+                        <DisplayName>lan</DisplayName>
+                        <Group>Administrators</Group>
+                        <Name>lan</Name>
+                    </LocalAccount>
+                </LocalAccounts>
+            </UserAccounts>
+            <AutoLogon>
+                <Password>
+                    <Value></Value>
+                    <PlainText>true</PlainText>
+                </Password>
+                <Enabled>true</Enabled>
+                <LogonCount>9999999</LogonCount>
+                <Username>lan</Username>
+            </AutoLogon>
+        </component>
+    </settings>
+</unattend>
+"@
+    $pantherPath = Join-Path $winDir "Panther"
+    if (-not (Test-Path $pantherPath)) { New-Item -ItemType Directory -Path $pantherPath -Force | Out-Null }
+    Out-File -FilePath "$pantherPath\unattend.xml" -InputObject $unattendXml -Encoding UTF8
+    Write-Host "Saved unattend.xml to bypass privacy questions, set region info ($currentCulture), and configure default account: lan"
 
     Write-Host ">>> Injecting SetupComplete.cmd for Network Power Management..." -ForegroundColor Cyan
     $setupScriptsPath = Join-Path $winDir "Setup\Scripts"
