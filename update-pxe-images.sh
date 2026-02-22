@@ -387,14 +387,11 @@ EOF
 fi
 
 if [ "$ENABLE_WIN11_PXE" = "true" ]; then
-    # Ensure the directory exists as requested by the user for artifacts hosting
-    mkdir -p "$PXE_HTTP_DIR/win11"
-    
     cat >> "$IPXE_FILE" <<EOF
 :win11-pxe
 echo Booting Windows 11 from Network...
-# Artifacts are hosted in /srv/http/pxe/win11, but boot occurs via iSCSI
-# Modify the IQN below to match your iSCSI target setup on the PXE server
+set keep-san 1
+set initiator-iqn iqn.2026-02.lan.pxe:client
 sanboot iscsi://\${PXE_SERVER}::::iqn.2026-02.lan.pxe:win11 || goto shell
 EOF
 fi

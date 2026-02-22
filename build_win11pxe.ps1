@@ -114,6 +114,16 @@ try {
         Write-Warning "Could not find MSiSCSI service in offline registry."
     }
 
+    # Force NDIS to start at boot
+    $ndisRegPath = "HKLM:\$tempHiveName\ControlSet001\Services\NDIS"
+    if (Test-Path $ndisRegPath) {
+        Set-ItemProperty -Path $ndisRegPath -Name "Start" -Value 0 -Type DWord
+        Write-Host "Set NDIS Start to 0"
+    }
+    else {
+        Write-Warning "Could not find NDIS service in offline registry."
+    }
+
     # Optional: Enable TCPIP wait for network
     $tcpipRegPath = "HKLM:\$tempHiveName\ControlSet001\Services\Tcpip\Parameters"
     if (Test-Path $tcpipRegPath) {
@@ -124,6 +134,19 @@ try {
     [gc]::collect()
     Start-Sleep -Seconds 2
     reg unload "HKLM\$tempHiveName"
+
+    Write-Host ">>> Injecting SetupComplete.cmd for Network Power Management..." -ForegroundColor Cyan
+    $setupScriptsPath = Join-Path $winDir "Setup\Scripts"
+    if (-not (Test-Path $setupScriptsPath)) {
+        New-Item -ItemType Directory -Path $setupScriptsPath -Force | Out-Null
+    }
+    $setupCompletePath = Join-Path $setupScriptsPath "SetupComplete.cmd"
+    $cmdContent = '@echo off
+schtasks /create /f /ru SYSTEM /sc onstart /tn "DisableNetPower" /tr "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -Command ''Get-NetAdapter | Set-NetAdapterPowerManagement -AllowComputerToTurnOffDevice $false''"
+powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -Command "Get-NetAdapter | Set-NetAdapterPowerManagement -AllowComputerToTurnOffDevice $false"
+del "%~f0"
+'
+    Set-Content -Path $setupCompletePath -Value $cmdContent -Encoding Ascii
 
     Write-Host ">>> Done! Unmounting images..." -ForegroundColor Cyan
     $success = $true
