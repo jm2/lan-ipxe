@@ -37,7 +37,7 @@ fi
 # Ensure HTTP dir exists (for bg.png)
 mkdir -p "$PXE_HTTP_DIR"
 
-IPXE_FILE="$TFTP_DIR/default.ipxe"
+IPXE_FILE="$TFTP_DIR/autoexec.ipxe"
 
 echo "========================================"
 echo " PXE Update & Generator Script"
@@ -392,7 +392,7 @@ if [ "$ENABLE_WIN11_PXE" = "true" ]; then
 echo Booting Windows 11 from Network...
 set keep-san 1
 set initiator-iqn iqn.2026-02.lan.pxe:client
-sanboot iscsi://\${PXE_SERVER}::::iqn.2026-02.lan.pxe:win11 || goto shell
+sanboot iscsi:${PXE_SERVER%%:*}::::iqn.2026-02.lan.pxe:win11 || goto shell
 EOF
 fi
 
