@@ -11,6 +11,7 @@ TFTP_DIR="/srv/tftp"
 ENABLE_LOCAL_ARCH="false"        # Set to "true" to copy local Arch Kernel/Initrd
 ENABLE_TFTP_BOOTSTRAP="false"    # Set to "true" to download iPXE binaries to TFTP_DIR
 ENABLE_CUSTOM_ARCHISO="false"    # Set to "true" to enable Custom Archiso Menu
+ENABLE_WIN11_PXE="false"         # Set to "true" to enable Windows 11 iSCSI Boot
 
 PURDUE_MIRROR="https://plug-mirror.rcac.purdue.edu"
 FEDORA_MIRROR_BASE="https://plug-mirror.rcac.purdue.edu/fedora/fedora/linux/releases"
@@ -322,6 +323,10 @@ if [ "$ENABLE_LOCAL_ARCH" = "true" ]; then
     echo "item lan-image            Arch Linux LAN Gaming Image (Local)" >> "$IPXE_FILE"
 fi
 
+if [ "$ENABLE_WIN11_PXE" = "true" ]; then
+    echo "item win11-pxe            Windows 11 (iSCSI Boot)" >> "$IPXE_FILE"
+fi
+
 cat >> "$IPXE_FILE" <<EOF
 item --gap --             ------------------------- Debian Live ------------------------
 item debian-gnome         Debian ${DEBIAN_VER_X86} (GNOME)
@@ -378,6 +383,19 @@ if [ "$ENABLE_LOCAL_ARCH" = "true" ]; then
 initrd http://${PXE_SERVER}/pxe/initramfs-linux.img
 kernel http://${PXE_SERVER}/pxe/vmlinuz-linux ro initrd=initramfs-linux.img ip=dhcp BOOTIF=01-\${mac:hexhyp} nbd_host=${PXE_SERVER%%:*} nbd_name=arch root=/dev/nbd0
 boot || shell
+EOF
+fi
+
+if [ "$ENABLE_WIN11_PXE" = "true" ]; then
+    # Ensure the directory exists as requested by the user for artifacts hosting
+    mkdir -p "$PXE_HTTP_DIR/win11"
+    
+    cat >> "$IPXE_FILE" <<EOF
+:win11-pxe
+echo Booting Windows 11 from Network...
+# Artifacts are hosted in /srv/http/pxe/win11, but boot occurs via iSCSI
+# Modify the IQN below to match your iSCSI target setup on the PXE server
+sanboot iscsi://\${PXE_SERVER}::::iqn.2026-02.lan.pxe:win11 || goto shell
 EOF
 fi
 
