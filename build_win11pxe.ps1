@@ -40,6 +40,11 @@ if (-not (Test-Path -Path $IsoPath)) {
 $ErrorActionPreference = "Stop"
 
 try {
+    $success = $false
+    # Convert paths to absolute to prevent issues with Mount-DiskImage
+    $IsoPath = Convert-Path $IsoPath
+    $OutPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutPath)
+
     Write-Host ">>> Creating VHDX at $OutPath ($($SizeBytes / 1GB) GB)..." -ForegroundColor Cyan
     if (Test-Path $OutPath) {
         Write-Host "Removing existing file..."
@@ -58,18 +63,18 @@ try {
 
     # Recommended UEFI partition layout
     Write-Host ">>> Creating EFI Partition..." -ForegroundColor Cyan
-    $efiPartition = New-Partition -DiskNumber $diskNumber -Size 100MB -GptType "{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}"
+    $efiPartition = New-Partition -DiskNumber $diskNumber -Size 100MB -GptType "{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}" -AssignDriveLetter
     $efiVolume = Format-Volume -Partition $efiPartition -FileSystem FAT32 -NewFileSystemLabel "System"
 
     Write-Host ">>> Creating MSR Partition..." -ForegroundColor Cyan
     New-Partition -DiskNumber $diskNumber -Size 16MB -GptType "{e3c9e316-0b5c-4db8-817d-f92df00215ae}" | Out-Null
 
     Write-Host ">>> Creating Windows Partition..." -ForegroundColor Cyan
-    $winPartition = New-Partition -DiskNumber $diskNumber -UseMaximumSize
+    $winPartition = New-Partition -DiskNumber $diskNumber -UseMaximumSize -AssignDriveLetter
     $winVolume = Format-Volume -Partition $winPartition -FileSystem NTFS -NewFileSystemLabel "Windows"
 
-    $efiDrivePath = "\\?\Volume{$($efiVolume.ObjectId.Split('{}')[1])}\"
-    $winDrivePath = "\\?\Volume{$($winVolume.ObjectId.Split('{}')[1])}\"
+    $efiDrivePath = "$($efiPartition.DriveLetter):\"
+    $winDrivePath = "$($winPartition.DriveLetter):\"
 
     Write-Host ">>> Mounting ISO ($IsoPath)..." -ForegroundColor Cyan
     $isoImage = Mount-DiskImage -ImagePath $IsoPath -PassThru
@@ -121,6 +126,7 @@ try {
     reg unload "HKLM\$tempHiveName"
 
     Write-Host ">>> Done! Unmounting images..." -ForegroundColor Cyan
+    $success = $true
 }
 catch {
     Write-Error $_.Exception.Message
@@ -135,9 +141,16 @@ finally {
     }
 }
 
-Write-Host "==========================================================" -ForegroundColor Green
-Write-Host " VHDX Creation Complete: $OutPath" -ForegroundColor Green
-Write-Host " Place this file in your iSCSI Target directory, or in"
-Write-Host " /srv/http/pxe/win11/ as backstore and configure"
-Write-Host " update-pxe-images.sh appropriately."
-Write-Host "==========================================================" -ForegroundColor Green
+if ($success) {
+    Write-Host "==========================================================" -ForegroundColor Green
+    Write-Host " VHDX Creation Complete: $OutPath" -ForegroundColor Green
+    Write-Host " Place this file in your iSCSI Target directory, or in"
+    Write-Host " /srv/http/pxe/win11/ as backstore and configure"
+    Write-Host " update-pxe-images.sh appropriately."
+    Write-Host "==========================================================" -ForegroundColor Green
+}
+else {
+    Write-Host "==========================================================" -ForegroundColor Red
+    Write-Host " VHDX Creation Failed!" -ForegroundColor Red
+    Write-Host "==========================================================" -ForegroundColor Red
+}
