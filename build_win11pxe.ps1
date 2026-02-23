@@ -97,6 +97,12 @@ try {
     $winDir = Join-Path $winDrivePath "Windows"
     & bcdboot "$winDir" /s "$efiDrivePath" /f UEFI
 
+    Write-Host ">>> Enabling Verbose SOS Mode and Boot Logging..." -ForegroundColor Cyan
+    $bcdStore = Join-Path $efiDrivePath "EFI\Microsoft\Boot\BCD"
+    & bcdedit /store "$bcdStore" /set '{default}' sos on
+    & bcdedit /store "$bcdStore" /set '{default}' bootlog yes
+    & bcdedit /store "$bcdStore" /set '{default}' recoveryenabled no
+
     Write-Host ">>> Injecting iSCSI and Network Boot Settings..." -ForegroundColor Cyan
     # Load the offline SYSTEM registry hive directly from the applied image
     $sysHivePath = Join-Path $winDir "System32\config\SYSTEM"
