@@ -61,6 +61,9 @@ try {
     Write-Host ">>> Initializing Disk $diskNumber (GPT)..." -ForegroundColor Cyan
     Initialize-Disk -Number $diskNumber -PartitionStyle GPT
 
+    # Wipe any auto-generated partitions (like the default MSR) to start clean
+    Get-Partition -DiskNumber $diskNumber | Remove-Partition -Confirm:$false
+
     # Recommended UEFI partition layout
     Write-Host ">>> Creating EFI Partition..." -ForegroundColor Cyan
     $efiPartition = New-Partition -DiskNumber $diskNumber -Size 100MB -GptType "{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}" -AssignDriveLetter
@@ -101,6 +104,8 @@ try {
     $bcdStore = Join-Path $efiDrivePath "EFI\Microsoft\Boot\BCD"
     & bcdedit /store "$bcdStore" /set '{default}' sos on
     & bcdedit /store "$bcdStore" /set '{default}' bootlog yes
+    & bcdedit /store "$bcdStore" /set '{default}' quietboot off
+    & bcdedit /store "$bcdStore" /set '{default}' noguiboot yes
     & bcdedit /store "$bcdStore" /set '{default}' recoveryenabled no
 
     Write-Host ">>> Injecting iSCSI and Network Boot Settings..." -ForegroundColor Cyan
