@@ -67,7 +67,8 @@ echo "============================================================"
 echo "[*] Scanning for Mellanox PCIe devices..."
 
 # Find Mellanox PCI devices (Domain:Bus:Device.Function format)
-DEVICES=$(lspci -D | grep -i "mellanox" | awk '{print $1}')
+# We use awk to filter by Domain:Bus:Device so multi-port cards appear as a single entry
+DEVICES=$(lspci -D | grep -i "mellanox" | awk '{print $1}' | awk -F'.' '!seen[$1]++')
 
 if [ -z "$DEVICES" ]; then
     echo "[-] No Mellanox NICs found on this system."
@@ -91,17 +92,19 @@ for dev in $DEVICES; do
         HW_FAMILY="Unknown (Sysfs error)"
     fi
     
-    # Query the device using mstflint
-    QUERY_OUTPUT=$(mstflint -d "$dev" query 2>/dev/null)
+    # Query the device using mstflint (use 'query full' to reliably capture Part Number)
+    QUERY_OUTPUT=$(mstflint -d "$dev" query full 2>/dev/null)
     
     if [ $? -eq 0 ]; then
-        PN=$(echo "$QUERY_OUTPUT" | grep -E "Part Number:" | awk '{print $3}')
+        # PN might have extra spaces or be on the same line as the label, use sed to strip the label and retain the rest
+        PN=$(echo "$QUERY_OUTPUT" | grep -iE "Part Number:" | sed 's/^[ \t]*Part Number:[ \t]*//')
         PSID=$(echo "$QUERY_OUTPUT" | grep -E "PSID:" | awk '{print $2}')
         FW=$(echo "$QUERY_OUTPUT" | grep -E "FW Version:" | awk '{print $3}')
         OEM=$(get_oem_from_psid "$PSID")
         
         DEV_PN[$i]=$PN
         DEV_PSID[$i]=$PSID
+        DEV_FW[$i]=$FW
         DEV_ARRAY[$i]=$dev
         
         echo "    Hardware:      $HW_FAMILY"
@@ -139,9 +142,27 @@ fi
 TARGET_DEV="${DEV_ARRAY[$CHOICE]}"
 TARGET_PN="${DEV_PN[$CHOICE]}"
 TARGET_PSID="${DEV_PSID[$CHOICE]}"
+TARGET_FW="${DEV_FW[$CHOICE]}"
 TARGET_DEV_ID=$(cat "/sys/bus/pci/devices/$TARGET_DEV/device" | sed 's/0x//')
 TARGET_FAMILY=$(get_mlx_family "$TARGET_DEV_ID")
 TARGET_OEM=$(get_oem_from_psid "$TARGET_PSID")
+
+get_fw_url() {
+    case "${1}" in
+        "ConnectX-3"|"ConnectX-3 Pro") echo "https://network.nvidia.com/support/firmware/connectx3pro/" ;;
+        "ConnectX-4") echo "https://network.nvidia.com/support/firmware/connectx4/" ;;
+        "ConnectX-4 Lx") echo "https://network.nvidia.com/support/firmware/connectx4lx/" ;;
+        "ConnectX-5") echo "https://network.nvidia.com/support/firmware/connectx5/" ;;
+        "ConnectX-5 Ex") echo "https://network.nvidia.com/support/firmware/connectx5en/" ;;
+        "ConnectX-6") echo "https://network.nvidia.com/support/firmware/connectx6/" ;;
+        "ConnectX-6 Dx") echo "https://network.nvidia.com/support/firmware/connectx6dx/" ;;
+        "ConnectX-6 Lx") echo "https://network.nvidia.com/support/firmware/connectx6lx/" ;;
+        "ConnectX-7") echo "https://network.nvidia.com/support/firmware/connectx7/" ;;
+        *) echo "https://network.nvidia.com/support/firmware/firmware-downloads/" ;;
+    esac
+}
+
+NVIDIA_URL=$(get_fw_url "$TARGET_FAMILY")
 
 echo ""
 echo "============================================================"
@@ -154,29 +175,59 @@ echo "CRITICAL: The new firmware MUST match the $TARGET_FAMILY hardware architec
 echo ""
 echo "1. Go to the KCORES Reference List to find the Mellanox equivalent Part Number:"
 echo "   --> https://github.com/KCORES/100g.kcores.com/blob/main/DOCUMENTS/Mellanox(NVIDIA)-nic-list-en.md"
-echo "2. Download the archive for the mapped KCORES Part Number:"
-echo "   --> https://network.nvidia.com/support/firmware/firmware-downloads/"
+echo "2. Download the archive from NVIDIA for $TARGET_FAMILY:"
+echo "   --> $NVIDIA_URL"
 echo "3. Extract the downloaded .zip archive to locate the .bin file."
 echo "============================================================"
 echo ""
 
-read -p "Do you have the path to your new firmware .bin file ready? (y/n/skip to uefi): " HAS_FILE
-if [[ "$HAS_FILE" == "skip" || "$HAS_FILE" == "s" ]]; then
+read -p "Paste the direct URL to the firmware .zip file (or type 'skip' to go to UEFI): " FW_URL
+if [[ "$FW_URL" == "skip" || "$FW_URL" == "s" ]]; then
     echo "[*] Skipping firmware flash..."
-elif [[ "$HAS_FILE" == "y" || "$HAS_FILE" == "Y" ]]; then
+elif [[ "$FW_URL" =~ ^https?:// ]]; then
 
-    read -p "Enter the full path to the firmware .bin file: " BIN_PATH
-
-    if [ ! -f "$BIN_PATH" ]; then
-        echo "[-] Error: File not found at $BIN_PATH"
+    # Create a temporary working directory
+    TMP_DIR=$(mktemp -d -t mlnx_fw_XXXXXX)
+    echo "[*] Created temporary working directory: $TMP_DIR"
+    
+    ZIP_PATH="$TMP_DIR/firmware.zip"
+    echo "[*] Downloading firmware archive from NVIDIA..."
+    
+    # Download the file, following redirects (-L) and showing a progress bar (-#)
+    curl -L -# -o "$ZIP_PATH" "$FW_URL"
+    
+    if [ ! -f "$ZIP_PATH" ]; then
+        echo "[-] Error: Failed to download firmware archive from $FW_URL"
+        rm -rf "$TMP_DIR"
         exit 1
     fi
+    
+    echo "[*] Extracting firmware archive..."
+    unzip -q "$ZIP_PATH" -d "$TMP_DIR"
+    
+    if [ $? -ne 0 ]; then
+        echo "[-] Error: Failed to extract $ZIP_PATH. Is it a valid zip file?"
+        rm -rf "$TMP_DIR"
+        exit 1
+    fi
+    
+    # Find the .bin file inside the extracted directory
+    BIN_PATH=$(find "$TMP_DIR" -type f -name "*.bin" | head -n 1)
+    
+    if [ -z "$BIN_PATH" ]; then
+        echo "[-] Error: No .bin file found inside the downloaded archive."
+        rm -rf "$TMP_DIR"
+        exit 1
+    fi
+    
+    echo "[+] Found firmware image: $(basename "$BIN_PATH")"
 
     echo "[*] Validating firmware image..."
-    IMAGE_QUERY=$(mstflint -i "$BIN_PATH" query 2>/dev/null)
+    IMAGE_QUERY=$(mstflint -i "$BIN_PATH" query full 2>/dev/null)
 
     if [ $? -ne 0 ]; then
         echo "[-] Error: $BIN_PATH is not a valid Mellanox firmware image, or cannot be read."
+        rm -rf "$TMP_DIR"
         exit 1
     fi
 
@@ -185,6 +236,7 @@ elif [[ "$HAS_FILE" == "y" || "$HAS_FILE" == "Y" ]]; then
 
     if [ -z "$IMAGE_PSID" ]; then
         echo "[-] Error: Could not extract PSID from the provided image. Aborting."
+        rm -rf "$TMP_DIR"
         exit 1
     fi
 
@@ -196,53 +248,64 @@ elif [[ "$HAS_FILE" == "y" || "$HAS_FILE" == "Y" ]]; then
     echo "Current OEM:        $TARGET_OEM"
     echo "Current PSID:       $TARGET_PSID"
     echo "Image PSID:         $IMAGE_PSID"
+    echo "Current FW Version: $TARGET_FW"
     echo "Image FW Version:   $IMAGE_FW"
     echo "============================================================"
 
-    # Determine if we are cross-flashing or doing a standard update
-    FLASH_CMD="mstflint -d \"$TARGET_DEV\" -i \"$BIN_PATH\""
-    IS_CROSSFLASH=0
-
-    if [[ "$TARGET_PSID" == "$IMAGE_PSID" ]]; then
-        echo "[+] Standard Update Detected (PSIDs match)."
-        FLASH_CMD="$FLASH_CMD burn"
+    if [[ "$TARGET_FW" == "$IMAGE_FW" ]]; then
+        echo ""
+        echo "[+] The current firmware version ($TARGET_FW) matches the image."
+        echo "    Skipping flash operation."
     else
-        echo "[!] CROSS-FLASH DETECTED (PSID mismatch)."
-        echo "    The script forces -allow_psid_change and -allow_rom_change."
-        echo "    WARNING: If this image is not meant for a $TARGET_FAMILY architecture, "
-        echo "    it WILL brick the network card!"
-        FLASH_CMD="$FLASH_CMD -allow_psid_change -allow_rom_change burn"
-        IS_CROSSFLASH=1
-    fi
+        # Determine if we are cross-flashing or doing a standard update
+        FLASH_CMD="mstflint -d \"$TARGET_DEV\" -i \"$BIN_PATH\""
+        IS_CROSSFLASH=0
 
-    echo ""
-    read -p "Are you ABSOLUTELY sure you want to proceed? Type 'YES' in all caps to burn: " CONFIRM
+        if [[ "$TARGET_PSID" == "$IMAGE_PSID" ]]; then
+            echo "[+] Standard Update Detected (PSIDs match)."
+            FLASH_CMD="$FLASH_CMD burn"
+        else
+            echo "[!] CROSS-FLASH DETECTED (PSID mismatch)."
+            echo "    The script forces -allow_psid_change and -allow_rom_change."
+            echo "    WARNING: If this image is not meant for a $TARGET_FAMILY architecture, "
+            echo "    it WILL brick the network card!"
+            FLASH_CMD="$FLASH_CMD -allow_psid_change -allow_rom_change burn"
+            IS_CROSSFLASH=1
+        fi
 
-    if [[ "$CONFIRM" == "YES" ]]; then
-        echo "[*] Initiating firmware burn..."
-        
-        # Eval is used here to parse the constructed string properly
-        eval $FLASH_CMD
-        
-        if [ $? -eq 0 ]; then
-            echo "[+] Flash successful!"
+        echo ""
+        read -p "Are you ABSOLUTELY sure you want to proceed? Type 'YES' in all caps to burn: " CONFIRM
+
+        if [[ "$CONFIRM" == "YES" ]]; then
+            echo "[*] Initiating firmware burn..."
             
-            # Further automation: Prompt to reset device immediately
-            read -p "Would you like to reset the NIC firmware now (avoids system reboot)? (y/n): " DO_RESET
-            if [[ "$DO_RESET" == "y" || "$DO_RESET" == "Y" ]]; then
-                echo "[*] Resetting firmware on $TARGET_DEV..."
-                mstfwreset -d "$TARGET_DEV" -y reset
+            # Eval is used here to parse the constructed string properly
+            eval $FLASH_CMD
+            
+            if [ $? -eq 0 ]; then
+                echo "[+] Flash successful!"
+                
+                # Further automation: Prompt to reset device immediately
+                read -p "Would you like to reset the NIC firmware now (avoids system reboot)? (y/n): " DO_RESET
+                if [[ "$DO_RESET" == "y" || "$DO_RESET" == "Y" ]]; then
+                    echo "[*] Resetting firmware on $TARGET_DEV..."
+                    mstfwreset -d "$TARGET_DEV" -y reset
+                fi
+            else
+                echo "[-] Flash failed. Check the error output above."
+                rm -rf "$TMP_DIR"
+                exit 1
             fi
         else
-            echo "[-] Flash failed. Check the error output above."
-            exit 1
+            echo "Flash operation aborted by user."
         fi
-    else
-        echo "Flash operation aborted by user."
     fi
+    
+    echo "[*] Cleaning up temporary files..."
+    rm -rf "$TMP_DIR"
 else
-    echo "Exiting."
-    exit 0
+    echo "[-] Invalid URL. Exiting."
+    exit 1
 fi
 
 echo ""
