@@ -6,7 +6,12 @@ set -e
 # ==========================================
 BASE_DIR="$(dirname "$(realpath "$0")")"
 PROFILE_DIR="$BASE_DIR/custom_archiso"
-WORK_DIR="/var/tmp/archiso-work"
+
+if [ -w "/media/r0/tmp" ]; then
+    WORK_DIR="/media/r0/tmp/archiso-work"
+else
+    WORK_DIR="/var/tmp/archiso-work"
+fi
 
 # Output Directory Logic
 if [ -w "/srv/http/pxe" ]; then
