@@ -37,7 +37,7 @@ fi
 # Ensure HTTP dir exists (for bg.png)
 mkdir -p "$PXE_HTTP_DIR"
 
-IPXE_FILE="$TFTP_DIR/autoexec.ipxe"
+IPXE_FILE="$TFTP_DIR/default.ipxe"
 
 echo "========================================"
 echo " PXE Update & Generator Script"
@@ -381,7 +381,7 @@ if [ "$ENABLE_LOCAL_ARCH" = "true" ]; then
     cat >> "$IPXE_FILE" <<EOF
 :lan-image
 initrd http://${PXE_SERVER}/pxe/initramfs-linux.img
-kernel http://${PXE_SERVER}/pxe/vmlinuz-linux ro initrd=initramfs-linux.img ip=dhcp BOOTIF=01-\${mac:hexhyp} nbd_host=${PXE_SERVER%%:*} nbd_name=arch root=/dev/nbd0
+kernel http://${PXE_SERVER}/pxe/vmlinuz-linux ro initrd=initramfs-linux.img ip=:::::eth0:dhcp BOOTIF=01-\${mac:hexhyp} nbd_host=${PXE_SERVER%%:*} nbd_name=arch root=/dev/nbd0
 boot || shell
 EOF
 fi
