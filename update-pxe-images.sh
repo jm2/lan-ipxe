@@ -186,14 +186,29 @@ fi
 # 2. Local Arch Kernel (Optional)
 # ==========================================
 if [ "$ENABLE_LOCAL_ARCH" = "true" ]; then
-    echo "Updating Local Arch Linux files..."
-    if [ -f /boot/vmlinuz-linux ]; then
-        cp -f /boot/vmlinuz-linux "$PXE_HTTP_DIR/vmlinuz-linux"
-        cp -f /boot/initramfs-linux.img "$PXE_HTTP_DIR/initramfs-linux.img"
-        chmod 644 "$PXE_HTTP_DIR/vmlinuz-linux" "$PXE_HTTP_DIR/initramfs-linux.img"
-        echo "  Copied from /boot."
+    echo "Updating Local Arch Linux files from /srv/arch..."
+    
+    # Mount if not already mounted
+    if ! mountpoint -q /srv/arch; then
+        mount /srv/arch || { echo "  [ERROR] Failed to mount /srv/arch"; exit 1; }
+        MOUNTED_ARCH="true"
     else
-        echo "  [WARNING] /boot/vmlinuz-linux not found."
+        MOUNTED_ARCH="false"
+    fi
+
+    # Check for vmlinuz in /srv/arch/boot or /srv/arch depending on partition layout
+    if [ -f /srv/arch/boot/vmlinuz-linux ]; then
+        cp -f /srv/arch/boot/vmlinuz-linux "$PXE_HTTP_DIR/vmlinuz-linux"
+        cp -f /srv/arch/boot/initramfs-linux.img "$PXE_HTTP_DIR/initramfs-linux.img"
+        chmod 644 "$PXE_HTTP_DIR/vmlinuz-linux" "$PXE_HTTP_DIR/initramfs-linux.img"
+        echo "  Copied from /srv/arch/boot."
+    else
+        echo "  [WARNING] vmlinuz-linux not found in /srv/arch/boot."
+    fi
+
+    # Unmount if we mounted it
+    if [ "$MOUNTED_ARCH" = "true" ]; then
+        umount /srv/arch || echo "  [WARNING] Failed to unmount /srv/arch"
     fi
 else
     echo "Skipping Local Arch Copy (Not enabled)."
