@@ -49,7 +49,7 @@ get_oem_from_psid() {
     if [[ "$psid" == MT_* ]]; then echo "Mellanox / NVIDIA (Standard)"
     elif [[ "$psid" == DEL* ]]; then echo "Dell OEM"
     elif [[ "$psid" == HP_* || "$psid" == HPE* ]]; then echo "HPE OEM"
-    elif [[ "$psid" == LEN* ]]; then echo "Lenovo OEM"
+    elif [[ "$psid" == LEN* || "$psid" == LNV* ]]; then echo "Lenovo OEM"
     elif [[ "$psid" == SM_* || "$psid" == SMC* ]]; then echo "Supermicro OEM"
     elif [[ "$psid" == IBM* ]]; then echo "IBM OEM"
     elif [[ "$psid" == CYS* || "$psid" == CIS* ]]; then echo "Cisco OEM"
