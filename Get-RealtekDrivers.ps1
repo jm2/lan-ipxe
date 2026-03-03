@@ -30,36 +30,23 @@ if ($Install -and -not ([Security.Principal.WindowsPrincipal][Security.Principal
     return
 }
 
-function Get-RealtekDriverDate {
-    param([string]$Version)
-    # PCIE style: Prefix.Rev.MMDD.YYYY (e.g. 1125.14.816.2025)
-    if ($Version -match "\.(0?[1-9]|1[0-2])([0-2]\d|3[01])\.(20\d\d)$") {
-        return [int]("$($matches[3])$($matches[1].PadLeft(2, '0'))$($matches[2])")
-    } 
-    # USB style: Prefix.Rev.YY.MMDD (e.g. 1159.21.20.1009 means 2020-10-09)
-    elseif ($Version -match "\.(2\d|3\d)\.(0?[1-9]|1[0-2])([0-2]\d|3[01])$") {
-        return [int]("20$($matches[1])$($matches[2].PadLeft(2, '0'))$($matches[3])")
-    }
-    return 0
-}
-
 $Targets = @(
     @{ 
         Name    = "RTL_PCIe_Family" 
         Devices = @(
-            @{ Prefix = "1125"; HWID = "VEN_10EC&DEV_8125" },
-            @{ Prefix = "1126"; HWID = "VEN_10EC&DEV_8126" },
-            @{ Prefix = "1127"; HWID = "VEN_10EC&DEV_8127" },
-            @{ Prefix = "1168"; HWID = "VEN_10EC&DEV_8168" }
+            @{ Prefix = "1125"; HWID = "VEN_10EC&DEV_8125"; RTLName = "RTL8125" },
+            @{ Prefix = "1126"; HWID = "VEN_10EC&DEV_8126"; RTLName = "RTL8126" },
+            @{ Prefix = "1127"; HWID = "VEN_10EC&DEV_8127"; RTLName = "RTL8127" },
+            @{ Prefix = "1168"; HWID = "VEN_10EC&DEV_8168"; RTLName = "RTL8168" }
         )
     },
     @{ 
         Name    = "RTL_USB_Family"
         Devices = @(
-            @{ Prefix = "1153"; HWID = "VID_0BDA&PID_8153" },
-            @{ Prefix = "1156"; HWID = "VID_0BDA&PID_8156" },
-            @{ Prefix = "1157"; HWID = "VID_0BDA&PID_8157" },
-            @{ Prefix = "1159"; HWID = "VID_0BDA&PID_815A" }
+            @{ Prefix = "1153"; HWID = "VID_0BDA&PID_8153"; RTLName = "RTL8153" },
+            @{ Prefix = "1156"; HWID = "VID_0BDA&PID_8156"; RTLName = "RTL8156" },
+            @{ Prefix = "1157"; HWID = "VID_0BDA&PID_8157"; RTLName = "RTL8157" },
+            @{ Prefix = "1159"; HWID = "VID_0BDA&PID_815A"; RTLName = "RTL8159" }
         )
     }
 )
@@ -75,6 +62,7 @@ foreach ($Target in $Targets) {
     foreach ($Device in $Target.Devices) {
         $Prefix = $Device.Prefix
         $HWID = $Device.HWID
+        $RTLName = $Device.RTLName
         $Query = "$HWID Windows 11"
         Write-Host "   -> Searching specific HWID for Prefix $Prefix ($Query)..."
         
@@ -101,18 +89,21 @@ foreach ($Target in $Targets) {
             $DetailsUrl = "https://www.catalog.update.microsoft.com/ScopedViewInline.aspx?updateid=$Id"
             try {
                 $DetailsPage = Invoke-WebRequest -Uri $DetailsUrl -UseBasicParsing -ErrorAction SilentlyContinue
-                if ($DetailsPage.Content -match "id=`"ScopedViewHandler_version`">([^<]+)") {
-                    $Version = $matches[1].Trim()
-                    $DateInt = Get-RealtekDriverDate -Version $Version
-                    
-                    if ($Version -like "$Prefix.*" -and $DateInt -gt 0) {
+                $DateString = if ($DetailsPage.Content -match "id=`"ScopedViewHandler_versionDate`">([^<]+)") { $matches[1].Trim() }
+                $Version = if ($DetailsPage.Content -match "id=`"ScopedViewHandler_version`">([^<]+)") { $matches[1].Trim() }
+                
+                if ($Version -and $DateString) {
+                    try {
+                        $DateObj = [datetime]::Parse($DateString)
                         $AvailablePackages += [PSCustomObject]@{
                             Prefix  = $Prefix
+                            RTLName = $RTLName
                             Version = $Version
-                            DateInt = $DateInt
+                            DateObj = $DateObj
                             Id      = $Id
                         }
                     }
+                    catch {}
                 }
             }
             catch {}
@@ -125,11 +116,11 @@ foreach ($Target in $Targets) {
         continue
     }
 
-    # Group the packages by Prefix and find the best (highest DateInt) for each
+    # Group all valid candidate packages into their correct respective HWPrefix families, and find the freshest.
     $GroupedPackages = $AvailablePackages | Group-Object Prefix
     
     foreach ($Group in $GroupedPackages) {
-        $BestPackage = $Group.Group | Sort-Object DateInt -Descending | Select-Object -First 1
+        $BestPackage = $Group.Group | Sort-Object DateObj -Descending | Select-Object -First 1
         Write-Host "   -> Prefix $($Group.Name): Selected $($BestPackage.Version) (Update ID: $($BestPackage.Id))" -ForegroundColor Green
         
         $PostData = "[{`"size`":0,`"updateID`":`"$($BestPackage.Id)`",`"uidInfo`":`"$($BestPackage.Id)`"}]"
@@ -143,7 +134,7 @@ foreach ($Target in $Targets) {
         }
         
         $CabFile = Join-Path $TempDir "$($Target.Name)_$($Group.Name).cab"
-        $ExtractDir = Join-Path $TempDir "$($Target.Name)"
+        $ExtractDir = Join-Path $TempDir "$($Target.Name)\$($BestPackage.RTLName)"
         
         Write-Host "      -> Downloading raw driver package..."
         Invoke-WebRequest -Uri $CabUrl -OutFile $CabFile -UseBasicParsing
