@@ -11,11 +11,11 @@
     the true release date, and downloads the absolute newest driver for each specific HW family.
 
     .EXAMPLE
-    .\Get-RealtekDrivers.ps1
+    .\Get-RealtekEthernetDrivers.ps1
     Downloads and extracts the newest drivers to C:\Temp\Realtek_NetAdapterCx without installing.
 
     .EXAMPLE
-    .\Get-RealtekDrivers.ps1 -Install
+    .\Get-RealtekEthernetDrivers.ps1 -Install
     Downloads, extracts, installs the drivers to the Driver Store, and cleans up the CABs.
 #>
 
