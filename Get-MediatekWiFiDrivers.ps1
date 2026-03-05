@@ -1,20 +1,21 @@
 <#
     .SYNOPSIS
-    Fetches and optionally installs the absolute latest Qualcomm Wi-Fi drivers 
+    Fetches and optionally installs the absolute latest MediaTek Wi-Fi drivers 
     directly from the Microsoft Update Catalog.
 
     .DESCRIPTION
-    This script queries the Catalog for Qualcomm Wi-Fi adapters (QCA6390, WCN6855, WCN7850),
+    This script queries the Catalog for MediaTek Wi-Fi adapters (MT7921, MT7921K, MT7922, MT7925, MT7927),
     pulls the detailed version for every package, and prioritizes packages using 
-    standard Semantic Versioning (e.g., 2.0.0.x or 3.0.0.x), while explicitly ignoring
-    older "NDIS" legacy titles to guarantee modern NetAdapterCx or modern WDI drivers.
+    standard Semantic Versioning or simply taking the global highest version available.
+    Native ARM64 support is explicitly accounted for automatically, as MediaTek is 
+    heavily featured in modern Copilot+ and Surface devices.
 
     .EXAMPLE
-    .\Get-QualcommWiFiDrivers.ps1
-    Downloads and extracts the newest drivers to C:\Temp\Qualcomm_WiFi without installing.
+    .\Get-MediatekWiFiDrivers.ps1
+    Downloads and extracts the newest drivers to C:\Temp\MediaTek_WiFi without installing.
 
     .EXAMPLE
-    .\Get-QualcommWiFiDrivers.ps1 -Install
+    .\Get-MediatekWiFiDrivers.ps1 -Install
     Downloads, extracts, installs the drivers to the Driver Store, and cleans up the CABs.
 #>
 
@@ -31,31 +32,43 @@ if ($Install -and -not ([Security.Principal.WindowsPrincipal][Security.Principal
 
 $Targets = @(
     @{ 
-        Name    = "Qualcomm_PCIe_Family" 
+        Name    = "MediaTek_WiFi_Family" 
         Devices = @(
             @{ 
-                ModelId         = "1101"
-                ModelName       = "QCA6390"
-                Queries         = @("VEN_17CB&DEV_1101", "FastConnect 6800", "Killer AX500")
-                PreferredBranch = "3.0"
+                ModelId           = "7961"
+                ModelName         = "MT7921_Filogic330"
+                Queries           = @("VEN_14C3&DEV_7961", "MT7921", "Filogic 330")
+                PreferredBranches = @("3.5")
             },
             @{ 
-                ModelId         = "1103"
-                ModelName       = "WCN6855"
-                Queries         = @("VEN_17CB&DEV_1103", "FastConnect 6900", "WCN6855", "QCNFA765")
-                PreferredBranch = "3.0"
+                ModelId           = "0608"
+                ModelName         = "MT7921K_RZ608"
+                Queries           = @("VEN_14C3&DEV_0608", "MT7921K", "RZ608")
+                PreferredBranches = @("3.5")
             },
             @{ 
-                ModelId         = "1107"
-                ModelName       = "WCN7850"
-                Queries         = @("VEN_17CB&DEV_1107", "FastConnect 7800", "NCM865", "WCN7850")
-                PreferredBranch = "3.1"
+                ModelId           = "0616"
+                ModelName         = "MT7922_RZ616"
+                Queries           = @("VEN_14C3&DEV_0616", "MT7922", "RZ616")
+                PreferredBranches = @("3.5")
+            },
+            @{ 
+                ModelId           = "7925"
+                ModelName         = "MT7925_Filogic380"
+                Queries           = @("VEN_14C3&DEV_7925", "MT7925")
+                PreferredBranches = @("25.30", "5.7")
+            },
+            @{ 
+                ModelId           = "7927"
+                ModelName         = "MT7927_Filogic380High"
+                Queries           = @("VEN_14C3&DEV_7927", "MT7927")
+                PreferredBranches = @("25.30", "5.7")
             }
         )
     }
 )
 
-$TempDir = "C:\Temp\Qualcomm_WiFi"
+$TempDir = "C:\Temp\MediaTek_WiFi"
 if (-not (Test-Path $TempDir)) { New-Item -ItemType Directory -Path $TempDir -Force | Out-Null }
 
 foreach ($Target in $Targets) {
@@ -102,14 +115,14 @@ foreach ($Target in $Targets) {
                             $DateObj = [datetime]::Parse($DateString)
                             $Arch = if ($DetailsPage.Content -match "ARM64") { "ARM64" } elseif ($DetailsPage.Content -match "AMD64") { "AMD64" } else { "x86" }
                             $AvailablePackages += [PSCustomObject]@{
-                                ModelId         = $ModelId
-                                ModelName       = $Device.ModelName
-                                Version         = [version]$Version
-                                DateObj         = $DateObj
-                                Id              = $Id
-                                Title           = $Title
-                                PreferredBranch = $Device.PreferredBranch
-                                Arch            = $Arch
+                                ModelId           = $ModelId
+                                ModelName         = $Device.ModelName
+                                Version           = [version]$Version
+                                DateObj           = $DateObj
+                                Id                = $Id
+                                Title             = $Title
+                                PreferredBranches = $Device.PreferredBranches
+                                Arch              = $Arch
                             }
                         }
                         catch {}
@@ -135,13 +148,22 @@ foreach ($Target in $Targets) {
         $Arch = $FirstObj.Arch
         $ModelName = $FirstObj.ModelName
         
-        # Check if any packages exactly match the preferred major.minor branch 
-        $TargetBranch = $FirstObj.PreferredBranch
-        $BranchMatches = $Group.Group | Where-Object { $_.Version.ToString().StartsWith("$TargetBranch.") }
+        $BestPackage = $null
+        $TargetBranches = $FirstObj.PreferredBranches
         
-        if ($BranchMatches.Count -gt 0) {
-            $BestPackage = $BranchMatches | Sort-Object Version -Descending | Select-Object -First 1
-            Write-Host "   -> ModelId $($ModelId) [$Arch]: Selected v$($BestPackage.Version) [Preferred Branch] (Update ID: $($BestPackage.Id))" -ForegroundColor Green
+        if ($TargetBranches) {
+            foreach ($Branch in $TargetBranches) {
+                $BranchMatches = $Group.Group | Where-Object { $_.Version.ToString().StartsWith("$Branch.") }
+                if ($BranchMatches.Count -gt 0) {
+                    $BestPackage = $BranchMatches | Sort-Object Version -Descending | Select-Object -First 1
+                    Write-Host "   -> ModelId $($ModelId) [$Arch]: Selected v$($BestPackage.Version) [Preferred Branch: $Branch] (Update ID: $($BestPackage.Id))" -ForegroundColor Green
+                    break
+                }
+            }
+            if (-not $BestPackage) {
+                $BestPackage = $Group.Group | Sort-Object Version -Descending | Select-Object -First 1
+                Write-Host "   -> ModelId $($ModelId) [$Arch]: Selected v$($BestPackage.Version) [Global Highest] (Update ID: $($BestPackage.Id))" -ForegroundColor Green
+            }
         }
         else {
             $BestPackage = $Group.Group | Sort-Object Version -Descending | Select-Object -First 1

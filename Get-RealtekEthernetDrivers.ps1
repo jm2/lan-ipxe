@@ -95,12 +95,14 @@ foreach ($Target in $Targets) {
                 if ($Version -and $DateString) {
                     try {
                         $DateObj = [datetime]::Parse($DateString)
+                        $Arch = if ($DetailsPage.Content -match "ARM64") { "ARM64" } elseif ($DetailsPage.Content -match "AMD64") { "AMD64" } else { "x86" }
                         $AvailablePackages += [PSCustomObject]@{
                             Prefix  = $Prefix
                             RTLName = $RTLName
                             Version = $Version
                             DateObj = $DateObj
                             Id      = $Id
+                            Arch    = $Arch
                         }
                     }
                     catch {}
@@ -116,12 +118,17 @@ foreach ($Target in $Targets) {
         continue
     }
 
-    # Group all valid candidate packages into their correct respective HWPrefix families, and find the freshest.
-    $GroupedPackages = $AvailablePackages | Group-Object Prefix
+    # Group all valid candidate packages into their correct respective HWPrefix families and Architecture, and find the freshest.
+    $GroupedPackages = $AvailablePackages | Group-Object Prefix, Arch
     
     foreach ($Group in $GroupedPackages) {
+        $FirstObj = $Group.Group[0]
+        $Prefix = $FirstObj.Prefix
+        $Arch = $FirstObj.Arch
+        $RTLName = $FirstObj.RTLName
+
         $BestPackage = $Group.Group | Sort-Object DateObj -Descending | Select-Object -First 1
-        Write-Host "   -> Prefix $($Group.Name): Selected $($BestPackage.Version) (Update ID: $($BestPackage.Id))" -ForegroundColor Green
+        Write-Host "   -> Prefix $($Prefix) [$Arch]: Selected $($BestPackage.Version) (Update ID: $($BestPackage.Id))" -ForegroundColor Green
         
         $PostData = "[{`"size`":0,`"updateID`":`"$($BestPackage.Id)`",`"uidInfo`":`"$($BestPackage.Id)`"}]"
         $DownloadPage = Invoke-WebRequest -Uri "https://www.catalog.update.microsoft.com/DownloadDialog.aspx" -Method Post -Body @{updateIDs = $PostData } -UseBasicParsing
@@ -133,10 +140,10 @@ foreach ($Target in $Targets) {
             continue
         }
         
-        $CabFile = Join-Path $TempDir "$($Target.Name)_$($Group.Name).cab"
-        $ExtractDir = Join-Path $TempDir "$($Target.Name)\$($BestPackage.RTLName)"
+        $CabFile = Join-Path $TempDir "$($Target.Name)_$($Prefix)_$($Arch).cab"
+        $ExtractDir = Join-Path $TempDir "$($Target.Name)\$RTLName\$Arch"
         
-        Write-Host "      -> Downloading raw driver package..."
+        Write-Host "      -> Downloading raw $Arch driver package..."
         Invoke-WebRequest -Uri $CabUrl -OutFile $CabFile -UseBasicParsing
         
         Write-Host "      -> Extracting payload using expand.exe..."
@@ -146,9 +153,15 @@ foreach ($Target in $Targets) {
         Remove-Item $CabFile -Force
         
         if ($Install) {
-            Write-Host "      -> Injecting into Driver Store via pnputil..." -ForegroundColor Green
-            pnputil.exe /add-driver "$ExtractDir\*.inf" /install | Out-Null
-            Write-Host "      -> Injection complete." -ForegroundColor Green
+            $SysArch = $env:PROCESSOR_ARCHITECTURE
+            if ($SysArch -eq $Arch) {
+                Write-Host "      -> System is $SysArch. Injecting $Arch driver into Driver Store via pnputil..." -ForegroundColor Green
+                pnputil.exe /add-driver "$ExtractDir\*.inf" /install | Out-Null
+                Write-Host "      -> Injection complete." -ForegroundColor Green
+            }
+            else {
+                Write-Host "      -> System is $SysArch. Skipping $Arch driver installation." -ForegroundColor DarkGray
+            }
         }
         else {
             Write-Host "      -> Extracted to: $ExtractDir (Skipping installation)" -ForegroundColor DarkGray
