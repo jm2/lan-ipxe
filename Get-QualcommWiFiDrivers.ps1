@@ -20,7 +20,8 @@
 
 [CmdletBinding()]
 param (
-    [switch]$Install
+    [switch]$Install,
+    [string]$DownloadPath = 'C:\Temp\Qualcomm_WiFi'
 )
 
 # Dynamic Admin Check
@@ -55,8 +56,8 @@ $Targets = @(
     }
 )
 
-$TempDir = "C:\Temp\Qualcomm_WiFi"
-if (-not (Test-Path $TempDir)) { New-Item -ItemType Directory -Path $TempDir -Force | Out-Null }
+
+if (-not (Test-Path $DownloadPath)) { New-Item -ItemType Directory -Path $DownloadPath -Force | Out-Null }
 
 foreach ($Target in $Targets) {
     Write-Host "`n=> Investigating Microsoft Update Catalog for $($Target.Name)..." -ForegroundColor Cyan
@@ -158,8 +159,8 @@ foreach ($Target in $Targets) {
             continue
         }
         
-        $CabFile = Join-Path $TempDir "$($Target.Name)_$($ModelId)_$($Arch).cab"
-        $ExtractDir = Join-Path $TempDir "$($Target.Name)\$ModelName\$Arch"
+        $CabFile = Join-Path $DownloadPath "$($Target.Name)_$($ModelId)_$($Arch).cab"
+        $ExtractDir = Join-Path $DownloadPath "$($Target.Name)\$ModelName\$Arch"
         
         Write-Host "      -> Downloading raw $Arch driver package..."
         Invoke-WebRequest -Uri $CabUrl -OutFile $CabFile -UseBasicParsing
