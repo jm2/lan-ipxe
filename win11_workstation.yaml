@@ -21,6 +21,7 @@ actions:
       - 7zip.7zip
       - Apple.iTunes
       - Blizzard.BattleNet
+      - Comtrya.Comtrya
       - ExtremeTuxRacer.ExtremeTuxRacer
       - GIMP.GIMP.3
       - Git.Git
@@ -41,6 +42,7 @@ actions:
       - Microsoft.PowerShell
       - Microsoft.VisualStudio.Community
       - Microsoft.WindowsTerminal
+      - Microsoft.WingetCreate
       - Microsoft.WSL
       - Mozilla.Firefox
       - mpv.net
