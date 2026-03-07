@@ -1,0 +1,24 @@
+# win11_workstation.yaml
+actions:
+  - id: check-hyperv-script
+    command:
+      run: Test-Path -Path "$env:USERPROFILE\lan-ipxe\enable-hyperv-win11home.ps1"
+      
+  - id: enable-hyper-v
+    command:
+      run: powershell.exe -ExecutionPolicy Bypass -File "$env:USERPROFILE\lan-ipxe\enable-hyperv-win11home.ps1"
+      only_if: >
+        powershell.exe -NoProfile -Command "
+        $h=(Get-WindowsOptionalFeature -FeatureName Microsoft-Hyper-V -Online -ErrorAction SilentlyContinue).State;
+        if($h -eq 'Enabled'){exit 1};
+        $p=Get-ChildItem -Path \"$env:SystemRoot\servicing\Packages\" -Filter \"*Hyper-V*.mum\" -ErrorAction SilentlyContinue;
+        if($p.Count -gt 0){exit 0}else{exit 1}"
+
+  - id: install-core-utilities
+    command:
+      run: winget install --source winget --accept-package-agreements --accept-source-agreements --exact Mozilla.Firefox Google.Chrome git.git go python3 VSCodium.VSCodium Microsoft.VisualStudio.Community Kitware.CMake Ninja-build.Ninja msys2.msys2 Google.GoogleDrive Google.Antigravity Google.PlatformTools Ookla.Speedtest.CLI GIMP.GIMP.3 Inkscape.Inkscape Apple.iTunes Ookla.Speedtest.Desktop Plex.Plex mpv.net Silicondust.HDHomeRun 7zip.7zip Rufus.Rufus GuinpinSoft.MakeMKV Unigine.HeavenBenchmark Microsoft.PowerShell SuperTux.SuperTux SuperTuxKart.SuperTuxKart ExtremeTuxRacer.ExtremeTuxRacer WinDirStat.WinDirStat WinSCP.WinSCP WiresharkFoundation.Wireshark tailscale.tailscale Ventoy.Ventoy Meld.Meld Google.AndroidStudio Xming.Xming PuTTY.PuTTY jigsaw.outlinemanager vlc MediaArea.MediaInfo.GUI steam GOG.Galaxy battle.net Microsoft.WindowsTerminal Microsoft.WSL GitHub.GitHubDesktop
+
+  - id: install-intel-dsa
+    command:
+      run: winget install --source winget --accept-package-agreements --accept-source-agreements --exact Intel.IntelDriverAndSupportAssistant
+      only_if: powershell.exe -Command "if ($env:PROCESSOR_ARCHITECTURE -eq 'AMD64') { exit 0 } else { exit 1 }"
