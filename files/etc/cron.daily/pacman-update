@@ -1,0 +1,22 @@
+#!/bin/bash
+set -euo pipefail
+
+if [[ -f /var/lib/pacman/db.lck ]]; then
+    echo "Pacman database is locked. Aborting scheduled update." >&2
+    exit 1
+fi
+
+echo "Updating `hostname` on `date`..."
+pacman -Syu --noconfirm
+
+# paccache retains the last 3 versions if available.
+if command -v paccache &> /dev/null; then
+    paccache -r
+else
+    pacman -Sc --noconfirm
+fi
+
+if [[ ! -d "/usr/lib/modules/$(uname -r)" ]]; then
+    echo "Running kernel modules not found (likely upgraded). Scheduling reboot..."
+    shutdown -r +30 "Rebooting for kernel upgrade..."
+fi

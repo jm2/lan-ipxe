@@ -1,0 +1,10 @@
+export ANDROID_SDK_ROOT="/opt/android-sdk"
+export ANDROID_NDK_HOME="/opt/android-ndk"
+export ANDROID_HOME="/opt/android-sdk"
+export JAVA_HOME="/usr/lib/jvm/default"
+export PATH=~/bin:$PATH:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin
+export MAKEFLAGS="--jobs=$(nproc)"
+export EDITOR=vi
+export USE_CCACHE=1
+alias diff="colordiff -u"
+alias ssh="ssh -Y"
