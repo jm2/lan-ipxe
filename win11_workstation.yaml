@@ -18,54 +18,54 @@ actions:
     action: package.install
     provider: winget
     list:
-      - Mozilla.Firefox
-      - Google.Chrome
-      - git.git
-      - go
-      - python3
-      - VSCodium.VSCodium
-      - Microsoft.VisualStudio.Community
-      - Kitware.CMake
-      - Ninja-build.Ninja
-      - msys2.msys2
-      - Google.GoogleDrive
-      - Google.Antigravity
-      - Google.PlatformTools
-      - Ookla.Speedtest.CLI
-      - GIMP.GIMP.3
-      - Inkscape.Inkscape
+      - 7zip.7zip
       - Apple.iTunes
+      - Blizzard.BattleNet
+      - ExtremeTuxRacer.ExtremeTuxRacer
+      - GIMP.GIMP.3
+      - Git.Git
+      - GitHub.GitHubDesktop
+      - GOG.Galaxy
+      - GoLang.Go
+      - Google.AndroidStudio
+      - Google.Antigravity
+      - Google.Chrome
+      - Google.Drive
+      - Google.PlatformTools
+      - GuinpinSoft.MakeMKV
+      - Inkscape.Inkscape
+      - Jigsaw.OutlineManager
+      - Kitware.CMake
+      - MediaArea.MediaInfo.GUI
+      - Meld.Meld
+      - Microsoft.PowerShell
+      - Microsoft.VisualStudio.Community
+      - Microsoft.WindowsTerminal
+      - Microsoft.WSL
+      - Mozilla.Firefox
+      - mpv.net
+      - MSYS2.MSYS2
+      - Ninja-build.Ninja
+      - Ookla.Speedtest.CLI
       - Ookla.Speedtest.Desktop
       - Plex.Plex
-      - mpv.net
-      - Silicondust.HDHomeRun
-      - 7zip.7zip
+      - PuTTY.PuTTY
+      - Python.Python.3.14
       - Rufus.Rufus
-      - GuinpinSoft.MakeMKV
-      - Unigine.HeavenBenchmark
-      - Microsoft.PowerShell
+      - Rustlang.Rust.MSVC
+      - SiliconDust.HDHomeRun
       - SuperTux.SuperTux
       - SuperTuxKart.SuperTuxKart
-      - ExtremeTuxRacer.ExtremeTuxRacer
+      - Tailscale.Tailscale
+      - Unigine.HeavenBenchmark
+      - Valve.Steam
+      - Ventoy.Ventoy
+      - VideoLAN.VLC
+      - VSCodium.VSCodium
       - WinDirStat.WinDirStat
       - WinSCP.WinSCP
       - WiresharkFoundation.Wireshark
-      - tailscale.tailscale
-      - Ventoy.Ventoy
-      - Meld.Meld
-      - Google.AndroidStudio
       - Xming.Xming
-      - PuTTY.PuTTY
-      - jigsaw.outlinemanager
-      - vlc
-      - MediaArea.MediaInfo.GUI
-      - steam
-      - GOG.Galaxy
-      - battle.net
-      - Microsoft.WindowsTerminal
-      - Microsoft.WSL
-      - GitHub.GitHubDesktop
-      - Rustlang.Rust.MSVC
 
   - id: install-intel-dsa
     action: package.install
