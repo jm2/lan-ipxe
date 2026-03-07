@@ -8,6 +8,7 @@ actions:
   - bluez-utils
   - brasero
   - cantarell-fonts
+  - ccache
   - chromium
   - cronie
   - cups
@@ -25,6 +26,7 @@ actions:
   - gnome-shell-extension-vitals
   - gnome-shell-extensions
   - gparted
+  - gradle
   - grub
   - gst-plugin-pipewire
   - gst-plugins-ugly
@@ -56,6 +58,7 @@ actions:
   - lldb
   - llvm
   - lutris
+  - maven
   - mesa-utils
   - networkmanager
   - noto-fonts
