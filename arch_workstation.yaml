@@ -133,15 +133,27 @@ actions:
   - unigine-heaven
   - ventoy-bin
   - vscodium-bin
-- action: file.link
+- action: file.copy
   source: files/bashrc
   target: ~/.bashrc
-- action: file.link
+- action: file.copy
   source: files/vimrc
   target: ~/.vimrc
-- action: file.link
+- action: file.copy
   source: files/grub
   target: /etc/default/grub
+- action: file.copy
+  source: files/etc/bash.bashrc
+  target: /etc/bash.bashrc
+- action: file.copy
+  source: files/etc/pacman.conf
+  target: /etc/pacman.conf
+- action: file.copy
+  source: files/etc/locale.conf
+  target: /etc/locale.conf
+- action: file.copy
+  source: files/etc/cron.daily/pacman-update
+  target: /etc/cron.daily/pacman-update
 - action: command.run
   privileged: true
   command: ln
@@ -156,33 +168,6 @@ actions:
   - -Rsn
   - --noconfirm
   - mkinitcpio
-- action: file.link
-  source: files/etc/bash.bashrc
-  target: /etc/bash.bashrc
-- action: file.link
-  source: files/etc/locale.gen
-  target: /etc/locale.gen
-- action: file.link
-  source: files/etc/libvirt/network.conf
-  target: /etc/libvirt/network.conf
-- action: file.link
-  source: files/etc/pacman.conf
-  target: /etc/pacman.conf
-- action: file.link
-  source: files/etc/vconsole.conf
-  target: /etc/vconsole.conf
-- action: file.link
-  source: files/etc/locale.conf
-  target: /etc/locale.conf
-- action: file.link
-  source: files/etc/systemd/zram-generator.conf
-  target: /etc/systemd/zram-generator.conf
-- action: file.link
-  source: files/etc/cron.daily/pacman-update
-  target: /etc/cron.daily/pacman-update
-- action: file.link
-  source: files/etc/X11/xorg.conf.d/00-keyboard.conf
-  target: /etc/X11/xorg.conf.d/00-keyboard.conf
 - action: command.run
   privileged: true
   command: systemctl
@@ -231,30 +216,6 @@ actions:
   args:
   - enable
   - NetworkManager.service
-- action: command.run
-  privileged: true
-  command: systemctl
-  args:
-  - enable
-  - nvidia-hibernate.service
-- action: command.run
-  privileged: true
-  command: systemctl
-  args:
-  - enable
-  - nvidia-resume.service
-- action: command.run
-  privileged: true
-  command: systemctl
-  args:
-  - enable
-  - nvidia-suspend-then-hibernate.service
-- action: command.run
-  privileged: true
-  command: systemctl
-  args:
-  - enable
-  - nvidia-suspend.service
 - action: command.run
   privileged: true
   command: systemctl
