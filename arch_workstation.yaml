@@ -1,6 +1,7 @@
+where: os.name == "linux"
 actions:
 - action: package.install
-  packages:
+  list:
   - base-devel
   - bash-completion
   - bash-preexec
@@ -98,7 +99,7 @@ actions:
     cd /tmp/yay-bin && makepkg -si --noconfirm && rm -rf /tmp/yay-bin; fi
 - action: package.install
   provider: yay
-  packages:
+  list:
   - airshipper
   - android-ndk
   - android-sdk-build-tools
@@ -142,14 +143,14 @@ actions:
   source: files/grub
   target: /etc/default/grub
 - action: command.run
-  sudo: true
+  privileged: true
   command: ln
   args:
   - -sf
   - /usr/bin/vim
   - /usr/bin/vi
 - action: command.run
-  sudo: true
+  privileged: true
   command: pacman
   args:
   - -Rsn
@@ -158,120 +159,111 @@ actions:
 - action: file.link
   source: files/etc/bash.bashrc
   target: /etc/bash.bashrc
-  sudo: true
 - action: file.link
   source: files/etc/locale.gen
   target: /etc/locale.gen
-  sudo: true
 - action: file.link
   source: files/etc/libvirt/network.conf
   target: /etc/libvirt/network.conf
-  sudo: true
 - action: file.link
   source: files/etc/pacman.conf
   target: /etc/pacman.conf
-  sudo: true
 - action: file.link
   source: files/etc/vconsole.conf
   target: /etc/vconsole.conf
-  sudo: true
 - action: file.link
   source: files/etc/locale.conf
   target: /etc/locale.conf
-  sudo: true
 - action: file.link
   source: files/etc/systemd/zram-generator.conf
   target: /etc/systemd/zram-generator.conf
-  sudo: true
 - action: file.link
   source: files/etc/cron.daily/pacman-update
   target: /etc/cron.daily/pacman-update
-  sudo: true
 - action: file.link
   source: files/etc/X11/xorg.conf.d/00-keyboard.conf
   target: /etc/X11/xorg.conf.d/00-keyboard.conf
-  sudo: true
 - action: command.run
-  sudo: true
+  privileged: true
   command: systemctl
   args:
   - enable
   - bluetooth.service
 - action: command.run
-  sudo: true
+  privileged: true
   command: systemctl
   args:
   - enable
   - cronie.service
 - action: command.run
-  sudo: true
+  privileged: true
   command: systemctl
   args:
   - enable
   - cups.service
 - action: command.run
-  sudo: true
+  privileged: true
   command: systemctl
   args:
   - enable
   - gdm.service
 - action: command.run
-  sudo: true
+  privileged: true
   command: systemctl
   args:
   - enable
   - gnome-remote-desktop.service
 - action: command.run
-  sudo: true
+  privileged: true
   command: systemctl
   args:
   - enable
   - NetworkManager-dispatcher.service
 - action: command.run
-  sudo: true
+  privileged: true
   command: systemctl
   args:
   - enable
   - NetworkManager-wait-online.service
 - action: command.run
-  sudo: true
+  privileged: true
   command: systemctl
   args:
   - enable
   - NetworkManager.service
 - action: command.run
-  sudo: true
+  privileged: true
   command: systemctl
   args:
   - enable
   - nvidia-hibernate.service
 - action: command.run
-  sudo: true
+  privileged: true
   command: systemctl
   args:
   - enable
   - nvidia-resume.service
 - action: command.run
-  sudo: true
+  privileged: true
   command: systemctl
   args:
   - enable
   - nvidia-suspend-then-hibernate.service
 - action: command.run
-  sudo: true
+  privileged: true
   command: systemctl
   args:
   - enable
   - nvidia-suspend.service
 - action: command.run
-  sudo: true
+  privileged: true
   command: systemctl
   args:
   - enable
   - sshd.service
 - action: package.install
   provider: yay
-  packages:
+  list:
   - aoe3-wine-steam
   - blur-wine-steam
   - broforce-gog

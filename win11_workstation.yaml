@@ -1,27 +1,21 @@
 # win11_workstation.yaml
-actions:
-  - id: check-hyperv-script
-    command:
-      run: Test-Path -Path "$env:USERPROFILE\lan-ipxe\enable-hyperv-win11home.ps1"
-      
-  - id: enable-hyper-v
-    command:
-      run: powershell.exe -ExecutionPolicy Bypass -File "$env:USERPROFILE\lan-ipxe\enable-hyperv-win11home.ps1"
-      only_if: >
-        powershell.exe -NoProfile -Command "
-        $h=(Get-WindowsOptionalFeature -FeatureName Microsoft-Hyper-V -Online -ErrorAction SilentlyContinue).State;
-        if($h -eq 'Enabled'){exit 1};
-        $p=Get-ChildItem -Path \"$env:SystemRoot\servicing\Packages\" -Filter \"*Hyper-V*.mum\" -ErrorAction SilentlyContinue;
-        if($p.Count -gt 0){exit 0}else{exit 1}"
-
-  - id: install-core-utilities
-    action: package.install
+where: os.name == "windows"
+actions:      
+  - action: command.run
+    command: powershell.exe
+    args:
+      - "-ExecutionPolicy"
+      - "Bypass"
+      - "-NoProfile"
+      - "-Command"
+      - "$h=(Get-WindowsOptionalFeature -FeatureName Microsoft-Hyper-V -Online -ErrorAction SilentlyContinue).State; if($h -eq 'Enabled'){exit 0}; $p=Get-ChildItem -Path \"$env:SystemRoot\\servicing\\Packages\" -Filter \"*Hyper-V*.mum\" -ErrorAction SilentlyContinue; if($p.Count -gt 0){ & \"$env:USERPROFILE\\lan-ipxe\\enable-hyperv-win11home.ps1\" }"
+  - action: package.install
     provider: winget
     list:
       - 7zip.7zip
       - Apple.iTunes
-      - Blizzard.BattleNet
-      - Comtrya.Comtrya
+      # - Blizzard.BattleNet # Broken due to interactive installer.
+      # - Comtrya.Comtrya # Not present upstream yet.
       - ExtremeTuxRacer.ExtremeTuxRacer
       - GIMP.GIMP.3
       - Git.Git
@@ -31,11 +25,12 @@ actions:
       - Google.AndroidStudio
       - Google.Antigravity
       - Google.Chrome
-      - Google.Drive
+      - Google.GoogleDrive
       - Google.PlatformTools
       - GuinpinSoft.MakeMKV
       - Inkscape.Inkscape
       - Jigsaw.OutlineManager
+      # - Jigsaw.Outline # Not present upstream yet.
       - Kitware.CMake
       - MediaArea.MediaInfo.GUI
       - Meld.Meld
@@ -55,7 +50,7 @@ actions:
       - Python.Python.3.14
       - Rufus.Rufus
       - Rustlang.Rust.MSVC
-      - SiliconDust.HDHomeRun
+      - Silicondust.HDHomeRun
       - SuperTux.SuperTux
       - SuperTuxKart.SuperTuxKart
       - Tailscale.Tailscale
@@ -68,10 +63,8 @@ actions:
       - WinSCP.WinSCP
       - WiresharkFoundation.Wireshark
       - Xming.Xming
-
-  - id: install-intel-dsa
-    action: package.install
+  - action: package.install
     provider: winget
-    where: "powershell.exe -Command \"if ($env:PROCESSOR_ARCHITECTURE -eq 'AMD64') { exit 0 } else { exit 1 }\""
+    where: os.arch == "x86_64"
     list:
       - Intel.IntelDriverAndSupportAssistant
