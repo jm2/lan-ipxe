@@ -1,5 +1,11 @@
 where: os.name == "linux"
 actions:
+- action: command.run
+  privileged: true
+  command: bash
+  args:
+  - -c
+  - pacman -Q jre-openjdk &>/dev/null && pacman -Rdd --noconfirm jre-openjdk || true
 - action: package.install
   list:
   - base-devel
@@ -134,26 +140,41 @@ actions:
   - ventoy-bin
   - vscodium-bin
 - action: file.copy
-  source: files/bashrc
+  source: bashrc
   target: ~/.bashrc
 - action: file.copy
-  source: files/vimrc
+  source: vimrc
   target: ~/.vimrc
-- action: file.copy
-  source: files/grub
-  target: /etc/default/grub
-- action: file.copy
-  source: files/etc/bash.bashrc
-  target: /etc/bash.bashrc
-- action: file.copy
-  source: files/etc/pacman.conf
-  target: /etc/pacman.conf
-- action: file.copy
-  source: files/etc/locale.conf
-  target: /etc/locale.conf
-- action: file.copy
-  source: files/etc/cron.daily/pacman-update
-  target: /etc/cron.daily/pacman-update
+- action: command.run
+  privileged: true
+  command: cp
+  args:
+  - files/grub
+  - /etc/default/grub
+- action: command.run
+  privileged: true
+  command: cp
+  args:
+  - files/etc/bash.bashrc
+  - /etc/bash.bashrc
+# - action: command.run
+#   privileged: true
+#   command: cp
+#   args:
+#   - files/etc/pacman.conf
+#   - /etc/pacman.conf
+- action: command.run
+  privileged: true
+  command: cp
+  args:
+  - files/etc/locale.conf
+  - /etc/locale.conf
+- action: command.run
+  privileged: true
+  command: cp
+  args:
+  - files/etc/cron.daily/pacman-update
+  - /etc/cron.daily/pacman-update
 - action: command.run
   privileged: true
   command: ln
@@ -163,11 +184,10 @@ actions:
   - /usr/bin/vi
 - action: command.run
   privileged: true
-  command: pacman
+  command: bash
   args:
-  - -Rsn
-  - --noconfirm
-  - mkinitcpio
+  - -c
+  - pacman -Q mkinitcpio &>/dev/null && pacman -Rsn --noconfirm mkinitcpio || true
 - action: command.run
   privileged: true
   command: systemctl
@@ -222,70 +242,70 @@ actions:
   args:
   - enable
   - sshd.service
-- action: package.install
-  provider: yay
-  list:
-  - aoe3-wine-steam
-  - blur-wine-steam
-  - broforce-gog
-  - cod4-wine-steam
-  - codaw-wine-steam
-  - codghosts-wine-steam
-  - codmw2-wine-steam
-  - codwaw-wine-steam
-  - daikatana-bin
-  - daikatana-data-gog
-  - dhewm3
-  - dirt2-wine-steam
-  - dirt3-wine-steam
-  - dirt4-wine-steam
-  - dirtrally2-wine-steam
-  - dirtshowdown-wine-steam
-  - distance-hib
-  - doom3-data-steam
-  - doom3bfg-data-gog
-  - doom3xp-data-steam
-  - dungeondefenders-hib
-  - eliteforce-data-gog
-  - enemy-territory
-  - enemy-territory-data
-  - etlegacy
-  - etqw
-  - etqw-data-steam
-  - flatout2-wine-gog
-  - grid-wine-gog
-  - grid2019-wine-steam
-  - ioquake3-git
-  - iortcw
-  - lib32-libxxf86misc
-  - libxxf86dga
-  - lilium-voyager-git
-  - minimetro
-  - prey
-  - prey-data-steam
-  - quake2-data-gog
-  - quake2-retexture
-  - quake2rtx-bin
-  - quake3-data-gog
-  - quake4
-  - quake4-data-gog
-  - rbdoom3-bfg-git
-  - rocketleague-steam
-  - rtcw-data-gog
-  - savage2
-  - serioussam2-steam
-  - serioussam3-steam
-  - serioussamfusion-steam
-  - simcity-3000-gog
-  - sm64ex-redrawn-git
-  - supermeatboy
-  - torchlight2-gog
-  - unreal-tournament-bin
-  - unreal-tournament-data-archiveorg
-  - ut2004-bin
-  - ut2004-data-archiveorg
-  - ut3-wine-steam
-  - warcraft3-wine
-  - wreckfest-wine-gog
-  - wreckfest-wine-steam
-  - wreckfest2-wine-steam
+# - action: package.install
+#   provider: yay
+#   list:
+#   - aoe3-wine-steam
+#   - blur-wine-steam
+#   - broforce-gog
+#   - cod4-wine-steam
+#   - codaw-wine-steam
+#   - codghosts-wine-steam
+#   - codmw2-wine-steam
+#   - codwaw-wine-steam
+#   - daikatana-bin
+#   - daikatana-data-gog
+#   - dhewm3
+#   - dirt2-wine-steam
+#   - dirt3-wine-steam
+#   - dirt4-wine-steam
+#   - dirtrally2-wine-steam
+#   - dirtshowdown-wine-steam
+#   - distance-hib
+#   - doom3-data-steam
+#   - doom3bfg-data-gog
+#   - doom3xp-data-steam
+#   - dungeondefenders-hib
+#   - eliteforce-data-gog
+#   - enemy-territory
+#   - enemy-territory-data
+#   - etlegacy
+#   - etqw
+#   - etqw-data-steam
+#   - flatout2-wine-gog
+#   - grid-wine-gog
+#   - grid2019-wine-steam
+#   - ioquake3-git
+#   - iortcw
+#   - lib32-libxxf86misc
+#   - libxxf86dga
+#   - lilium-voyager-git
+#   - minimetro
+#   - prey
+#   - prey-data-steam
+#   - quake2-data-gog
+#   - quake2-retexture
+#   - quake2rtx-bin
+#   - quake3-data-gog
+#   - quake4
+#   - quake4-data-gog
+#   - rbdoom3-bfg-git
+#   - rocketleague-steam
+#   - rtcw-data-gog
+#   - savage2
+#   - serioussam2-steam
+#   - serioussam3-steam
+#   - serioussamfusion-steam
+#   - simcity-3000-gog
+#   - sm64ex-redrawn-git
+#   - supermeatboy
+#   - torchlight2-gog
+#   - unreal-tournament-bin
+#   - unreal-tournament-data-archiveorg
+#   - ut2004-bin
+#   - ut2004-data-archiveorg
+#   - ut3-wine-steam
+#   - warcraft3-wine
+#   - wreckfest-wine-gog
+#   - wreckfest-wine-steam
+#   - wreckfest2-wine-steam
