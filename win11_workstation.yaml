@@ -32,6 +32,7 @@ actions:
       - Jigsaw.OutlineManager
       # - Jigsaw.Outline # Not present upstream yet.
       - Kitware.CMake
+      - LLVM.LLVM
       - MediaArea.MediaInfo.GUI
       - Meld.Meld
       - Microsoft.PowerShell
