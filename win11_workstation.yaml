@@ -1,14 +1,14 @@
 # win11_workstation.yaml
 where: os.name == "windows"
 actions:      
-  - action: command.run
-    command: powershell.exe
-    args:
-      - "-ExecutionPolicy"
-      - "Bypass"
-      - "-NoProfile"
-      - "-Command"
-      - "$h=(Get-WindowsOptionalFeature -FeatureName Microsoft-Hyper-V -Online -ErrorAction SilentlyContinue).State; if($h -eq 'Enabled'){exit 0}; $p=Get-ChildItem -Path \"$env:SystemRoot\\servicing\\Packages\" -Filter \"*Hyper-V*.mum\" -ErrorAction SilentlyContinue; if($p.Count -gt 0){ & \"$env:USERPROFILE\\lan-ipxe\\enable-hyperv-win11home.ps1\" }"
+  # - action: command.run
+  #   command: powershell.exe
+  #   args:
+  #     - "-ExecutionPolicy"
+  #     - "Bypass"
+  #     - "-NoProfile"
+  #     - "-Command"
+  #     - "$h=(Get-WindowsOptionalFeature -FeatureName Microsoft-Hyper-V -Online -ErrorAction SilentlyContinue).State; if($h -eq 'Enabled'){exit 0}; $p=Get-ChildItem -Path \"$env:SystemRoot\\servicing\\Packages\" -Filter \"*Hyper-V*.mum\" -ErrorAction SilentlyContinue; if($p.Count -gt 0){ & \"$env:USERPROFILE\\lan-ipxe\\enable-hyperv-win11home.ps1\" }"
   - action: package.install
     provider: winget
     list:
@@ -42,7 +42,7 @@ actions:
       - Microsoft.WSL
       - Mozilla.Firefox
       - mpv.net
-      - MSYS2.MSYS2
+      # - MSYS2.MSYS2 # Not handled cleanly.
       - Ninja-build.Ninja
       - Ookla.Speedtest.CLI
       - Ookla.Speedtest.Desktop
