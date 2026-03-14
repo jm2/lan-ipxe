@@ -9,6 +9,14 @@ actions:
   #     - "-NoProfile"
   #     - "-Command"
   #     - "$h=(Get-WindowsOptionalFeature -FeatureName Microsoft-Hyper-V -Online -ErrorAction SilentlyContinue).State; if($h -eq 'Enabled'){exit 0}; $p=Get-ChildItem -Path \"$env:SystemRoot\\servicing\\Packages\" -Filter \"*Hyper-V*.mum\" -ErrorAction SilentlyContinue; if($p.Count -gt 0){ & \"$env:USERPROFILE\\lan-ipxe\\enable-hyperv-win11home.ps1\" }"
+  - action: command.run
+    command: powershell.exe
+    args:
+      - "-ExecutionPolicy"
+      - "Bypass"
+      - "-NoProfile"
+      - "-Command"
+      - "$val=(Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\OpenSSH' -Name DefaultShell -ErrorAction SilentlyContinue).DefaultShell; if($val -eq 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'){exit 0}; & \"$env:USERPROFILE\\lan-ipxe\\enable-win11-openssh.ps1\""
   - action: package.install
     provider: winget
     list:
