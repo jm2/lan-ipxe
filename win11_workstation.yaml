@@ -16,7 +16,7 @@ actions:
       - "Bypass"
       - "-NoProfile"
       - "-Command"
-      - "$val=(Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\OpenSSH' -Name DefaultShell -ErrorAction SilentlyContinue).DefaultShell; if($val -eq 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'){exit 0}; & \"$env:USERPROFILE\\lan-ipxe\\enable-win11-openssh.ps1\""
+      - "$val=(Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\OpenSSH' -Name DefaultShell -ErrorAction SilentlyContinue).DefaultShell; if($val -eq 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'){exit 0}; & \"$env:USERPROFILE\\lan-ipxe\\enable-openssh-win11.ps1\""
   - action: package.install
     provider: winget
     list:

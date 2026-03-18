@@ -1,4 +1,4 @@
-# enable-win11-openssh.ps1
+# enable-openssh-win11.ps1
 
 # 1. Install the OpenSSH Server feature
 $capability = Get-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
