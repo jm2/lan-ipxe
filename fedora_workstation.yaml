@@ -38,7 +38,6 @@ actions:
   - alsa-sof-firmware
   - antigravity
   - bash-completion
-  - bash-preexec
   - bc
   - bluez
   - bluez-tools
@@ -75,7 +74,6 @@ actions:
   - google-noto-serif-fonts
   - gparted
   - gperf
-  - gradle
   - grub2
   - ImageMagick
   - less
@@ -95,10 +93,8 @@ actions:
   - openssl-devel
   - pipewire
   - pipewire-alsa
-  - pipewire-jack
   - pipewire-pulseaudio
   - pngcrush
-  - power-profiles-daemon
   - protobuf-compiler
   - python3-protobuf
   - rhythmbox
@@ -125,6 +121,7 @@ actions:
   list:
   - glibc-devel.i686
   - google-chrome-stable
+  - gradle
   - intel-media-driver
   - libstdc++-devel.i686
   - libva.i686
@@ -163,6 +160,14 @@ actions:
     net.baseart.Textpieces 
     com.rafaelmardojai.Blanket 
     org.freedesktop.Platform.VulkanLayer.gamescope
+- action: command.run
+  where: os.arch == "x86_64"
+  command: bash
+  args:
+  - -c
+  - >
+    flatpak install -y flathub 
+    com.google.AndroidStudio
 - action: file.copy
   source: bashrc
   target: "{{ env.HOME }}/.bashrc"
