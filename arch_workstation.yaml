@@ -259,6 +259,23 @@ actions:
   args:
   - -c
   - cp {{ env.HOME }}/.config/monitors.xml /etc/xdg/monitors.xml
+- action: command.run
+  privileged: true
+  command: bash
+  args:
+  - -c
+  - mkdir -p /etc/dconf/db/gdm.d
+- action: command.run
+  privileged: true
+  command: cp
+  args:
+  - files/etc/dconf/db/gdm.d/10-font-settings
+  - /etc/dconf/db/gdm.d/10-font-settings
+- action: command.run
+  privileged: true
+  command: dconf
+  args:
+  - update
 # - action: package.install
 #   provider: yay
 #   list:
