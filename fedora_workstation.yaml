@@ -108,7 +108,6 @@ actions:
   - SDL-devel
   - seahorse
   - squashfs-tools
-  - steam
   - sudo
   - system-config-printer
   - vim
@@ -132,6 +131,7 @@ actions:
   - libva-intel-driver
   - mesa-vulkan-drivers.i686
   - readline-devel.i686
+  - steam
   - vulkan-loader.i686
   - zlib-ng-compat-devel.i686
 - action: command.run
