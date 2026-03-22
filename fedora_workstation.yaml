@@ -1,0 +1,210 @@
+where: os.name == "linux"
+actions:
+- action: package.install
+  list:
+  - abattis-cantarell-fonts
+  - alsa-sof-firmware
+  - bash-completion
+  - bash-preexec
+  - bc
+  - bluez
+  - bluez-tools
+  - brasero
+  - cargo
+  - ccache
+  - chromium
+  - chrony
+  - clang
+  - cronie
+  - cups
+  - cups-pk-helper
+  - curl
+  - '@development-tools'
+  - dracut
+  - efibootmgr
+  - elfutils-libelf-devel
+  - flatpak
+  - gcc
+  - gdb
+  - git-lfs
+  - glibc-devel.i686
+  - '@gnome-desktop'
+  - gnome-extensions-app
+  - gnome-shell-extension-dash-to-dock
+  - gnome-tweaks
+  - gnupg2
+  - gnutls-devel
+  - golang
+  - google-noto-cjk-fonts
+  - google-noto-emoji-color-fonts
+  - google-noto-sans-fonts
+  - google-noto-serif-fonts
+  - gparted
+  - gperf
+  - gradle
+  - grub2
+  - ImageMagick
+  - intel-media-driver
+  - less
+  - libstdc++-devel.i686
+  - libva
+  - libva.i686
+  - libva-intel-driver
+  - libva-utils
+  - libxml2
+  - libxslt
+  - lldb
+  - llvm
+  - lutris
+  - lz4
+  - lzop
+  - maven
+  - mesa-vulkan-drivers
+  - mesa-vulkan-drivers.i686
+  - ncurses-devel
+  - NetworkManager
+  - openssl-devel
+  - pipewire
+  - pipewire-alsa
+  - pipewire-jack
+  - pipewire-pulseaudio
+  - pngcrush
+  - power-profiles-daemon
+  - protobuf-compiler
+  - python3-protobuf
+  - readline-devel.i686
+  - rhythmbox
+  - rsync
+  - rust
+  - schedtool
+  - SDL-devel
+  - seahorse
+  - squashfs-tools
+  - steam
+  - sudo
+  - system-config-printer
+  - vim
+  - vulkan-loader
+  - vulkan-loader.i686
+  - vulkan-tools
+  - vulkan-validation-layers
+  - wget
+  - wireplumber
+  - wpa_supplicant
+  - zip
+  - zlib-ng-compat-devel
+  - zlib-ng-compat-devel.i686
+  - zram-generator
+- action: command.run
+  command: bash
+  args:
+  - -c
+  - cargo install comtrya
+- action: command.run
+  command: bash
+  args:
+  - -c
+  - flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+- action: command.run
+  command: bash
+  args:
+  - -c
+  - >
+    flatpak install -y flathub 
+    org.pangeasoftware.Bugdom 
+    org.pangeasoftware.Bugdom2 
+    org.pangeasoftware.CroMagRally 
+    org.pangeasoftware.Nanosaur 
+    org.pangeasoftware.Nanosaur2 
+    org.pangeasoftware.Ottomatic 
+    org.pangeasoftware.MightyMike 
+    de.haeckerfelix.Fragments 
+    com.gitlab.newsflash 
+    com.belmoussaoui.Obfuscate 
+    net.baseart.Textpieces 
+    com.rafaelmardojai.Blanket 
+    org.freedesktop.Platform.VulkanLayer.gamescope
+- action: file.copy
+  source: bashrc
+  target: ~/.bashrc
+- action: file.copy
+  source: vimrc
+  target: ~/.vimrc
+- action: command.run
+  privileged: true
+  command: cp
+  args:
+  - files/etc/locale.conf
+  - /etc/locale.conf
+- action: command.run
+  privileged: true
+  command: cp
+  args:
+  - files/etc/bash.bashrc
+  - /etc/profile.d/99-arch-prompt.sh
+- action: command.run
+  privileged: true
+  command: systemctl
+  args:
+  - enable
+  - bluetooth.service
+- action: command.run
+  privileged: true
+  command: systemctl
+  args:
+  - enable
+  - chronyd.service
+- action: command.run
+  privileged: true
+  command: systemctl
+  args:
+  - enable
+  - crond.service
+- action: command.run
+  privileged: true
+  command: systemctl
+  args:
+  - enable
+  - gdm.service
+- action: command.run
+  privileged: true
+  command: systemctl
+  args:
+  - enable
+  - gnome-remote-desktop.service
+- action: command.run
+  privileged: true
+  command: systemctl
+  args:
+  - enable
+  - NetworkManager-dispatcher.service
+- action: command.run
+  privileged: true
+  command: systemctl
+  args:
+  - enable
+  - NetworkManager-wait-online.service
+- action: command.run
+  privileged: true
+  command: systemctl
+  args:
+  - enable
+  - NetworkManager.service
+- action: command.run
+  privileged: true
+  command: systemctl
+  args:
+  - enable
+  - sshd.service
+- action: command.run
+  privileged: true
+  command: systemctl
+  args:
+  - set-default
+  - graphical.target
+- action: command.run
+  privileged: true
+  command: restorecon
+  args:
+  - -v
+  - /etc/profile.d/99-arch-prompt.sh
