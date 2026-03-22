@@ -30,6 +30,7 @@ actions:
   - glibc-devel.i686
   - '@gnome-desktop'
   - gnome-extensions-app
+  - gnome-shell-extension-appindicator
   - gnome-shell-extension-dash-to-dock
   - gnome-tweaks
   - gnupg2
@@ -126,10 +127,10 @@ actions:
     org.freedesktop.Platform.VulkanLayer.gamescope
 - action: file.copy
   source: bashrc
-  target: ~/.bashrc
+  target: "{{ env.HOME }}/.bashrc"
 - action: file.copy
   source: vimrc
-  target: ~/.vimrc
+  target: "{{ env.HOME }}/.vimrc"
 - action: command.run
   privileged: true
   command: cp

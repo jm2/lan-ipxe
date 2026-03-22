@@ -1,10 +1,19 @@
+# Source global definitions
+if [ -f /etc/bashrc ]; then
+    . /etc/bashrc
+fi
+
+if [ -f /etc/bash.bashrc ]; then
+    . /etc/bash.bashrc
+fi
+
 export ANDROID_SDK_ROOT="/opt/android-sdk"
 export ANDROID_NDK_HOME="/opt/android-ndk"
 export ANDROID_HOME="/opt/android-sdk"
 export JAVA_HOME="/usr/lib/jvm/default"
-export PATH=~/bin:$PATH:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin
+export PATH="$HOME/bin:$HOME/.local/bin:$HOME/.cargo/bin:$HOME/go/bin:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
 export MAKEFLAGS="--jobs=$(nproc)"
-export EDITOR=vi
+export EDITOR="vi"
 export USE_CCACHE=1
 alias diff="colordiff -u"
 alias ssh="ssh -Y"
