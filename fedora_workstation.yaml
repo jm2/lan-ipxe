@@ -1,9 +1,42 @@
 where: os.name == "linux"
 actions:
+- action: command.run
+  privileged: true
+  command: cp
+  args:
+  - files/etc/yum.repos.d/antigravity.repo
+  - /etc/yum.repos.d/antigravity.repo
+- action: command.run
+  privileged: true
+  command: cp
+  args:
+  - files/etc/yum.repos.d/vscodium.repo
+  - /etc/yum.repos.d/vscodium.repo
+- action: command.run
+  privileged: true
+  where: os.arch == "x86_64"
+  command: cp
+  args:
+  - files/etc/yum.repos.d/google-chrome.repo
+  - /etc/yum.repos.d/google-chrome.repo
+- action: command.run
+  privileged: true
+  command: rpmkeys
+  args:
+  - --import
+  - https://gitlab.com/paulcarroty/vscodium-deb-rpm-repo/-/raw/master/pub.gpg
+- action: command.run
+  privileged: true
+  where: os.arch == "x86_64"
+  command: rpmkeys
+  args:
+  - --import
+  - https://dl.google.com/linux/linux_signing_key.pub
 - action: package.install
   list:
   - abattis-cantarell-fonts
   - alsa-sof-firmware
+  - antigravity
   - bash-completion
   - bash-preexec
   - bc
@@ -15,6 +48,7 @@ actions:
   - chromium
   - chrony
   - clang
+  - codium
   - cronie
   - cups
   - cups-pk-helper
@@ -27,7 +61,6 @@ actions:
   - gcc
   - gdb
   - git-lfs
-  - glibc-devel.i686
   - '@gnome-desktop'
   - gnome-extensions-app
   - gnome-shell-extension-appindicator
@@ -45,12 +78,8 @@ actions:
   - gradle
   - grub2
   - ImageMagick
-  - intel-media-driver
   - less
-  - libstdc++-devel.i686
   - libva
-  - libva.i686
-  - libva-intel-driver
   - libva-utils
   - libxml2
   - libxslt
@@ -61,7 +90,6 @@ actions:
   - lzop
   - maven
   - mesa-vulkan-drivers
-  - mesa-vulkan-drivers.i686
   - ncurses-devel
   - NetworkManager
   - openssl-devel
@@ -73,7 +101,6 @@ actions:
   - power-profiles-daemon
   - protobuf-compiler
   - python3-protobuf
-  - readline-devel.i686
   - rhythmbox
   - rsync
   - rust
@@ -86,7 +113,6 @@ actions:
   - system-config-printer
   - vim
   - vulkan-loader
-  - vulkan-loader.i686
   - vulkan-tools
   - vulkan-validation-layers
   - wget
@@ -94,8 +120,20 @@ actions:
   - wpa_supplicant
   - zip
   - zlib-ng-compat-devel
-  - zlib-ng-compat-devel.i686
   - zram-generator
+- action: package.install
+  where: os.arch == "x86_64"
+  list:
+  - glibc-devel.i686
+  - google-chrome-stable
+  - intel-media-driver
+  - libstdc++-devel.i686
+  - libva.i686
+  - libva-intel-driver
+  - mesa-vulkan-drivers.i686
+  - readline-devel.i686
+  - vulkan-loader.i686
+  - zlib-ng-compat-devel.i686
 - action: command.run
   command: bash
   args:
