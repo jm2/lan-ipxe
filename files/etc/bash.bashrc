@@ -48,17 +48,22 @@ esac
 # first to take advantage of user additions. Use internal bash
 # globbing instead of external grep binary.
 
-# sanitize TERM:
-safe_term=${TERM//[^[:alnum:]]/?}
-match_lhs=""
+# Check if terminal supports colors
+use_color=false
+if command -v tput >/dev/null 2>&1; then
+	ncolors=$(tput colors 2>/dev/null || echo 0)
+	if [[ -n "$ncolors" && "$ncolors" -ge 8 ]]; then
+		use_color=true
+	fi
+else
+	case ${TERM} in
+		xterm*|rxvt*|Eterm|aterm|kterm|gnome*|screen*|tmux*|*color*)
+			use_color=true
+			;;
+	esac
+fi
 
-[[ -f ~/.dir_colors ]] && match_lhs="${match_lhs}$(<~/.dir_colors)"
-[[ -f /etc/DIR_COLORS ]] && match_lhs="${match_lhs}$(</etc/DIR_COLORS)"
-[[ -z ${match_lhs} ]] \
-	&& type -P dircolors >/dev/null \
-	&& match_lhs=$(dircolors --print-database)
-
-if [[ $'\n'${match_lhs} == *$'\n'"TERM "${safe_term}* ]] ; then
+if $use_color ; then
 
 	# we have colors :-)
 
@@ -101,7 +106,7 @@ PS3="> "
 PS4="+ "
 
 # Try to keep environment pollution down, EPA loves us :-)
-unset safe_term match_lhs
+unset use_color ncolors
 
 if [ -f /etc/arch-release ]; then
     # Try to enable the auto-completion (type: "pacman -S bash-completion" to install it).
