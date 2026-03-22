@@ -253,6 +253,12 @@ actions:
   args:
   - enable
   - sshd.service
+- action: command.run
+  privileged: true
+  command: bash
+  args:
+  - -c
+  - cp {{ env.HOME }}/.config/monitors.xml /etc/xdg/monitors.xml
 # - action: package.install
 #   provider: yay
 #   list:

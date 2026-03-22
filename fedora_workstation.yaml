@@ -247,3 +247,15 @@ actions:
   args:
   - -v
   - /etc/profile.d/99-arch-prompt.sh
+- action: command.run
+  privileged: true
+  command: bash
+  args:
+  - -c
+  - cp {{ env.HOME }}/.config/monitors.xml /etc/xdg/monitors.xml
+- action: command.run
+  privileged: true
+  command: restorecon
+  args:
+  - -v
+  - /etc/xdg/monitors.xml
