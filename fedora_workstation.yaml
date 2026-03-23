@@ -14,11 +14,31 @@ actions:
   - /etc/yum.repos.d/vscodium.repo
 - action: command.run
   privileged: true
+  command: cp
+  args:
+  - files/etc/yum.repos.d/ookla_speedtest-cli.repo
+  - /etc/yum.repos.d/ookla_speedtest-cli.repo
+- action: command.run
+  privileged: true
   where: os.arch == "x86_64"
   command: cp
   args:
   - files/etc/yum.repos.d/google-chrome.repo
   - /etc/yum.repos.d/google-chrome.repo
+- action: command.run
+  privileged: true
+  where: os.arch == "x86_64"
+  command: cp
+  args:
+  - files/etc/yum.repos.d/rpmfusion-nonfree-nvidia-driver.repo
+  - /etc/yum.repos.d/rpmfusion-nonfree-nvidia-driver.repo
+- action: command.run
+  privileged: true
+  where: os.arch == "x86_64"
+  command: cp
+  args:
+  - files/etc/yum.repos.d/rpmfusion-nonfree-steam.repo
+  - /etc/yum.repos.d/rpmfusion-nonfree-steam.repo
 - action: command.run
   privileged: true
   command: rpmkeys
@@ -104,6 +124,7 @@ actions:
   - SDL-devel
   - seahorse
   - squashfs-tools
+  - speedtest
   - sudo
   - system-config-printer
   - vim
