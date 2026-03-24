@@ -158,30 +158,27 @@ actions:
   - -c
   - cargo install comtrya
 - action: command.run
+  privileged: true
   command: bash
   args:
   - -c
   - flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
 - action: command.run
+  privileged: true
   command: bash
   args:
   - -c
   - >
-    flatpak install -y flathub 
-    org.pangeasoftware.Bugdom 
-    org.pangeasoftware.Bugdom2 
-    org.pangeasoftware.CroMagRally 
-    org.pangeasoftware.Nanosaur 
-    org.pangeasoftware.Nanosaur2 
-    org.pangeasoftware.Ottomatic 
-    org.pangeasoftware.MightyMike 
-    de.haeckerfelix.Fragments 
-    com.gitlab.newsflash 
-    com.belmoussaoui.Obfuscate 
-    net.baseart.Textpieces 
-    com.rafaelmardojai.Blanket 
-    org.freedesktop.Platform.VulkanLayer.gamescope
+    flatpak install -y flathub
+    io.jor.bugdom
+    io.jor.bugdom2
+    io.jor.cromagrally
+    io.jor.nanosaur
+    io.jor.nanosaur2
+    io.jor.ottomatic
+    io.jor.mightymike
 - action: command.run
+  privileged: true
   where: os.arch == "x86_64"
   command: bash
   args:
