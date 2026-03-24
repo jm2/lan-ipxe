@@ -22,6 +22,7 @@ actions:
   - cronie
   - cups
   - cups-pk-helper
+  - dos2unix
   - dracut
   - efibootmgr
   - gcc
@@ -71,6 +72,7 @@ actions:
   - lutris
   - maven
   - mesa-utils
+  - nano
   - networkmanager
   - noto-fonts
   - noto-fonts-cjk
