@@ -13,25 +13,17 @@ actions:
   - files/etc/yum.repos.d/vscodium.repo
   - /etc/yum.repos.d/vscodium.repo
 - action: command.run
-  privileged: true
-  where: os.arch == "x86_64"
   command: bash
   args:
   - -c
-  - >
-    curl -fLo /tmp/speedtest.rpm
-    'https://packagecloud.io/ookla/speedtest-cli/packages/fedora/34/speedtest-1.2.0.84_1.ea6b6773cf-1.x86_64.rpm/download.rpm?distro_version_id=231'
-    && rpm -ivh --nodigest --nosignature /tmp/speedtest.rpm
-- action: command.run
-  privileged: true
-  where: os.arch == "aarch64"
-  command: bash
-  args:
-  - -c
-  - >
-    curl -fLo /tmp/speedtest.rpm
-    'https://packagecloud.io/ookla/speedtest-cli/packages/fedora/32/speedtest-1.1.1.28_1.c732eb82cf-1.aarch64.rpm/download.rpm?distro_version_id=216'
-    && rpm -ivh --nodigest --nosignature /tmp/speedtest.rpm
+  - >-
+    [ -f ~/.local/bin/speedtest ] ||
+    ( ARCH=$(uname -m) &&
+    mkdir -p ~/.local/bin &&
+    curl -fL "https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-${ARCH}.tgz" |
+    tar xz -C ~/.local/bin --strip-components=999 --wildcards '*/speedtest' 2>/dev/null ||
+    tar xz -C ~/.local/bin speedtest &&
+    chmod +x ~/.local/bin/speedtest )
 - action: command.run
   privileged: true
   where: os.arch == "x86_64"
