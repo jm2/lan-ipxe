@@ -109,6 +109,7 @@ actions:
   - cups
   - cups-pk-helper
   - curl
+  - dkms
   - '@development-tools'
   - dos2unix
   - dracut
@@ -124,6 +125,7 @@ actions:
   - gnome-shell-extension-dash-to-dock
   - gnome-tweaks
   - gnupg2
+  - kernel-headers
   - gnutls-devel
   - golang
   - google-noto-cjk-fonts
@@ -194,6 +196,22 @@ actions:
     steam
     vulkan-loader.i686
     zlib-ng-compat-devel.i686;
+    fi
+- action: command.run
+  privileged: true
+  command: bash
+  args:
+  - -c
+  - >-
+    dnf install -y kernel-devel-$(uname -r) &&
+    INSTALLED_VER=$(dkms status r8152 | head -n1 | cut -d'/' -f2 | cut -d',' -f1 | tr -d ' ') &&
+    rm -rf /tmp/realtek-r8152-dkms &&
+    git clone --depth 1 https://github.com/awesometic/realtek-r8152-dkms.git /tmp/realtek-r8152-dkms &&
+    REPO_VER=$(grep '^PACKAGE_VERSION=' /tmp/realtek-r8152-dkms/dkms.conf | cut -d'"' -f2) &&
+    if [ "$INSTALLED_VER" != "$REPO_VER" ]; then
+      cd /tmp/realtek-r8152-dkms &&
+      ./dkms-install.sh &&
+      dracut --force;
     fi
 - action: command.run
   command: bash
