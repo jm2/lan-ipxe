@@ -14,10 +14,24 @@ actions:
   - /etc/yum.repos.d/vscodium.repo
 - action: command.run
   privileged: true
-  command: cp
+  where: os.arch == "x86_64"
+  command: bash
   args:
-  - files/etc/yum.repos.d/ookla_speedtest-cli.repo
-  - /etc/yum.repos.d/ookla_speedtest-cli.repo
+  - -c
+  - >
+    curl -fLo /tmp/speedtest.rpm
+    'https://packagecloud.io/ookla/speedtest-cli/packages/fedora/34/speedtest-1.2.0.84_1.ea6b6773cf-1.x86_64.rpm/download.rpm?distro_version_id=231'
+    && rpm -ivh --nodigest --nosignature /tmp/speedtest.rpm
+- action: command.run
+  privileged: true
+  where: os.arch == "aarch64"
+  command: bash
+  args:
+  - -c
+  - >
+    curl -fLo /tmp/speedtest.rpm
+    'https://packagecloud.io/ookla/speedtest-cli/packages/fedora/32/speedtest-1.1.1.28_1.c732eb82cf-1.aarch64.rpm/download.rpm?distro_version_id=216'
+    && rpm -ivh --nodigest --nosignature /tmp/speedtest.rpm
 - action: command.run
   privileged: true
   where: os.arch == "x86_64"
@@ -126,7 +140,6 @@ actions:
   - SDL-devel
   - seahorse
   - squashfs-tools
-  - speedtest
   - sudo
   - system-config-printer
   - vim
