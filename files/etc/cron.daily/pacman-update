@@ -18,5 +18,5 @@ fi
 
 if [[ ! -d "/usr/lib/modules/$(uname -r)" ]]; then
     echo "Running kernel modules not found (likely upgraded). Scheduling reboot..."
-    shutdown -r +30 "Rebooting for kernel upgrade..."
+    wall "Rebooting for kernel upgrade in 30 minutes..." && systemd-run --on-active=30m systemctl reboot -i
 fi
