@@ -20,36 +20,37 @@ actions:
     [ -f ~/.local/bin/speedtest ] ||
     ( ARCH=$(uname -m) &&
     mkdir -p ~/.local/bin &&
-    curl -fL "https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-${ARCH}.tgz" |
-    tar xz -C ~/.local/bin --strip-components=999 --wildcards '*/speedtest' 2>/dev/null ||
-    tar xz -C ~/.local/bin speedtest &&
-    chmod +x ~/.local/bin/speedtest )
+    curl -fLo /tmp/speedtest.tgz
+    "https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-${ARCH}.tgz" &&
+    tar xzf /tmp/speedtest.tgz -C ~/.local/bin speedtest &&
+    chmod +x ~/.local/bin/speedtest &&
+    rm -f /tmp/speedtest.tgz )
 - action: command.run
   privileged: true
   command: bash
   args:
   - -c
-  - >
+  - >-
     if [ "$(uname -m)" = "x86_64" ]; then
-      cp files/etc/yum.repos.d/google-chrome.repo /etc/yum.repos.d/google-chrome.repo;
+    cp files/etc/yum.repos.d/google-chrome.repo /etc/yum.repos.d/google-chrome.repo;
     fi
 - action: command.run
   privileged: true
   command: bash
   args:
   - -c
-  - >
+  - >-
     if [ "$(uname -m)" = "x86_64" ]; then
-      cp files/etc/yum.repos.d/rpmfusion-nonfree-nvidia-driver.repo /etc/yum.repos.d/rpmfusion-nonfree-nvidia-driver.repo;
+    cp files/etc/yum.repos.d/rpmfusion-nonfree-nvidia-driver.repo /etc/yum.repos.d/rpmfusion-nonfree-nvidia-driver.repo;
     fi
 - action: command.run
   privileged: true
   command: bash
   args:
   - -c
-  - >
+  - >-
     if [ "$(uname -m)" = "x86_64" ]; then
-      cp files/etc/yum.repos.d/rpmfusion-nonfree-steam.repo /etc/yum.repos.d/rpmfusion-nonfree-steam.repo;
+    cp files/etc/yum.repos.d/rpmfusion-nonfree-steam.repo /etc/yum.repos.d/rpmfusion-nonfree-steam.repo;
     fi
 - action: command.run
   privileged: true
@@ -62,9 +63,9 @@ actions:
   command: bash
   args:
   - -c
-  - >
+  - >-
     if [ "$(uname -m)" = "x86_64" ]; then
-      rpmkeys --import https://dl.google.com/linux/linux_signing_key.pub;
+    rpmkeys --import https://dl.google.com/linux/linux_signing_key.pub;
     fi
 - action: package.install
   list:
@@ -157,21 +158,21 @@ actions:
   command: bash
   args:
   - -c
-  - >
+  - >-
     if [ "$(uname -m)" = "x86_64" ]; then
-      dnf install -y
-      glibc-devel.i686
-      google-chrome-stable
-      gradle
-      intel-media-driver
-      libstdc++-devel.i686
-      libva.i686
-      libva-intel-driver
-      mesa-vulkan-drivers.i686
-      readline-devel.i686
-      steam
-      vulkan-loader.i686
-      zlib-ng-compat-devel.i686;
+    dnf install -y
+    glibc-devel.i686
+    google-chrome-stable
+    gradle
+    intel-media-driver
+    libstdc++-devel.i686
+    libva.i686
+    libva-intel-driver
+    mesa-vulkan-drivers.i686
+    readline-devel.i686
+    steam
+    vulkan-loader.i686
+    zlib-ng-compat-devel.i686;
     fi
 - action: command.run
   command: bash
@@ -189,7 +190,7 @@ actions:
   command: bash
   args:
   - -c
-  - >
+  - >-
     flatpak install -y flathub
     io.jor.bugdom
     io.jor.bugdom2
@@ -203,10 +204,10 @@ actions:
   command: bash
   args:
   - -c
-  - >
+  - >-
     if [ "$(uname -m)" = "x86_64" ]; then
-      flatpak install -y flathub
-      com.google.AndroidStudio;
+    flatpak install -y flathub
+    com.google.AndroidStudio;
     fi
 - action: file.copy
   source: bashrc
