@@ -142,6 +142,7 @@ actions:
   - ookla-speedtest-bin
   - openarena
   - ottomatic
+  - payload-dumper-go-bin
   - steamcmd
   - tremulous-grangerhub-bin
   - tuxracer
