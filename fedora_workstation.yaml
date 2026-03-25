@@ -13,6 +13,14 @@ actions:
   - files/etc/yum.repos.d/vscodium.repo
   - /etc/yum.repos.d/vscodium.repo
 - action: command.run
+  privileged: true
+  command: dnf
+  args:
+  - install
+  - -y
+  - https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-44.noarch.rpm
+  - https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-44.noarch.rpm
+- action: command.run
   command: bash
   args:
   - -c
@@ -163,7 +171,6 @@ actions:
     dnf install -y
     glibc-devel.i686
     google-chrome-stable
-    gradle
     intel-media-driver
     libstdc++-devel.i686
     libva.i686
@@ -301,10 +308,10 @@ actions:
   - cp {{ env.HOME }}/.config/monitors.xml /etc/xdg/monitors.xml
 - action: command.run
   privileged: true
-  command: restorecon
+  command: bash
   args:
-  - -v
-  - /etc/xdg/monitors.xml
+  - -c
+  - restorecon -v /etc/xdg/monitors.xml || true
 - action: command.run
   privileged: true
   command: bash
@@ -324,8 +331,7 @@ actions:
   - update
 - action: command.run
   privileged: true
-  command: restorecon
+  command: bash
   args:
-  - -R
-  - -v
-  - /etc/dconf
+  - -c
+  - restorecon -R -v /etc/dconf || true
