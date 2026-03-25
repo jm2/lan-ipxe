@@ -115,6 +115,7 @@ actions:
   - dracut
   - efibootmgr
   - elfutils-libelf-devel
+  - erofs-utils
   - flatpak
   - gcc
   - gdb

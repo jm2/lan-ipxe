@@ -25,6 +25,7 @@ actions:
   - dos2unix
   - dracut
   - efibootmgr
+  - erofs-utils
   - gcc
   - gdb
   - gnome
