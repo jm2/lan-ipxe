@@ -73,6 +73,7 @@ actions:
   - lutris
   - maven
   - mesa-utils
+  - mpv
   - nano
   - networkmanager
   - noto-fonts
@@ -98,6 +99,7 @@ actions:
   - system-config-printer
   - tree
   - vim
+  - vlc
   - vulkan-devel
   - vulkan-intel
   - vulkan-mesa-layers

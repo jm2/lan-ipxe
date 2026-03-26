@@ -149,6 +149,7 @@ actions:
   - lzop
   - maven
   - mesa-vulkan-drivers
+  - mpv
   - nano
   - ncurses-devel
   - NetworkManager
@@ -170,6 +171,7 @@ actions:
   - system-config-printer
   - tree
   - vim
+  - vlc
   - vulkan-loader
   - vulkan-tools
   - vulkan-validation-layers
