@@ -90,6 +90,7 @@ actions:
   - rhythmbox
   - rsync
   - rust
+  - screen
   - seahorse
   - sof-firmware
   - steam
