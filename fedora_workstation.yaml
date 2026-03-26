@@ -168,6 +168,7 @@ actions:
   - squashfs-tools
   - sudo
   - system-config-printer
+  - tree
   - vim
   - vulkan-loader
   - vulkan-tools

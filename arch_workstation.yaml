@@ -96,6 +96,7 @@ actions:
   - steam
   - sudo
   - system-config-printer
+  - tree
   - vim
   - vulkan-devel
   - vulkan-intel
