@@ -124,6 +124,7 @@ actions:
   - gnome-extensions-app
   - gnome-shell-extension-appindicator
   - gnome-shell-extension-dash-to-dock
+  - gnome-shell-extension-freon
   - gnome-tweaks
   - gnupg2
   - kernel-headers
