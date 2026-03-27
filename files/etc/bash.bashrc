@@ -83,7 +83,7 @@ if $use_color ; then
 		fi
 	fi
 
-	PS1="$(if [[ ${EUID} == 0 ]]; then echo '\[\033[01;31m\]\h'; else echo '\[\033[01;32m\]\u@\h'; fi)\[\033[01;34m\] \w \$([[ \$? -ne 0 ]] && echo \"\001\033[01;31m\002:(\001\033[01;34m\002 \")\\$\[\033[00m\] "
+	PS1="\[\033[01;$(if [[ ${EUID} == 0 ]]; then echo '31'; else echo '32'; fi)m\]$(if [[ ${EUID} == 0 ]]; then echo '\h'; else echo '\u@\h'; fi)\[\033[01;34m\] \w\$([[ \$? -ne 0 ]] && printf \"\001\033[01;31m\002:(\001\033[01;34m\002 \") \\$\[\033[00m\] "
 
 	# Use this other PS1 string if you want \W for root and \w for all other users:
 	# PS1="$(if [[ ${EUID} == 0 ]]; then echo '\[\033[01;31m\]\h\[\033[01;34m\] \W'; else echo '\[\033[01;32m\]\u@\h\[\033[01;34m\] \w'; fi) \$([[ \$? -ne 0 ]] && echo \"\001\033[01;31m\002:(\001\033[01;34m\002 \")\\$\[\033[00m\] "
