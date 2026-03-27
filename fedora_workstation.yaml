@@ -269,7 +269,7 @@ actions:
   command: cp
   args:
   - files/etc/bash.bashrc
-  - /etc/profile.d/99-arch-prompt.sh
+  - /etc/profile.d/01-arch-prompt.sh
 - action: command.run
   privileged: true
   command: systemctl
@@ -335,7 +335,7 @@ actions:
   command: restorecon
   args:
   - -v
-  - /etc/profile.d/99-arch-prompt.sh
+  - /etc/profile.d/01-arch-prompt.sh
 - action: command.run
   privileged: true
   command: bash

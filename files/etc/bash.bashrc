@@ -14,9 +14,6 @@
 # If not running interactively, don't do anything!
 [[ $- != *i* ]] && return
 
-# Force 256-color support for Windows Terminal clients
-export TERM=xterm-256color
-
 # Bash won't get SIGWINCH if another process is in the foreground.
 # Enable checkwinsize so that bash will check the terminal size when
 # it regains control.
@@ -26,14 +23,24 @@ shopt -s checkwinsize
 # Enable history appending instead of overwriting.
 shopt -s histappend
 
+# Helper to append to PROMPT_COMMAND regardless of whether it's an array or a string.
+_append_prompt_command() {
+    if [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" =~ "declare -a" ]]; then
+        PROMPT_COMMAND+=("$1")
+    else
+        PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND; }$1"
+    fi
+}
+
 case ${TERM} in
-	xterm*|rxvt*|Eterm|aterm|kterm|gnome*)
-		PROMPT_COMMAND=${PROMPT_COMMAND:+$PROMPT_COMMAND; }'printf "\033]0;%s@%s:%s\007" "${USER}" "${HOSTNAME%%.*}" "${PWD/#$HOME/~}"'
+	xterm*|rxvt*|Eterm|aterm|kterm|gnome*|cygwin*)
+		_append_prompt_command 'printf "\033]0;%s@%s:%s\007" "${USER}" "${HOSTNAME%%.*}" "${PWD/#$HOME/~}"'
 		;;
 	screen)
-		PROMPT_COMMAND=${PROMPT_COMMAND:+$PROMPT_COMMAND; }'printf "\033_%s@%s:%s\033\\" "${USER}" "${HOSTNAME%%.*}" "${PWD/#$HOME/~}"'
+		_append_prompt_command 'printf "\033_%s@%s:%s\033\\" "${USER}" "${HOSTNAME%%.*}" "${PWD/#$HOME/~}"'
 		;;
 esac
+unset -f _append_prompt_command
 
 # fortune is a simple program that displays a pseudorandom message
 # from a database of quotations at logon and/or logout.
@@ -57,7 +64,7 @@ if command -v tput >/dev/null 2>&1; then
 	fi
 else
 	case ${TERM} in
-		xterm*|rxvt*|Eterm|aterm|kterm|gnome*|screen*|tmux*|*color*)
+		xterm*|rxvt*|Eterm|aterm|kterm|gnome*|screen*|tmux*|*color*|cygwin*)
 			use_color=true
 			;;
 	esac
