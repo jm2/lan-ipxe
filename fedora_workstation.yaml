@@ -242,6 +242,9 @@ actions:
     io.jor.nanosaur2
     io.jor.ottomatic
     io.jor.mightymike
+    net.nokyan.Resources
+    org.getoutline.OutlineClient
+    org.getoutline.OutlineManager
 - action: command.run
   privileged: true
   command: bash
