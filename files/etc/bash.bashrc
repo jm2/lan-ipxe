@@ -83,10 +83,10 @@ if $use_color ; then
 		fi
 	fi
 
-	PS1="$(if [[ ${EUID} == 0 ]]; then echo '\[\033[01;31m\]\h'; else echo '\[\033[01;32m\]\u@\h'; fi)\[\033[01;34m\] \w \$([[ \$? -ne 0 ]] && echo \"\001\033[01;31m\002:(\001\033[01;34m\002 \")\\$\[\033[00m\] "
+	PS1="$(if [[ ${EUID} == 0 ]]; then echo '\[\033[01;31m\]\h'; else echo '\[\033[01;32m\]\u@\h'; fi)\[\033[01;34m\] \w \$([[ \$? != 0 ]] && echo \"\[\033[01;31m\]:(\[\033[01;34m\] \")\\$\[\033[00m\] "
 
 	# Use this other PS1 string if you want \W for root and \w for all other users:
-	# PS1="$(if [[ ${EUID} == 0 ]]; then echo '\[\033[01;31m\]\h\[\033[01;34m\] \W'; else echo '\[\033[01;32m\]\u@\h\[\033[01;34m\] \w'; fi) \$([[ \$? -ne 0 ]] && echo \"\001\033[01;31m\002:(\001\033[01;34m\002 \")\\$\[\033[00m\] "
+	# PS1="$(if [[ ${EUID} == 0 ]]; then echo '\[\033[01;31m\]\h\[\033[01;34m\] \W'; else echo '\[\033[01;32m\]\u@\h\[\033[01;34m\] \w'; fi) \$([[ \$? != 0 ]] && echo \"\[\033[01;31m\]:(\[\033[01;34m\] \")\\$\[\033[00m\] "
 
 	alias ls="ls --color=auto"
 	alias dir="dir --color=auto"
@@ -101,7 +101,7 @@ else
 
 	# show root@ when we do not have colors
 
-	PS1="\u@\h \w \$([[ \$? -ne 0 ]] && echo \":( \")\$ "
+	PS1="\u@\h \w \$([[ \$? != 0 ]] && echo \":( \")\$ "
 
 	# Use this other PS1 string if you want \W for root and \w for all other users:
 	# PS1="\u@\h $(if [[ ${EUID} == 0 ]]; then echo '\W'; else echo '\w'; fi) \$([[ \$? != 0 ]] && echo \":( \")\$ "
