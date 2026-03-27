@@ -269,10 +269,19 @@ actions:
   - /etc/locale.conf
 - action: command.run
   privileged: true
-  command: cp
+  command: bash
   args:
-  - files/etc/bash.bashrc
-  - /etc/profile.d/01-arch-prompt.sh
+  - -c
+  - >-
+    mkdir -p /etc/sysctl.d &&
+    cp files/etc/sysctl.d/99-inotify.conf /etc/sysctl.d/99-inotify.conf &&
+    restorecon -v /etc/sysctl.d/99-inotify.conf
+- action: command.run
+  privileged: true
+  command: bash
+  args:
+  - -c
+  - cp files/etc/bash.bashrc /etc/profile.d/01-arch-prompt.sh && restorecon -v /etc/profile.d/01-arch-prompt.sh
 - action: command.run
   privileged: true
   command: systemctl
@@ -335,22 +344,10 @@ actions:
   - graphical.target
 - action: command.run
   privileged: true
-  command: restorecon
-  args:
-  - -v
-  - /etc/profile.d/01-arch-prompt.sh
-- action: command.run
-  privileged: true
   command: bash
   args:
   - -c
-  - cp {{ env.HOME }}/.config/monitors.xml /etc/xdg/monitors.xml
-- action: command.run
-  privileged: true
-  command: bash
-  args:
-  - -c
-  - restorecon -v /etc/xdg/monitors.xml || true
+  - cp {{ env.HOME }}/.config/monitors.xml /etc/xdg/monitors.xml && restorecon -v /etc/xdg/monitors.xml
 - action: command.run
   privileged: true
   command: bash
@@ -359,18 +356,12 @@ actions:
   - mkdir -p /etc/dconf/db/gdm.d
 - action: command.run
   privileged: true
-  command: cp
+  command: bash
   args:
-  - files/etc/dconf/db/gdm.d/10-font-settings
-  - /etc/dconf/db/gdm.d/10-font-settings
+  - -c
+  - cp files/etc/dconf/db/gdm.d/10-font-settings /etc/dconf/db/gdm.d/10-font-settings && restorecon -R -v /etc/dconf
 - action: command.run
   privileged: true
   command: dconf
   args:
   - update
-- action: command.run
-  privileged: true
-  command: bash
-  args:
-  - -c
-  - restorecon -R -v /etc/dconf || true

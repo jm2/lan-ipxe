@@ -185,6 +185,12 @@ actions:
   - /etc/locale.conf
 - action: command.run
   privileged: true
+  command: bash
+  args:
+  - -c
+  - mkdir -p /etc/sysctl.d && cp files/etc/sysctl.d/99-inotify.conf /etc/sysctl.d/99-inotify.conf
+- action: command.run
+  privileged: true
   command: cp
   args:
   - files/etc/cron.daily/pacman-update
