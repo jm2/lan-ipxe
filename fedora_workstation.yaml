@@ -14,12 +14,13 @@ actions:
   - /etc/yum.repos.d/vscodium.repo
 - action: command.run
   privileged: true
-  command: dnf
+  command: bash
   args:
-  - install
-  - -y
-  - https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-44.noarch.rpm
-  - https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-44.noarch.rpm
+  - -c
+  - >-
+    dnf install -y
+    https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm
+    https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm
 - action: command.run
   privileged: true
   command: ln
@@ -125,6 +126,7 @@ actions:
   - gnome-shell-extension-appindicator
   - gnome-shell-extension-dash-to-dock
   - gnome-shell-extension-freon
+  - gnome-shell-extension-system-monitor
   - gnome-tweaks
   - gnupg2
   - kernel-headers
