@@ -114,6 +114,7 @@ actions:
   - '@development-tools'
   - dos2unix
   - dracut
+  - dtc
   - efibootmgr
   - elfutils-libelf-devel
   - erofs-utils
@@ -145,6 +146,7 @@ actions:
   - libva-utils
   - libxml2
   - libxslt
+  - lld
   - lldb
   - llvm
   - lutris
@@ -157,6 +159,7 @@ actions:
   - ncurses-devel
   - NetworkManager
   - openssl-devel
+  - pigz
   - pipewire
   - pipewire-alsa
   - pipewire-pulseaudio
