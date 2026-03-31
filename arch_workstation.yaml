@@ -148,6 +148,7 @@ actions:
   - openarena
   - ottomatic
   - payload-dumper-go-bin
+  - powershell-bin
   - steamcmd
   - tremulous-grangerhub-bin
   - tuxracer
