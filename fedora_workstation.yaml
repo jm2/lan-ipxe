@@ -140,8 +140,10 @@ actions:
   - gparted
   - gperf
   - grub2
+  - gtk4-devel
   - ImageMagick
   - less
+  - libadwaita-devel
   - libva
   - libva-utils
   - libxml2
