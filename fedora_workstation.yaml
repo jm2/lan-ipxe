@@ -171,6 +171,7 @@ actions:
   - rhythmbox
   - rsync
   - rust
+  - rustfmt
   - schedtool
   - SDL-devel
   - seahorse
