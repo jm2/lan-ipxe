@@ -105,6 +105,7 @@ actions:
   - chromium
   - chrony
   - clang
+  - clippy
   - codium
   - cronie
   - cups
