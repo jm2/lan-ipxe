@@ -90,7 +90,7 @@ actions:
   - pipewire-pulse
   - power-profiles-daemon
   - ptyxis
-  - rhythmbox
+  - rpm-tools
   - rsync
   - rust
   - screen
@@ -152,6 +152,7 @@ actions:
   - powershell-bin
   - steamcmd
   - tremulous-grangerhub-bin
+  - tributary-bin
   - tuxracer
   - unigine-heaven
   - ventoy-bin
