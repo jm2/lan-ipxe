@@ -281,6 +281,14 @@ actions:
   source: vimrc
   target: "{{ env.HOME }}/.vimrc"
 - action: command.run
+  command: bash
+  args:
+  - -c
+  - mkdir -p {{ env.HOME }}/.config/Antigravity/User
+- action: file.copy
+  source: config/Antigravity/User/settings.json
+  target: "{{ env.HOME }}/.config/Antigravity/User/settings.json"
+- action: command.run
   privileged: true
   command: cp
   args:

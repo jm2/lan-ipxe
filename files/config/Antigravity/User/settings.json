@@ -1,0 +1,18 @@
+{
+    "git.confirmSync": false,
+    "terminal.integrated.shellIntegration.enabled": false,
+    "terminal.integrated.profiles.linux": {
+        "Antigravity Agent (Clean)": {
+            "path": "bash",
+            "args": [
+                "--noprofile",
+                "--norc"
+            ],
+            "env": {
+                "TERM": "dumb",
+                "DEBIAN_FRONTEND": "noninteractive"
+            }
+        }
+    },
+    "terminal.integrated.defaultProfile.linux": "Antigravity Agent (Clean)"
+}
