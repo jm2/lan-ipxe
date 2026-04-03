@@ -14,6 +14,14 @@ actions:
   - /etc/yum.repos.d/vscodium.repo
 - action: command.run
   privileged: true
+  command: dnf
+  args:
+  - copr
+  - enable
+  - -y
+  - jmsqrd/tributary
+- action: command.run
+  privileged: true
   command: bash
   args:
   - -c
@@ -180,6 +188,7 @@ actions:
   - sudo
   - system-config-printer
   - tree
+  - tributary
   - vim
   - vlc
   - vulkan-loader
@@ -253,8 +262,6 @@ actions:
     io.jor.ottomatic
     io.jor.mightymike
     net.nokyan.Resources
-    org.getoutline.OutlineClient
-    org.getoutline.OutlineManager
 - action: command.run
   privileged: true
   command: bash
@@ -263,7 +270,9 @@ actions:
   - >-
     if [ "$(uname -m)" = "x86_64" ]; then
     flatpak install -y flathub
-    com.google.AndroidStudio;
+    com.google.AndroidStudio
+    org.getoutline.OutlineClient
+    org.getoutline.OutlineManager;
     fi
 - action: file.copy
   source: bashrc
