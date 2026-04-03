@@ -19,6 +19,7 @@ actions:
   - chrony
   - clang
   - chromium
+  - colordiff
   - cronie
   - cups
   - cups-pk-helper
