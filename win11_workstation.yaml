@@ -38,7 +38,8 @@ actions:
       - GuinpinSoft.MakeMKV
       - Inkscape.Inkscape
       - Jigsaw.OutlineManager
-      # - Jigsaw.Outline # Not present upstream yet.
+      # - Jigsaw.Outline # Not present upstream.
+      - jm2.Tributary
       - Kitware.CMake
       - LLVM.LLVM
       - MediaArea.MediaInfo.GUI
