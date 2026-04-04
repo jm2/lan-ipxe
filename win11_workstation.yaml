@@ -59,6 +59,7 @@ actions:
       - PuTTY.PuTTY
       - Python.Python.3.14
       - Rufus.Rufus
+      - Rustlang.Rust.GNU
       - Rustlang.Rust.MSVC
       - Silicondust.HDHomeRun
       - SuperTux.SuperTux
