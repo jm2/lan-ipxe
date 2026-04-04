@@ -109,6 +109,7 @@ actions:
   - wget
   - wireplumber
   - wpa_supplicant
+  - yt-dlp
   - zram-generator
 - action: command.run
   command: bash
@@ -136,6 +137,7 @@ actions:
   - gnome-icon-theme-symbolic
   - gnome-shell-extension-dash-to-dock
   - google-chrome
+  - lgogdownloader
   - lineageos-devel
   - luxtorpeda-bin
   - maelstrom
@@ -156,6 +158,7 @@ actions:
   - tuxracer
   - unigine-heaven
   - ventoy-bin
+  - video-downloader
   - vscodium-bin
 - action: file.copy
   source: bashrc
