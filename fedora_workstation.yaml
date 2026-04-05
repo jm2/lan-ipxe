@@ -119,6 +119,7 @@ actions:
   - cups
   - cups-pk-helper
   - curl
+  - dbus-devel
   - dkms
   - '@development-tools'
   - dos2unix
@@ -149,6 +150,7 @@ actions:
   - gparted
   - gperf
   - grub2
+  - gstreamer1-devel
   - gtk4-devel
   - ImageMagick
   - less
