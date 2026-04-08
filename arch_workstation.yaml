@@ -82,6 +82,8 @@ actions:
   - noto-fonts-extra
   - nvidia-open
   - nvidia-utils
+  - ollama-cuda
+  - ollama-vulkan
   - opencl-mesa
   - pacman-contrib
   - pipewire
