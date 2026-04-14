@@ -116,7 +116,7 @@ try {
     reg load "HKLM\$tempHiveName" "$sysHivePath" | Out-Null
 
     # 1. Core iSCSI and Network Stack Services (Universally Required)
-    $coreServices = @("MSiSCSI", "NDIS", "Tcpip", "netfs")
+    $coreServices = @("MSiSCSI", "iScsiPrt", "iscsi", "NDIS", "Tcpip", "netfs")
     foreach ($service in $coreServices) {
         $regPath = "HKLM:\$tempHiveName\ControlSet001\Services\$service"
         if (Test-Path $regPath) {
@@ -126,15 +126,19 @@ try {
         }
     }
 
-    # 2. Targeted Enterprise & Prosumer NIC Drivers
+    # 2. Targeted Virtual, Enterprise & Prosumer NIC Drivers
     $nicDrivers = @(
+        # --- Virtual Ethernet ---
+        "netvsc",                 # Hyper-V Virtual Ethernet
+        "netkvm",                 # VirtIO Ethernet
+
         # --- 2.5GbE, 5GbE, & 10GbE Prosumer/Workstation ---
         "e2fexpress",             # Intel 2.5GbE (I225-V / I226-V)
         "rt640x64",               # Realtek PCIe 1G/2.5G/5G/10G (RTL8125, RTL8126, RTL8127)
         "rtump64x64", "rtux64w10",# Realtek USB 2.5G/5G/10G (RTL8156, RTL8157, RTL8159)
         "rtnetcx",                # Realtek NetAdapterCx (Next-Gen Windows 11 Driver)
         "aqnic650", "aqnic",      # Marvell/Aquantia 2.5/5/10GbE (AQC107 / AQC113)
-        
+
         # --- 10/40/100GbE Enterprise ---
         "mlx5", "mlx4eth",        # Mellanox ConnectX-3, 4, 5, 6
         "ixgbe", "ixgben", "ixv", # Intel 10GbE (82599/X540)
