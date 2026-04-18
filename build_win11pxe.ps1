@@ -23,7 +23,13 @@ param(
     [long]$SizeBytes = 128GB,
 
     [Parameter(Mandatory = $false)]
-    [int]$ImageIndex = 6 # Windows 11 Pro is typically index 6 on standard media
+    [int]$ImageIndex = 6, # Windows 11 Pro is typically index 6 on standard media
+
+    [Parameter(Mandatory = $false)]
+    [switch]$Drivers,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$Updates
 )
 
 # Check for Administrator privileges
@@ -95,6 +101,51 @@ try {
     Write-Host ">>> Applying Windows Image (Index $ImageIndex) from $wimPath to VHDX..." -ForegroundColor Cyan
     # Using DISM to apply the image
     dism.exe /Apply-Image /ImageFile:$wimPath /Index:$ImageIndex /ApplyDir:$winDrivePath
+
+    if ($Drivers) {
+        Write-Host ">>> Executing Driver Scrapers..." -ForegroundColor Cyan
+        $driverTempPath = Join-Path $env:TEMP "Win11Drivers_$(Get-Random)"
+        $driverScripts = Get-ChildItem -Path $PSScriptRoot -Filter "Get-*Drivers.ps1"
+        foreach ($script in $driverScripts) {
+            Write-Host "    -> Running $($script.Name)..."
+            & $script.FullName -DownloadPath $driverTempPath
+        }
+        
+        Write-Host ">>> Injecting Drivers into Offline Image..." -ForegroundColor Cyan
+        dism.exe /Image:$winDrivePath /Add-Driver /Driver:$driverTempPath /Recurse
+        
+        Write-Host ">>> Cleaning up Driver Temp Path..."
+        Remove-Item -Path $driverTempPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($Updates) {
+        Write-Host ">>> Executing Updates Scraper..." -ForegroundColor Cyan
+        $win11Version = "25H2"
+        if ($IsoPath -match "Win11_([0-9]{2}H[0-9])_") {
+            $win11Version = $matches[1]
+        }
+        
+        $updatesTempPath = Join-Path $env:TEMP "Win11Updates_$(Get-Random)"
+        $updateScript = Join-Path $PSScriptRoot "Get-Win11CumulativeUpdates.ps1"
+        if (Test-Path $updateScript) {
+            Write-Host "    -> Running Get-Win11CumulativeUpdates.ps1 (Targeting $win11Version)..."
+            & $updateScript -Version $win11Version -DownloadPath $updatesTempPath
+            
+            $packages = Get-ChildItem -Path $updatesTempPath -Include *.msu,*.cab -Recurse
+            if ($packages) {
+                Write-Host ">>> Injecting Cumulative Updates into Offline Image..." -ForegroundColor Cyan
+                foreach ($pkg in $packages) {
+                    Write-Host "    -> Adding Package: $($pkg.Name)"
+                    dism.exe /Image:$winDrivePath /Add-Package /PackagePath:$pkg.FullName
+                }
+            }
+            
+            Write-Host ">>> Cleaning up Updates Temp Path..."
+            Remove-Item -Path $updatesTempPath -Recurse -Force -ErrorAction SilentlyContinue
+        } else {
+            Write-Host "    [!] Get-Win11CumulativeUpdates.ps1 not found, skipping updates." -ForegroundColor Yellow
+        }
+    }
 
     Write-Host ">>> Writing Boot Files (BCDBoot)..." -ForegroundColor Cyan
     $winDir = Join-Path $winDrivePath "Windows"
