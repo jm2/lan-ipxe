@@ -29,6 +29,7 @@ actions:
   - erofs-utils
   - gcc
   - gdb
+  - github-cli
   - gnome
   - gnome-circle
   - gnome-extra

@@ -23,11 +23,11 @@ actions:
       - 7zip.7zip
       - Apple.iTunes
       # - Blizzard.BattleNet # Broken due to interactive installer.
-      # - Comtrya.Comtrya # Not present upstream yet.
       - ExtremeTuxRacer.ExtremeTuxRacer
       - GIMP.GIMP.3
       - Git.Git
       - GitHub.GitHubDesktop
+      - GitHub.CLI
       - GOG.Galaxy
       - GoLang.Go
       - Google.AndroidStudio
