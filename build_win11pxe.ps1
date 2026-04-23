@@ -245,49 +245,127 @@ try {
             }
         }
 
-        # 3. Targeted Virtual, Enterprise & Prosumer NIC Drivers
-        $nicDrivers = @(
+        # 3. NIC Driver Boot Promotion
+        #    DISM /Add-Driver stages packages in the DriverStore but does NOT create
+        #    service entries for PnP drivers. For iSCSI boot we need boot-start (Start=0)
+        #    service entries, so we find each .sys in the DriverStore, copy it to
+        #    System32\drivers, and manually create the service registry key.
+        #    NOTE: INF AddService names often differ from .sys basenames (e.g.
+        #    e1dexpress → e1d.sys), so Service and Sys are specified independently.
+        $nicDriverDefs = @(
             # --- Virtual Ethernet ---
-            "netvsc",                 # Hyper-V Virtual Ethernet
-            "netkvm",                 # VirtIO Ethernet
+            @{ Service = "netvsc";        Sys = "netvsc.sys" }          # Hyper-V
+            @{ Service = "netkvm";        Sys = "netkvm.sys" }          # VirtIO (QEMU/KVM)
+            @{ Service = "vmxnet3ndis6";  Sys = "vmxnet3.sys" }         # VMware
 
-            # --- Intel Ethernet (from Get-IntelEthernetDrivers.ps1 packages) ---
-            "e2fn",                   # Intel 2.5GbE I225-V / I226-V (e2fn.sys)
-            "e1d",                    # Intel 1GbE I219-V/LM — e1d series (e1d.sys)
-            "e1r",                    # Intel 1GbE I210 (e1r.sys)
-            "ixt62x64",               # Intel 10GbE X540 (ixt62x64.sys)
-            "ixs",                    # Intel 10GbE X550 (ixs.sys)
-            "i40ea",                  # Intel 10/40GbE X710/XL710 (i40ea.sys)
-            "iavf68",                 # Intel Adaptive Virtual Function (iavf68.sys)
-            "ice",                    # Intel 100GbE E810 (in-box or future package)
+            # --- Intel Ethernet (injected via Get-IntelEthernetDrivers.ps1) ---
+            @{ Service = "e2fnexpress";   Sys = "e2fn.sys" }            # I225-V / I226-V 2.5GbE
+            @{ Service = "e1dexpress";    Sys = "e1d.sys" }             # I219-V/LM 1GbE
+            @{ Service = "e1rexpress";    Sys = "e1r.sys" }             # I210 1GbE
+            @{ Service = "ixt62x64";      Sys = "ixt62x64.sys" }        # X540 10GbE
+            @{ Service = "ixs";           Sys = "ixs.sys" }             # X550 10GbE
+            @{ Service = "i40ea";         Sys = "i40ea.sys" }           # X710/XL710 10/40GbE
+            @{ Service = "iavf68";        Sys = "iavf68.sys" }          # Adaptive Virtual Function
+            @{ Service = "ice";           Sys = "ice.sys" }             # E810 100GbE
 
-            # --- Realtek PCIe (from Get-RealtekEthernetDrivers.ps1 NetAdapterCx packages) ---
-            "rt25cx21x64",            # Realtek 2.5GbE RTL8125 (rt25cx21x64.sys)
-            "rt640x64",               # Realtek 2.5G/5G RTL8126 (rt640x64.sys)
-            "rt27cx21x64",            # Realtek 10GbE RTL8127 (rt27cx21x64.sys)
-            "rt68cx21x64",            # Realtek 1GbE RTL8168 (rt68cx21x64.sys)
+            # --- Intel Ethernet (in-box MSFT) ---
+            @{ Service = "e1i68x64";      Sys = "e1i68x64.sys" }        # I217/I218 1GbE
+            @{ Service = "e2f68";         Sys = "e2f68.sys" }           # I225 (older gen) 2.5GbE
+            @{ Service = "e1yexpress";    Sys = "e1y60x64.sys" }        # PRO/1000 CT/GT
+            @{ Service = "KillerEth";     Sys = "e2xw10x64.sys" }       # Killer E2x00/E3x00
 
-            # --- Realtek USB (from Get-RealtekEthernetDrivers.ps1 NetAdapterCx packages) ---
-            "rtu53cx22x64",           # Realtek 1GbE USB RTL8153 (rtu53cx22x64.sys)
-            "rtu56cx22x64",           # Realtek 2.5GbE USB RTL8156 (rtu56cx22x64.sys)
-            "rtucx22x64",             # Realtek 5G/10G USB RTL8157/RTL8159 (rtucx22x64.sys)
+            # --- Realtek PCIe (injected via Get-RealtekEthernetDrivers.ps1) ---
+            @{ Service = "rt25cx21x64";   Sys = "rt25cx21x64.sys" }     # RTL8125 2.5GbE
+            @{ Service = "rt640x64";      Sys = "rt640x64.sys" }        # RTL8126 2.5GbE
+            @{ Service = "rt27cx21x64";   Sys = "rt27cx21x64.sys" }     # RTL8127 10GbE
+            @{ Service = "rt68cx21x64";   Sys = "rt68cx21x64.sys" }     # RTL8168 1GbE
 
-            # --- Marvell/Aquantia (from Get-MarvellEthernetDrivers.ps1 packages) ---
-            "atlantic650",            # Aquantia 10GbE AQC107 (atlantic650.sys)
-            "aqnic650",               # Aquantia 2.5/5/10GbE AQC113 (aqnic650.sys)
+            # --- Realtek USB (injected via Get-RealtekEthernetDrivers.ps1) ---
+            @{ Service = "rtu53cx22x64";  Sys = "rtu53cx22x64.sys" }    # RTL8153 USB 1GbE
+            @{ Service = "rtu56cx22x64";  Sys = "rtu56cx22x64.sys" }    # RTL8156 USB 2.5GbE
+            @{ Service = "rtucx22x64";    Sys = "rtucx22x64.sys" }      # RTL8157/8159 USB 5G/10G
 
-            # --- Enterprise (in-box or manually added) ---
-            "mlx5", "mlx4eth",        # Mellanox ConnectX-3, 4, 5, 6
-            "qfle3", "qevb", "bxvbd", # QLogic/Broadcom NetXtreme and FastLinQ
-            "cxgb4"                   # Chelsio 10/40GbE
+            # --- Realtek (in-box MSFT) ---
+            @{ Service = "rtucx21x64";    Sys = "rtucx21x64.sys" }      # Realtek USB (in-box)
+            @{ Service = "rtux64w10";     Sys = "rtux64w10.sys" }       # Realtek USB (legacy in-box)
+            @{ Service = "RTL8023x64";    Sys = "Rtnic64.sys" }         # Realtek FE (legacy in-box)
+
+            # --- Broadcom (in-box MSFT) ---
+            @{ Service = "b06bdrv";       Sys = "bxvbda.sys" }          # NetXtreme II 10GbE (already Start=0)
+            @{ Service = "b57nd60a";      Sys = "b57nd60a.sys" }        # NetXtreme 1GbE
+            @{ Service = "k57nd60a";      Sys = "k57nd60a.sys" }        # Broadcom/Killer 1GbE
+            @{ Service = "l2nd";          Sys = "bxnd60a.sys" }         # NetXtreme II 1GbE
+            @{ Service = "be2net";        Sys = "ocnd65.sys" }          # Emulex/Broadcom OneConnect
+
+            # --- Marvell/Aquantia (injected via Get-MarvellEthernetDrivers.ps1) ---
+            @{ Service = "atlantic650";   Sys = "Atlantic650.sys" }     # AQC107 10GbE
+            @{ Service = "aqnic650";      Sys = "aqnic650.sys" }        # AQC113 2.5/5/10GbE
+
+            # --- Marvell Yukon (in-box MSFT) ---
+            @{ Service = "ykinw8";        Sys = "ykinx64.sys" }         # Yukon 88E8056/8057
+            @{ Service = "yukonw8";       Sys = "yk63x64.sys" }         # Yukon legacy
+
+            # --- Mellanox (in-box MSFT) ---
+            @{ Service = "mlx5";          Sys = "mlx5.sys" }            # ConnectX-5/6/7
+            @{ Service = "mlx4eth63";     Sys = "mlx4eth63.sys" }       # ConnectX-3/4
+
+            # --- Qualcomm/Atheros (in-box MSFT) ---
+            @{ Service = "Atc002";        Sys = "l260x64.sys" }         # Atheros L2 FastEthernet
+            @{ Service = "AtcL001";       Sys = "l160x64.sys" }         # Atheros L1 GbE
+            @{ Service = "L1C";           Sys = "L1C63x64.sys" }        # Killer E2200/Atheros L1C
+            @{ Service = "L1E";           Sys = "L1E62x64.sys" }        # Atheros L1E GbE
+
+            # --- Chelsio (in-box MSFT) ---
+            @{ Service = "chndis";        Sys = "cht4nx64.sys" }        # T4/T5/T6 10/25/40/100GbE
+
+            # --- NVIDIA (in-box MSFT) ---
+            @{ Service = "NVENETFD";      Sys = "nvm60x64.sys" }        # nForce Ethernet
+            @{ Service = "NVNET";         Sys = "nvm62x64.sys" }        # nForce Ethernet (newer)
+
+            # --- USB Ethernet Adapters (in-box MSFT) ---
+            @{ Service = "AX88179";       Sys = "ax88179_178a.sys" }    # ASIX USB 3.0 GbE
+            @{ Service = "AX88772";       Sys = "ax88772.sys" }         # ASIX USB 2.0 FE
+            @{ Service = "msux64w10";     Sys = "msux64w10.sys" }       # Samsung/Realtek USB GbE
+            @{ Service = "LAN7800";       Sys = "lan7800-x64-n650f.sys" } # Microchip USB-C GbE
+
+            # --- JMicron (in-box MSFT) ---
+            @{ Service = "NETJME";        Sys = "NETJME.sys" }          # JMC250/JMC260
         )
 
-        foreach ($driver in $nicDrivers) {
-            $regPath = "HKLM:\$tempHiveName\$cs\Services\$driver"
+        $driverStorePath = Join-Path $winDrivePath "Windows\System32\DriverStore\FileRepository"
+        $bootDriverDir   = Join-Path $winDrivePath "Windows\System32\drivers"
+
+        foreach ($def in $nicDriverDefs) {
+            $svcName = $def.Service
+            $sysName = $def.Sys
+            $regPath = "HKLM:\$tempHiveName\$cs\Services\$svcName"
+
             if (Test-Path $regPath) {
+                # In-box driver with existing service entry — promote to boot-start
                 Set-ItemProperty -Path $regPath -Name "Start" -Value 0 -Type DWord
                 Set-ItemProperty -Path $regPath -Name "BootFlags" -Value 1 -Type DWord
-                Write-Host "  Promoted NIC Driver: $driver"
+                Write-Host "  Promoted NIC Driver: $svcName (in-box)"
+            } else {
+                # Find .sys in DriverStore, copy to System32\drivers, create service entry
+                $sysFile = Get-ChildItem -Path $driverStorePath -Filter $sysName -Recurse -ErrorAction SilentlyContinue |
+                           Select-Object -First 1
+
+                if ($sysFile) {
+                    $destPath = Join-Path $bootDriverDir $sysFile.Name
+                    if (-not (Test-Path $destPath)) {
+                        Copy-Item $sysFile.FullName $destPath -Force
+                    }
+
+                    New-Item -Path $regPath -Force | Out-Null
+                    Set-ItemProperty -Path $regPath -Name "Start"        -Value 0 -Type DWord          # Boot-start
+                    Set-ItemProperty -Path $regPath -Name "Type"         -Value 1 -Type DWord          # Kernel driver
+                    Set-ItemProperty -Path $regPath -Name "ErrorControl" -Value 1 -Type DWord          # Normal
+                    Set-ItemProperty -Path $regPath -Name "ImagePath"    -Value "System32\drivers\$($sysFile.Name)" -Type ExpandString
+                    Set-ItemProperty -Path $regPath -Name "Group"        -Value "NDIS" -Type String
+                    Set-ItemProperty -Path $regPath -Name "BootFlags"    -Value 1 -Type DWord
+                    Write-Host "  Promoted NIC Driver: $svcName (created boot-start service)"
+                }
+                # else: driver not in image, silently skip
             }
         }
 

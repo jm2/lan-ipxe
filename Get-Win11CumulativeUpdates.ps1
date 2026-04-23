@@ -158,7 +158,8 @@ Write-Host "   -> Target CU: $($TargetCU.Title) ($($TargetCU.DateObj.ToString('y
 # For checkpoint support (24H2+), download all CUs in the chain.
 # DISM will automatically skip packages that are already superseded by the target
 # and will apply any required checkpoint prerequisites in the correct order.
-$AllCUs = $SortedCUs | Select-Object -Unique -Property Id
+# Deduplicate by Update ID (multiple search queries can return the same package).
+$AllCUs = $SortedCUs | Group-Object Id | ForEach-Object { $_.Group[0] }
 
 if ($AllCUs.Count -gt 1) {
     Write-Host "   -> Found $($AllCUs.Count) CU packages (including potential checkpoint prerequisites)" -ForegroundColor Yellow
@@ -166,9 +167,16 @@ if ($AllCUs.Count -gt 1) {
 }
 
 $downloadedCount = 0
+$downloadedFiles = @{}  # Track by filename to avoid downloading the same .msu twice
 foreach ($cu in $AllCUs) {
     $result = Get-CatalogPackage -Update $cu -DestinationPath $DownloadPath
-    if ($result) { $downloadedCount++ }
+    if ($result) {
+        $fileName = Split-Path $result -Leaf
+        if (-not $downloadedFiles.ContainsKey($fileName)) {
+            $downloadedFiles[$fileName] = $true
+            $downloadedCount++
+        }
+    }
 }
 
 # ============================================================
