@@ -1,3 +1,4 @@
+#Requires -Version 7.0
 <#
     .SYNOPSIS
     Fetches and optionally installs the absolute latest MediaTek Wi-Fi drivers 
@@ -105,42 +106,50 @@ foreach ($Target in $Targets) {
             }
 
             Write-Host "      -> Found $($UpdateIds.Count) packages for query '$Query'. Fetching deep versions..." -NoNewline
-            $counter = 0
 
-            foreach ($Id in $UpdateIds) {
-                $counter++
-                if ($counter % 5 -eq 0) { Write-Host "." -NoNewline }
-            
+            $DetailResults = $UpdateIds | ForEach-Object -Parallel {
+                $Id = $_
                 $DetailsUrl = "https://www.catalog.update.microsoft.com/ScopedViewInline.aspx?updateid=$Id"
                 try {
                     $DetailsPage = Invoke-WebRequest -Uri $DetailsUrl -UseBasicParsing -ErrorAction SilentlyContinue
-                    $DateString = if ($DetailsPage.Content -match "id=`"ScopedViewHandler_versionDate`">([^<]+)") { $matches[1].Trim() }
-                    $Version = if ($DetailsPage.Content -match "id=`"ScopedViewHandler_version`">([^<]+)") { $matches[1].Trim() }
+                    $DateString = if ($DetailsPage.Content -match 'id="ScopedViewHandler_versionDate">([^<]+)') { $matches[1].Trim() }
+                    $Version = if ($DetailsPage.Content -match 'id="ScopedViewHandler_version">([^<]+)') { $matches[1].Trim() }
+                    $Title = if ($DetailsPage.Content -match 'id="ScopedViewHandler_titleText">([^<]+)') { $matches[1].Trim() }
                 
-                    $Title = if ($DetailsPage.Content -match "id=`"ScopedViewHandler_titleText`">([^<]+)") { $matches[1].Trim() }
-                
-                    if ($Version -and $DateString -and $Title -notmatch "NDIS") {
-                        try {
-                            $DateObj = [datetime]::Parse($DateString)
-                            $Arch = if ($DetailsPage.Content -match "ARM64") { "ARM64" } elseif ($DetailsPage.Content -match "AMD64|x64|amd64") { "AMD64" } else { "x86" }
-                            if ($Arch -notin $AcceptedArchs) { continue }
-                            $AvailablePackages += [PSCustomObject]@{
-                                ModelId           = $ModelId
-                                ModelName         = $Device.ModelName
-                                Version           = [version]$Version
-                                DateObj           = $DateObj
-                                Id                = $Id
-                                Title             = $Title
-                                PreferredBranches = $Device.PreferredBranches
-                                Arch              = $Arch
-                            }
+                    if ($Version -and $DateString) {
+                        $DateObj = [datetime]::Parse($DateString)
+                        $Arch = if ($DetailsPage.Content -match "ARM64") { "ARM64" } elseif ($DetailsPage.Content -match "AMD64|x64|amd64") { "AMD64" } else { "x86" }
+                        [PSCustomObject]@{
+                            Version = $Version
+                            DateObj = $DateObj
+                            Id      = $Id
+                            Arch    = $Arch
+                            Title   = $Title
                         }
-                        catch {}
                     }
                 }
                 catch {}
-            }
+            } -ThrottleLimit 8
+
             Write-Host " Done."
+
+            foreach ($result in $DetailResults) {
+                if ($result -and $result.Arch -in $AcceptedArchs -and $result.Title -notmatch "NDIS") {
+                    try {
+                        $AvailablePackages += [PSCustomObject]@{
+                            ModelId           = $ModelId
+                            ModelName         = $Device.ModelName
+                            Version           = [version]$result.Version
+                            DateObj           = $result.DateObj
+                            Id                = $result.Id
+                            Title             = $result.Title
+                            PreferredBranches = $Device.PreferredBranches
+                            Arch              = $result.Arch
+                        }
+                    }
+                    catch {}
+                }
+            }
         }
     }
     

@@ -18,6 +18,8 @@
     .\Get-Win11CumulativeUpdates.ps1 -Version "25H2" -DownloadPath "C:\Temp\Win11_Updates"
 #>
 
+#Requires -Version 7.0
+
 [CmdletBinding()]
 param (
     [string]$Version = "25H2",
@@ -51,44 +53,41 @@ function Find-CatalogUpdates {
 
     if (-not $UpdateIds) { return @() }
 
-    $Results = @()
-    $counter = 0
-
-    foreach ($Id in $UpdateIds) {
-        $counter++
-        if ($counter % 5 -eq 0) { Write-Host "." -NoNewline }
-
+    # Parallel detail page fetches — ~10x faster than sequential
+    $RawResults = $UpdateIds | ForEach-Object -Parallel {
+        $Id = $_
         $DetailsUrl = "https://www.catalog.update.microsoft.com/ScopedViewInline.aspx?updateid=$Id"
         try {
             $DetailsPage = Invoke-WebRequest -Uri $DetailsUrl -UseBasicParsing -ErrorAction SilentlyContinue
             $Content = $DetailsPage.Content
 
-            $Title = if ($Content -match "id=`"ScopedViewHandler_titleText`">([^<]+)") { $matches[1].Trim() }
-            $DateString = if ($Content -match "id=`"ScopedViewHandler_date`">([^<]+)") { $matches[1].Trim() }
+            $Title = if ($Content -match 'id="ScopedViewHandler_titleText">([^<]+)') { $matches[1].Trim() }
+            $DateString = if ($Content -match 'id="ScopedViewHandler_date">([^<]+)') { $matches[1].Trim() }
 
             if ($Title -and $DateString) {
-                # Apply exclusion filters
-                $skip = $false
-                foreach ($pattern in $ExcludePatterns) {
-                    if ($Title -match $pattern) { $skip = $true; break }
+                $DateObj = [datetime]::Parse($DateString)
+                [PSCustomObject]@{
+                    Title   = $Title
+                    DateObj = $DateObj
+                    Id      = $Id
                 }
-                if ($skip) { continue }
-
-                # Apply required pattern
-                if ($RequirePattern -and $Title -notmatch $RequirePattern) { continue }
-
-                try {
-                    $DateObj = [datetime]::Parse($DateString)
-                    $Results += [PSCustomObject]@{
-                        Title   = $Title
-                        DateObj = $DateObj
-                        Id      = $Id
-                    }
-                }
-                catch {}
             }
         }
         catch {}
+    } -ThrottleLimit 8
+
+    # Apply filters on the collected results (can't filter inside -Parallel easily
+    # since $ExcludePatterns/$RequirePattern are outer-scope variables)
+    $Results = @()
+    foreach ($r in $RawResults) {
+        if (-not $r) { continue }
+        $skip = $false
+        foreach ($pattern in $ExcludePatterns) {
+            if ($r.Title -match $pattern) { $skip = $true; break }
+        }
+        if ($skip) { continue }
+        if ($RequirePattern -and $r.Title -notmatch $RequirePattern) { continue }
+        $Results += $r
     }
 
     return $Results
@@ -109,23 +108,53 @@ function Get-CatalogPackage {
         return $null
     }
 
-    $DownloadUrl = [regex]::Match($DownloadPage.Content, 'https://[^''\"<]+\.(msu|cab)').Value
+    # The DownloadDialog page may contain multiple URLs (SSU, checkpoint prereqs, actual CU).
+    # For checkpoint-era CUs (24H2+), the actual target .msu is typically the last link.
+    $AllUrls = @([regex]::Matches($DownloadPage.Content, 'https://[^''"<]+\.(msu|cab)') |
+               ForEach-Object { $_.Value })
 
-    if (-not $DownloadUrl) {
+    if (-not $AllUrls) {
         Write-Warning "   [!] Could not extract download URL for: $($Update.Title)"
         return $null
     }
 
+    # Prefer the last .msu URL (the actual CU payload, not the prerequisite/SSU)
+    $MsuUrls = @($AllUrls | Where-Object { $_ -match '\.msu$' })
+    $DownloadUrl = if ($MsuUrls.Count -gt 0) { $MsuUrls[-1] } else { $AllUrls[-1] }
+
     $FileName = ($DownloadUrl -split '/')[-1]
     $OutFile = Join-Path $DestinationPath $FileName
+    $HashFile = "$OutFile.sha256"
 
+    # Check if file already exists and passes integrity verification
     if (Test-Path $OutFile) {
-        Write-Host "   -> Already downloaded: $FileName" -ForegroundColor DarkGray
-    } else {
-        Write-Host "   -> Downloading $FileName..."
-        Invoke-WebRequest -Uri $DownloadUrl -OutFile $OutFile -UseBasicParsing
-        Write-Host "   -> Download complete: $FileName" -ForegroundColor Green
+        if (Test-Path $HashFile) {
+            $expectedHash = (Get-Content $HashFile -Raw).Trim()
+            $actualHash = (Get-FileHash -Path $OutFile -Algorithm SHA256).Hash
+            if ($actualHash -eq $expectedHash) {
+                Write-Host "   -> Verified (SHA256): $FileName" -ForegroundColor DarkGray
+                return $OutFile
+            }
+            else {
+                Write-Host "   -> Hash mismatch for $FileName — re-downloading..." -ForegroundColor Yellow
+                Remove-Item $OutFile -Force
+                Remove-Item $HashFile -Force
+            }
+        }
+        else {
+            # File exists but no sidecar — can't verify, re-download
+            Write-Host "   -> No hash sidecar for $FileName — re-downloading..." -ForegroundColor Yellow
+            Remove-Item $OutFile -Force
+        }
     }
+
+    Write-Host "   -> Downloading $FileName..."
+    Invoke-WebRequest -Uri $DownloadUrl -OutFile $OutFile -UseBasicParsing
+
+    # Write SHA256 sidecar for future verification
+    $hash = (Get-FileHash -Path $OutFile -Algorithm SHA256).Hash
+    Set-Content -Path $HashFile -Value $hash -NoNewline
+    Write-Host "   -> Download complete: $FileName (SHA256: $($hash.Substring(0,12))...)" -ForegroundColor Green
 
     return $OutFile
 }

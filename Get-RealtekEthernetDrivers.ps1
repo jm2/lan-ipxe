@@ -1,3 +1,4 @@
+#Requires -Version 7.0
 <#
     .SYNOPSIS
     Fetches and optionally installs the absolute latest Realtek NetAdapterCx (11.x) drivers for 
@@ -89,38 +90,43 @@ foreach ($Target in $Targets) {
         }
 
         Write-Host "      -> Found $($UpdateIds.Count) packages. Fetching deep versions..." -NoNewline
-        $counter = 0
 
-        foreach ($Id in $UpdateIds) {
-            $counter++
-            if ($counter % 5 -eq 0) { Write-Host "." -NoNewline }
-            
+        $DetailResults = $UpdateIds | ForEach-Object -Parallel {
+            $Id = $_
             $DetailsUrl = "https://www.catalog.update.microsoft.com/ScopedViewInline.aspx?updateid=$Id"
             try {
                 $DetailsPage = Invoke-WebRequest -Uri $DetailsUrl -UseBasicParsing -ErrorAction SilentlyContinue
-                $DateString = if ($DetailsPage.Content -match "id=`"ScopedViewHandler_versionDate`">([^<]+)") { $matches[1].Trim() }
-                $Version = if ($DetailsPage.Content -match "id=`"ScopedViewHandler_version`">([^<]+)") { $matches[1].Trim() }
+                $DateString = if ($DetailsPage.Content -match 'id="ScopedViewHandler_versionDate">([^<]+)') { $matches[1].Trim() }
+                $Version = if ($DetailsPage.Content -match 'id="ScopedViewHandler_version">([^<]+)') { $matches[1].Trim() }
                 
                 if ($Version -and $DateString) {
-                    try {
-                        $DateObj = [datetime]::Parse($DateString)
-                        $Arch = if ($DetailsPage.Content -match "ARM64") { "ARM64" } elseif ($DetailsPage.Content -match "AMD64|x64|amd64") { "AMD64" } else { "x86" }
-                        if ($Arch -notin $AcceptedArchs) { continue }
-                        $AvailablePackages += [PSCustomObject]@{
-                            Prefix  = $Prefix
-                            RTLName = $RTLName
-                            Version = $Version
-                            DateObj = $DateObj
-                            Id      = $Id
-                            Arch    = $Arch
-                        }
+                    $DateObj = [datetime]::Parse($DateString)
+                    $Arch = if ($DetailsPage.Content -match "ARM64") { "ARM64" } elseif ($DetailsPage.Content -match "AMD64|x64|amd64") { "AMD64" } else { "x86" }
+                    [PSCustomObject]@{
+                        Version = $Version
+                        DateObj = $DateObj
+                        Id      = $Id
+                        Arch    = $Arch
                     }
-                    catch {}
                 }
             }
             catch {}
-        }
+        } -ThrottleLimit 8
+
         Write-Host " Done."
+
+        foreach ($result in $DetailResults) {
+            if ($result -and $result.Arch -in $AcceptedArchs) {
+                $AvailablePackages += [PSCustomObject]@{
+                    Prefix  = $Prefix
+                    RTLName = $RTLName
+                    Version = $result.Version
+                    DateObj = $result.DateObj
+                    Id      = $result.Id
+                    Arch    = $result.Arch
+                }
+            }
+        }
     }
     
     if (-not $AvailablePackages) {

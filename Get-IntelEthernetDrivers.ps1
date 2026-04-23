@@ -1,3 +1,4 @@
+#Requires -Version 7.0
 <#
     .SYNOPSIS
     Fetches the latest Intel Ethernet drivers from the Microsoft Update Catalog.
@@ -96,38 +97,44 @@ foreach ($Target in $Targets) {
         }
 
         Write-Host "      -> Found $($UpdateIds.Count) packages. Fetching deep versions..." -NoNewline
-        $counter = 0
 
-        foreach ($Id in $UpdateIds) {
-            $counter++
-            if ($counter % 5 -eq 0) { Write-Host "." -NoNewline }
-            
+        # Parallel detail page fetches — ~10x faster than sequential
+        $DetailResults = $UpdateIds | ForEach-Object -Parallel {
+            $Id = $_
             $DetailsUrl = "https://www.catalog.update.microsoft.com/ScopedViewInline.aspx?updateid=$Id"
             try {
                 $DetailsPage = Invoke-WebRequest -Uri $DetailsUrl -UseBasicParsing -ErrorAction SilentlyContinue
-                $DateString = if ($DetailsPage.Content -match "id=`"ScopedViewHandler_versionDate`">([^<]+)") { $matches[1].Trim() }
-                $Version = if ($DetailsPage.Content -match "id=`"ScopedViewHandler_version`">([^<]+)") { $matches[1].Trim() }
+                $DateString = if ($DetailsPage.Content -match 'id="ScopedViewHandler_versionDate">([^<]+)') { $matches[1].Trim() }
+                $Version = if ($DetailsPage.Content -match 'id="ScopedViewHandler_version">([^<]+)') { $matches[1].Trim() }
                 
                 if ($Version -and $DateString) {
-                    try {
-                        $DateObj = [datetime]::Parse($DateString)
-                        $Arch = if ($DetailsPage.Content -match "ARM64") { "ARM64" } elseif ($DetailsPage.Content -match "AMD64|x64|amd64") { "AMD64" } else { "x86" }
-                        if ($Arch -notin $AcceptedArchs) { continue }
-                        $AvailablePackages += [PSCustomObject]@{
-                            Prefix     = $Prefix
-                            FamilyName = $FamilyName
-                            Version    = $Version
-                            DateObj    = $DateObj
-                            Id         = $Id
-                            Arch       = $Arch
-                        }
+                    $DateObj = [datetime]::Parse($DateString)
+                    $Arch = if ($DetailsPage.Content -match "ARM64") { "ARM64" } elseif ($DetailsPage.Content -match "AMD64|x64|amd64") { "AMD64" } else { "x86" }
+                    [PSCustomObject]@{
+                        Version = $Version
+                        DateObj = $DateObj
+                        Id      = $Id
+                        Arch    = $Arch
                     }
-                    catch {}
                 }
             }
             catch {}
-        }
+        } -ThrottleLimit 8
+
         Write-Host " Done."
+
+        foreach ($result in $DetailResults) {
+            if ($result -and $result.Arch -in $AcceptedArchs) {
+                $AvailablePackages += [PSCustomObject]@{
+                    Prefix     = $Prefix
+                    FamilyName = $FamilyName
+                    Version    = $result.Version
+                    DateObj    = $result.DateObj
+                    Id         = $result.Id
+                    Arch       = $result.Arch
+                }
+            }
+        }
     }
     
     if (-not $AvailablePackages) {
@@ -149,7 +156,7 @@ foreach ($Target in $Targets) {
         $PostData = "[{`"size`":0,`"updateID`":`"$($BestPackage.Id)`",`"uidInfo`":`"$($BestPackage.Id)`"}]"
         $DownloadPage = Invoke-WebRequest -Uri "https://www.catalog.update.microsoft.com/DownloadDialog.aspx" -Method Post -Body @{updateIDs = $PostData } -UseBasicParsing
         
-        $CabUrl = [regex]::Match($DownloadPage.Content, 'https://[^''"<]+\.cab').Value
+        $CabUrl = [regex]::Match($DownloadPage.Content, 'https://[^''\"<]+\.cab').Value
         
         if (-not $CabUrl) {
             Write-Host "      [!] Could not extract .cab URL from payload." -ForegroundColor Red

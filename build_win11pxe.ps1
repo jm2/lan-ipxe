@@ -1,3 +1,4 @@
+#Requires -Version 7.0
 <#
 .SYNOPSIS
 Creates a network-bootable (iSCSI) Windows 11 VHDX from a standard ISO.
@@ -112,12 +113,31 @@ try {
     }
 
     if ($Drivers) {
-        Write-Host ">>> Executing Driver Scrapers..." -ForegroundColor Cyan
+        Write-Host ">>> Executing Driver Scrapers (parallel)..." -ForegroundColor Cyan
         $driverTempPath = Join-Path $env:TEMP "Win11Drivers_$(Get-Random)"
         $driverScripts = Get-ChildItem -Path $PSScriptRoot -Filter "Get-*Drivers.ps1"
-        foreach ($script in $driverScripts) {
-            Write-Host "    -> Running $($script.Name)..."
-            & $script.FullName -DownloadPath $driverTempPath -Architecture x64
+
+        # Launch all scrapers concurrently — each writes to its own subdirectory
+        $scraperJobs = foreach ($script in $driverScripts) {
+            Write-Host "    -> Launching $($script.Name)..."
+            Start-ThreadJob -ScriptBlock {
+                param($ScriptPath, $DlPath, $Arch)
+                & $ScriptPath -DownloadPath $DlPath -Architecture $Arch
+            } -ArgumentList $script.FullName, $driverTempPath, "x64" -Name $script.BaseName
+        }
+
+        # Wait for all scrapers with live status
+        Write-Host "    -> Waiting for $($scraperJobs.Count) scrapers to complete..."
+        $scraperJobs | Wait-Job | ForEach-Object {
+            $job = $_
+            if ($job.State -eq 'Failed') {
+                Write-Warning "    [!] $($job.Name) failed: $($job.ChildJobs[0].JobStateInfo.Reason)"
+            }
+            else {
+                Write-Host "    -> $($job.Name) completed." -ForegroundColor Green
+            }
+            Receive-Job $job
+            Remove-Job $job
         }
 
         # Re-extract any nested CABs (some Update Catalog packages are double-wrapped)
@@ -154,7 +174,7 @@ try {
             Write-Host "    -> Running Get-Win11CumulativeUpdates.ps1 (Targeting $win11Version)..."
             & $updateScript -Version $win11Version -DownloadPath $updatesTempPath
 
-            $packages = Get-ChildItem -Path $updatesTempPath -Include *.msu,*.cab -Recurse
+            $packages = Get-ChildItem -Path $updatesTempPath -Include *.msu, *.cab -Recurse
             if ($packages) {
                 Write-Host ">>> Injecting Cumulative Updates into Offline Image..." -ForegroundColor Cyan
                 Write-Host "    -> $($packages.Count) package(s) found. Using folder-based DISM for automatic dependency resolution."
@@ -169,16 +189,19 @@ try {
                 if ($LASTEXITCODE -ne 0) {
                     Write-Warning "DISM /Add-Package completed with exit code $LASTEXITCODE. Check log: $dismLogPath"
                     Write-Warning "This may indicate a checkpoint dependency issue or incompatible package."
-                } else {
+                }
+                else {
                     Write-Host "    -> Cumulative updates applied successfully." -ForegroundColor Green
                 }
-            } else {
+            }
+            else {
                 Write-Host "    [!] No .msu/.cab packages found after scraping." -ForegroundColor Yellow
             }
 
             Write-Host ">>> Cleaning up Updates Temp Path..."
             Remove-Item -Path $updatesTempPath -Recurse -Force -ErrorAction SilentlyContinue
-        } else {
+        }
+        else {
             Write-Host "    [!] Get-Win11CumulativeUpdates.ps1 not found, skipping updates." -ForegroundColor Yellow
         }
     }
@@ -254,86 +277,86 @@ try {
         #    e1dexpress → e1d.sys), so Service and Sys are specified independently.
         $nicDriverDefs = @(
             # --- Virtual Ethernet ---
-            @{ Service = "netvsc";        Sys = "netvsc.sys" }          # Hyper-V
-            @{ Service = "netkvm";        Sys = "netkvm.sys" }          # VirtIO (QEMU/KVM)
-            @{ Service = "vmxnet3ndis6";  Sys = "vmxnet3.sys" }         # VMware
+            @{ Service = "netvsc"; Sys = "netvsc.sys" }          # Hyper-V
+            @{ Service = "netkvm"; Sys = "netkvm.sys" }          # VirtIO (QEMU/KVM)
+            @{ Service = "vmxnet3ndis6"; Sys = "vmxnet3.sys" }         # VMware
 
             # --- Intel Ethernet (injected via Get-IntelEthernetDrivers.ps1) ---
-            @{ Service = "e2fnexpress";   Sys = "e2fn.sys" }            # I225-V / I226-V 2.5GbE
-            @{ Service = "e1dexpress";    Sys = "e1d.sys" }             # I219-V/LM 1GbE
-            @{ Service = "e1rexpress";    Sys = "e1r.sys" }             # I210 1GbE
-            @{ Service = "ixt62x64";      Sys = "ixt62x64.sys" }        # X540 10GbE
-            @{ Service = "ixs";           Sys = "ixs.sys" }             # X550 10GbE
-            @{ Service = "i40ea";         Sys = "i40ea.sys" }           # X710/XL710 10/40GbE
-            @{ Service = "iavf68";        Sys = "iavf68.sys" }          # Adaptive Virtual Function
-            @{ Service = "ice";           Sys = "ice.sys" }             # E810 100GbE
+            @{ Service = "e2fnexpress"; Sys = "e2fn.sys" }            # I225-V / I226-V 2.5GbE
+            @{ Service = "e1dexpress"; Sys = "e1d.sys" }             # I219-V/LM 1GbE
+            @{ Service = "e1rexpress"; Sys = "e1r.sys" }             # I210 1GbE
+            @{ Service = "ixt62x64"; Sys = "ixt62x64.sys" }        # X540 10GbE
+            @{ Service = "ixs"; Sys = "ixs.sys" }             # X550 10GbE
+            @{ Service = "i40ea"; Sys = "i40ea.sys" }           # X710/XL710 10/40GbE
+            @{ Service = "iavf68"; Sys = "iavf68.sys" }          # Adaptive Virtual Function
+            @{ Service = "ice"; Sys = "ice.sys" }             # E810 100GbE
 
             # --- Intel Ethernet (in-box MSFT) ---
-            @{ Service = "e1i68x64";      Sys = "e1i68x64.sys" }        # I217/I218 1GbE
-            @{ Service = "e2f68";         Sys = "e2f68.sys" }           # I225 (older gen) 2.5GbE
-            @{ Service = "e1yexpress";    Sys = "e1y60x64.sys" }        # PRO/1000 CT/GT
-            @{ Service = "KillerEth";     Sys = "e2xw10x64.sys" }       # Killer E2x00/E3x00
+            @{ Service = "e1i68x64"; Sys = "e1i68x64.sys" }        # I217/I218 1GbE
+            @{ Service = "e2f68"; Sys = "e2f68.sys" }           # I225 (older gen) 2.5GbE
+            @{ Service = "e1yexpress"; Sys = "e1y60x64.sys" }        # PRO/1000 CT/GT
+            @{ Service = "KillerEth"; Sys = "e2xw10x64.sys" }       # Killer E2x00/E3x00
 
             # --- Realtek PCIe (injected via Get-RealtekEthernetDrivers.ps1) ---
-            @{ Service = "rt25cx21x64";   Sys = "rt25cx21x64.sys" }     # RTL8125 2.5GbE
-            @{ Service = "rt640x64";      Sys = "rt640x64.sys" }        # RTL8126 2.5GbE
-            @{ Service = "rt27cx21x64";   Sys = "rt27cx21x64.sys" }     # RTL8127 10GbE
-            @{ Service = "rt68cx21x64";   Sys = "rt68cx21x64.sys" }     # RTL8168 1GbE
+            @{ Service = "rt25cx21x64"; Sys = "rt25cx21x64.sys" }     # RTL8125 2.5GbE
+            @{ Service = "rt640x64"; Sys = "rt640x64.sys" }        # RTL8126 2.5GbE
+            @{ Service = "rt27cx21x64"; Sys = "rt27cx21x64.sys" }     # RTL8127 10GbE
+            @{ Service = "rt68cx21x64"; Sys = "rt68cx21x64.sys" }     # RTL8168 1GbE
 
             # --- Realtek USB (injected via Get-RealtekEthernetDrivers.ps1) ---
-            @{ Service = "rtu53cx22x64";  Sys = "rtu53cx22x64.sys" }    # RTL8153 USB 1GbE
-            @{ Service = "rtu56cx22x64";  Sys = "rtu56cx22x64.sys" }    # RTL8156 USB 2.5GbE
-            @{ Service = "rtucx22x64";    Sys = "rtucx22x64.sys" }      # RTL8157/8159 USB 5G/10G
+            @{ Service = "rtu53cx22x64"; Sys = "rtu53cx22x64.sys" }    # RTL8153 USB 1GbE
+            @{ Service = "rtu56cx22x64"; Sys = "rtu56cx22x64.sys" }    # RTL8156 USB 2.5GbE
+            @{ Service = "rtucx22x64"; Sys = "rtucx22x64.sys" }      # RTL8157/8159 USB 5G/10G
 
             # --- Realtek (in-box MSFT) ---
-            @{ Service = "rtucx21x64";    Sys = "rtucx21x64.sys" }      # Realtek USB (in-box)
-            @{ Service = "rtux64w10";     Sys = "rtux64w10.sys" }       # Realtek USB (legacy in-box)
-            @{ Service = "RTL8023x64";    Sys = "Rtnic64.sys" }         # Realtek FE (legacy in-box)
+            @{ Service = "rtucx21x64"; Sys = "rtucx21x64.sys" }      # Realtek USB (in-box)
+            @{ Service = "rtux64w10"; Sys = "rtux64w10.sys" }       # Realtek USB (legacy in-box)
+            @{ Service = "RTL8023x64"; Sys = "Rtnic64.sys" }         # Realtek FE (legacy in-box)
 
             # --- Broadcom (in-box MSFT) ---
-            @{ Service = "b06bdrv";       Sys = "bxvbda.sys" }          # NetXtreme II 10GbE (already Start=0)
-            @{ Service = "b57nd60a";      Sys = "b57nd60a.sys" }        # NetXtreme 1GbE
-            @{ Service = "k57nd60a";      Sys = "k57nd60a.sys" }        # Broadcom/Killer 1GbE
-            @{ Service = "l2nd";          Sys = "bxnd60a.sys" }         # NetXtreme II 1GbE
-            @{ Service = "be2net";        Sys = "ocnd65.sys" }          # Emulex/Broadcom OneConnect
+            @{ Service = "b06bdrv"; Sys = "bxvbda.sys" }          # NetXtreme II 10GbE (already Start=0)
+            @{ Service = "b57nd60a"; Sys = "b57nd60a.sys" }        # NetXtreme 1GbE
+            @{ Service = "k57nd60a"; Sys = "k57nd60a.sys" }        # Broadcom/Killer 1GbE
+            @{ Service = "l2nd"; Sys = "bxnd60a.sys" }         # NetXtreme II 1GbE
+            @{ Service = "be2net"; Sys = "ocnd65.sys" }          # Emulex/Broadcom OneConnect
 
             # --- Marvell/Aquantia (injected via Get-MarvellEthernetDrivers.ps1) ---
-            @{ Service = "atlantic650";   Sys = "Atlantic650.sys" }     # AQC107 10GbE
-            @{ Service = "aqnic650";      Sys = "aqnic650.sys" }        # AQC113 2.5/5/10GbE
+            @{ Service = "atlantic650"; Sys = "Atlantic650.sys" }     # AQC107 10GbE
+            @{ Service = "aqnic650"; Sys = "aqnic650.sys" }        # AQC113 2.5/5/10GbE
 
             # --- Marvell Yukon (in-box MSFT) ---
-            @{ Service = "ykinw8";        Sys = "ykinx64.sys" }         # Yukon 88E8056/8057
-            @{ Service = "yukonw8";       Sys = "yk63x64.sys" }         # Yukon legacy
+            @{ Service = "ykinw8"; Sys = "ykinx64.sys" }         # Yukon 88E8056/8057
+            @{ Service = "yukonw8"; Sys = "yk63x64.sys" }         # Yukon legacy
 
             # --- Mellanox (in-box MSFT) ---
-            @{ Service = "mlx5";          Sys = "mlx5.sys" }            # ConnectX-5/6/7
-            @{ Service = "mlx4eth63";     Sys = "mlx4eth63.sys" }       # ConnectX-3/4
+            @{ Service = "mlx5"; Sys = "mlx5.sys" }            # ConnectX-5/6/7
+            @{ Service = "mlx4eth63"; Sys = "mlx4eth63.sys" }       # ConnectX-3/4
 
             # --- Qualcomm/Atheros (in-box MSFT) ---
-            @{ Service = "Atc002";        Sys = "l260x64.sys" }         # Atheros L2 FastEthernet
-            @{ Service = "AtcL001";       Sys = "l160x64.sys" }         # Atheros L1 GbE
-            @{ Service = "L1C";           Sys = "L1C63x64.sys" }        # Killer E2200/Atheros L1C
-            @{ Service = "L1E";           Sys = "L1E62x64.sys" }        # Atheros L1E GbE
+            @{ Service = "Atc002"; Sys = "l260x64.sys" }         # Atheros L2 FastEthernet
+            @{ Service = "AtcL001"; Sys = "l160x64.sys" }         # Atheros L1 GbE
+            @{ Service = "L1C"; Sys = "L1C63x64.sys" }        # Killer E2200/Atheros L1C
+            @{ Service = "L1E"; Sys = "L1E62x64.sys" }        # Atheros L1E GbE
 
             # --- Chelsio (in-box MSFT) ---
-            @{ Service = "chndis";        Sys = "cht4nx64.sys" }        # T4/T5/T6 10/25/40/100GbE
+            @{ Service = "chndis"; Sys = "cht4nx64.sys" }        # T4/T5/T6 10/25/40/100GbE
 
             # --- NVIDIA (in-box MSFT) ---
-            @{ Service = "NVENETFD";      Sys = "nvm60x64.sys" }        # nForce Ethernet
-            @{ Service = "NVNET";         Sys = "nvm62x64.sys" }        # nForce Ethernet (newer)
+            @{ Service = "NVENETFD"; Sys = "nvm60x64.sys" }        # nForce Ethernet
+            @{ Service = "NVNET"; Sys = "nvm62x64.sys" }        # nForce Ethernet (newer)
 
             # --- USB Ethernet Adapters (in-box MSFT) ---
-            @{ Service = "AX88179";       Sys = "ax88179_178a.sys" }    # ASIX USB 3.0 GbE
-            @{ Service = "AX88772";       Sys = "ax88772.sys" }         # ASIX USB 2.0 FE
-            @{ Service = "msux64w10";     Sys = "msux64w10.sys" }       # Samsung/Realtek USB GbE
-            @{ Service = "LAN7800";       Sys = "lan7800-x64-n650f.sys" } # Microchip USB-C GbE
+            @{ Service = "AX88179"; Sys = "ax88179_178a.sys" }    # ASIX USB 3.0 GbE
+            @{ Service = "AX88772"; Sys = "ax88772.sys" }         # ASIX USB 2.0 FE
+            @{ Service = "msux64w10"; Sys = "msux64w10.sys" }       # Samsung/Realtek USB GbE
+            @{ Service = "LAN7800"; Sys = "lan7800-x64-n650f.sys" } # Microchip USB-C GbE
 
             # --- JMicron (in-box MSFT) ---
-            @{ Service = "NETJME";        Sys = "NETJME.sys" }          # JMC250/JMC260
+            @{ Service = "NETJME"; Sys = "NETJME.sys" }          # JMC250/JMC260
         )
 
         $driverStorePath = Join-Path $winDrivePath "Windows\System32\DriverStore\FileRepository"
-        $bootDriverDir   = Join-Path $winDrivePath "Windows\System32\drivers"
+        $bootDriverDir = Join-Path $winDrivePath "Windows\System32\drivers"
 
         foreach ($def in $nicDriverDefs) {
             $svcName = $def.Service
@@ -345,10 +368,11 @@ try {
                 Set-ItemProperty -Path $regPath -Name "Start" -Value 0 -Type DWord
                 Set-ItemProperty -Path $regPath -Name "BootFlags" -Value 1 -Type DWord
                 Write-Host "  Promoted NIC Driver: $svcName (in-box)"
-            } else {
+            }
+            else {
                 # Find .sys in DriverStore, copy to System32\drivers, create service entry
                 $sysFile = Get-ChildItem -Path $driverStorePath -Filter $sysName -Recurse -ErrorAction SilentlyContinue |
-                           Select-Object -First 1
+                Select-Object -First 1
 
                 if ($sysFile) {
                     $destPath = Join-Path $bootDriverDir $sysFile.Name
