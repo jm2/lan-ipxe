@@ -3,16 +3,27 @@
     Fetches the latest Intel PROSet/Wireless Wi-Fi drivers from the Microsoft Update Catalog.
 
     .DESCRIPTION
-    Scrapes the Microsoft Update Catalog for specific Intel Wi-Fi hardware families
-    (e.g., Wi-Fi 7 BE200, Wi-Fi 6E AX210, AX200) to download targeted CAB packages
-    ensuring a clean, offline-ready set of INFs for DISM injection.
+    Scrapes the Microsoft Update Catalog for Intel Wi-Fi hardware families.
+    Intel bundles all supported adapters into unified driver packages, so two
+    searches cover everything from AC 9260 through BE200:
+      - BE200 package → BE200, AX411, AX211, AX210 (WiFi 7 / 6E)
+      - AX200 package → AX200, AX201, AC 9560, AC 9462, AC 9260 (WiFi 6 / AC)
 #>
 
 [CmdletBinding()]
 param (
     [switch]$Install,
-    [string]$DownloadPath = 'C:\Temp\Intel_WiFi'
+    [string]$DownloadPath = 'C:\Temp\Intel_WiFi',
+
+    [ValidateSet('x64','arm64','all')]
+    [string]$Architecture = 'x64'
 )
+
+$AcceptedArchs = switch ($Architecture) {
+    'x64'   { @('AMD64') }
+    'arm64' { @('ARM64') }
+    'all'   { @('AMD64','ARM64') }
+}
 
 if ($Install -and -not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Error "The -Install flag requires Administrator privileges. Please run PowerShell as Administrator."
@@ -27,21 +38,9 @@ $Targets = @(
         )
     },
     @{ 
-        Name    = "Intel_WiFi6E_Family"
-        Devices = @(
-            @{ Prefix = "AX210"; HWID = "VEN_8086&DEV_2725"; FamilyName = "AX210" }
-        )
-    },
-    @{ 
         Name    = "Intel_WiFi6_Family"
         Devices = @(
             @{ Prefix = "AX200"; HWID = "VEN_8086&DEV_2723"; FamilyName = "AX200" }
-        )
-    },
-    @{ 
-        Name    = "Intel_AC_Family"
-        Devices = @(
-            @{ Prefix = "AC9260"; HWID = "VEN_8086&DEV_2526"; FamilyName = "AC9260" }
         )
     }
 )
@@ -63,7 +62,7 @@ foreach ($Target in $Targets) {
         $SearchUrl = "https://www.catalog.update.microsoft.com/Search.aspx?q=$([uri]::EscapeDataString($Query))"
         $SearchPage = Invoke-WebRequest -Uri $SearchUrl -UseBasicParsing
         
-        $UpdateIds = [regex]::Matches($SearchPage.Content, "goToDetails\(['""]([a-f0-9\-]+)['""]\)") | 
+        $UpdateIds = [regex]::Matches($SearchPage.Content, "goToDetails\(['`"]([a-f0-9\-]+)['`"]\)") | 
         ForEach-Object { $_.Groups[1].Value } | 
         Select-Object -Unique
 
@@ -88,7 +87,10 @@ foreach ($Target in $Targets) {
                 if ($Version -and $DateString) {
                     try {
                         $DateObj = [datetime]::Parse($DateString)
-                        $Arch = if ($DetailsPage.Content -match "ARM64") { "ARM64" } elseif ($DetailsPage.Content -match "AMD64") { "AMD64" } else { "x86" }
+                        $Arch = if ($DetailsPage.Content -match "ARM64") { "ARM64" } 
+                                elseif ($DetailsPage.Content -match "AMD64|x64|amd64") { "AMD64" } 
+                                else { "x86" }
+                        if ($Arch -notin $AcceptedArchs) { continue }
                         $AvailablePackages += [PSCustomObject]@{
                             Prefix     = $Prefix
                             FamilyName = $FamilyName
@@ -125,7 +127,7 @@ foreach ($Target in $Targets) {
         $PostData = "[{`"size`":0,`"updateID`":`"$($BestPackage.Id)`",`"uidInfo`":`"$($BestPackage.Id)`"}]"
         $DownloadPage = Invoke-WebRequest -Uri "https://www.catalog.update.microsoft.com/DownloadDialog.aspx" -Method Post -Body @{updateIDs = $PostData } -UseBasicParsing
         
-        $CabUrl = [regex]::Match($DownloadPage.Content, 'https://[^''"<]+\.cab').Value
+        $CabUrl = [regex]::Match($DownloadPage.Content, 'https://[^''\"<]+\.cab').Value
         
         if (-not $CabUrl) {
             Write-Host "      [!] Could not extract .cab URL from payload." -ForegroundColor Red

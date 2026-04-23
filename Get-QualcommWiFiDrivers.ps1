@@ -21,8 +21,17 @@
 [CmdletBinding()]
 param (
     [switch]$Install,
-    [string]$DownloadPath = 'C:\Temp\Qualcomm_WiFi'
+    [string]$DownloadPath = 'C:\Temp\Qualcomm_WiFi',
+
+    [ValidateSet('x64','arm64','all')]
+    [string]$Architecture = 'x64'
 )
+
+$AcceptedArchs = switch ($Architecture) {
+    'x64'   { @('AMD64') }
+    'arm64' { @('ARM64') }
+    'all'   { @('AMD64','ARM64') }
+}
 
 # Dynamic Admin Check
 if ($Install -and -not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -37,19 +46,19 @@ $Targets = @(
             @{ 
                 ModelId         = "1101"
                 ModelName       = "QCA6390"
-                Queries         = @("VEN_17CB&DEV_1101", "FastConnect 6800", "Killer AX500")
+                Queries         = @("VEN_17CB&DEV_1101", "Killer AX500")
                 PreferredBranch = "3.0"
             },
             @{ 
                 ModelId         = "1103"
                 ModelName       = "WCN6855"
-                Queries         = @("VEN_17CB&DEV_1103", "FastConnect 6900", "WCN6855", "QCNFA765")
+                Queries         = @("VEN_17CB&DEV_1103", "FastConnect 6900")
                 PreferredBranch = "3.0"
             },
             @{ 
                 ModelId         = "1107"
                 ModelName       = "WCN7850"
-                Queries         = @("VEN_17CB&DEV_1107", "FastConnect 7800", "NCM865", "WCN7850")
+                Queries         = @("VEN_17CB&DEV_1107", "FastConnect 7800")
                 PreferredBranch = "3.1"
             }
         )
@@ -101,7 +110,8 @@ foreach ($Target in $Targets) {
                     if ($Version -and $DateString -and $Title -notmatch "NDIS") {
                         try {
                             $DateObj = [datetime]::Parse($DateString)
-                            $Arch = if ($DetailsPage.Content -match "ARM64") { "ARM64" } elseif ($DetailsPage.Content -match "AMD64") { "AMD64" } else { "x86" }
+                            $Arch = if ($DetailsPage.Content -match "ARM64") { "ARM64" } elseif ($DetailsPage.Content -match "AMD64|x64|amd64") { "AMD64" } else { "x86" }
+                            if ($Arch -notin $AcceptedArchs) { continue }
                             $AvailablePackages += [PSCustomObject]@{
                                 ModelId         = $ModelId
                                 ModelName       = $Device.ModelName

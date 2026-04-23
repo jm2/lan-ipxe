@@ -63,7 +63,7 @@ function Find-CatalogUpdates {
             $DetailsPage = Invoke-WebRequest -Uri $DetailsUrl -UseBasicParsing -ErrorAction SilentlyContinue
             $Content = $DetailsPage.Content
 
-            $Title = if ($Content -match "id=`"ScopedViewHandler_title`">([^<]+)") { $matches[1].Trim() }
+            $Title = if ($Content -match "id=`"ScopedViewHandler_titleText`">([^<]+)") { $matches[1].Trim() }
             $DateString = if ($Content -match "id=`"ScopedViewHandler_date`">([^<]+)") { $matches[1].Trim() }
 
             if ($Title -and $DateString) {

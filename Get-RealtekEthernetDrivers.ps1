@@ -22,8 +22,17 @@
 [CmdletBinding()]
 param (
     [switch]$Install,
-    [string]$DownloadPath = 'C:\Temp\Realtek_Ethernet'
+    [string]$DownloadPath = 'C:\Temp\Realtek_Ethernet',
+
+    [ValidateSet('x64','arm64','all')]
+    [string]$Architecture = 'x64'
 )
+
+$AcceptedArchs = switch ($Architecture) {
+    'x64'   { @('AMD64') }
+    'arm64' { @('ARM64') }
+    'all'   { @('AMD64','ARM64') }
+}
 
 # Dynamic Admin Check
 if ($Install -and -not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -95,7 +104,8 @@ foreach ($Target in $Targets) {
                 if ($Version -and $DateString) {
                     try {
                         $DateObj = [datetime]::Parse($DateString)
-                        $Arch = if ($DetailsPage.Content -match "ARM64") { "ARM64" } elseif ($DetailsPage.Content -match "AMD64") { "AMD64" } else { "x86" }
+                        $Arch = if ($DetailsPage.Content -match "ARM64") { "ARM64" } elseif ($DetailsPage.Content -match "AMD64|x64|amd64") { "AMD64" } else { "x86" }
+                        if ($Arch -notin $AcceptedArchs) { continue }
                         $AvailablePackages += [PSCustomObject]@{
                             Prefix  = $Prefix
                             RTLName = $RTLName

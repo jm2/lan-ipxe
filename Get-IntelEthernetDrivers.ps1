@@ -12,8 +12,17 @@
 [CmdletBinding()]
 param (
     [switch]$Install,
-    [string]$DownloadPath = 'C:\Temp\Intel_Ethernet'
+    [string]$DownloadPath = 'C:\Temp\Intel_Ethernet',
+
+    [ValidateSet('x64','arm64','all')]
+    [string]$Architecture = 'x64'
 )
+
+$AcceptedArchs = switch ($Architecture) {
+    'x64'   { @('AMD64') }
+    'arm64' { @('ARM64') }
+    'all'   { @('AMD64','ARM64') }
+}
 
 if ($Install -and -not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Error "The -Install flag requires Administrator privileges. Please run PowerShell as Administrator."
@@ -31,7 +40,10 @@ $Targets = @(
     @{ 
         Name    = "Intel_1G_Family"
         Devices = @(
-            @{ Prefix = "I219-V"; HWID = "VEN_8086&DEV_15B3"; FamilyName = "I219" },
+            # Intel's e1d driver is unified: the INF inside any single package covers ALL
+            # I219-V/LM generations (DEV_15B8, 15FA, 0DC8, 0D4F, 15D8, 15B3, etc.).
+            # Use DEV_15B8 (gen-2, most widely listed on the catalog) as the representative.
+            @{ Prefix = "I219-V"; HWID = "VEN_8086&DEV_15B8"; FamilyName = "I219" },
             @{ Prefix = "I210"; HWID = "VEN_8086&DEV_1533"; FamilyName = "I210" }
         )
     },
@@ -99,7 +111,8 @@ foreach ($Target in $Targets) {
                 if ($Version -and $DateString) {
                     try {
                         $DateObj = [datetime]::Parse($DateString)
-                        $Arch = if ($DetailsPage.Content -match "ARM64") { "ARM64" } elseif ($DetailsPage.Content -match "AMD64") { "AMD64" } else { "x86" }
+                        $Arch = if ($DetailsPage.Content -match "ARM64") { "ARM64" } elseif ($DetailsPage.Content -match "AMD64|x64|amd64") { "AMD64" } else { "x86" }
+                        if ($Arch -notin $AcceptedArchs) { continue }
                         $AvailablePackages += [PSCustomObject]@{
                             Prefix     = $Prefix
                             FamilyName = $FamilyName

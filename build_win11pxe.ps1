@@ -117,7 +117,7 @@ try {
         $driverScripts = Get-ChildItem -Path $PSScriptRoot -Filter "Get-*Drivers.ps1"
         foreach ($script in $driverScripts) {
             Write-Host "    -> Running $($script.Name)..."
-            & $script.FullName -DownloadPath $driverTempPath
+            & $script.FullName -DownloadPath $driverTempPath -Architecture x64
         }
 
         # Re-extract any nested CABs (some Update Catalog packages are double-wrapped)
@@ -197,8 +197,7 @@ try {
     $bcdStore = Join-Path $efiDrivePath "EFI\Microsoft\Boot\BCD"
     & bcdedit /store "$bcdStore" /set '{default}' sos on
     & bcdedit /store "$bcdStore" /set '{default}' bootlog yes
-    & bcdedit /store "$bcdStore" /set '{default}' quietboot off
-    & bcdedit /store "$bcdStore" /set '{default}' noguiboot yes
+    & bcdedit /store "$bcdStore" /set '{globalsettings}' bootuxdisabled on
     & bcdedit /store "$bcdStore" /set '{default}' recoveryenabled no
 
     Write-Host ">>> Injecting iSCSI and Network Boot Settings..." -ForegroundColor Cyan
@@ -252,24 +251,35 @@ try {
             "netvsc",                 # Hyper-V Virtual Ethernet
             "netkvm",                 # VirtIO Ethernet
 
-            # --- 2.5GbE, 5GbE, & 10GbE Prosumer/Workstation ---
-            "e2fexpress",             # Intel 2.5GbE (I225-V / I226-V)
-            "rt640x64",               # Realtek PCIe 1G/2.5G/5G/10G (RTL8125, RTL8126, RTL8127)
-            "rtump64x64", "rtux64w10",# Realtek USB 2.5G/5G/10G (RTL8156, RTL8157, RTL8159)
-            "rtnetcx",                # Realtek NetAdapterCx (Next-Gen Windows 11 Driver)
-            "aqnic650", "aqnic",      # Marvell/Aquantia 2.5/5/10GbE (AQC107 / AQC113)
+            # --- Intel Ethernet (from Get-IntelEthernetDrivers.ps1 packages) ---
+            "e2fn",                   # Intel 2.5GbE I225-V / I226-V (e2fn.sys)
+            "e1d",                    # Intel 1GbE I219-V/LM — e1d series (e1d.sys)
+            "e1r",                    # Intel 1GbE I210 (e1r.sys)
+            "ixt62x64",               # Intel 10GbE X540 (ixt62x64.sys)
+            "ixs",                    # Intel 10GbE X550 (ixs.sys)
+            "i40ea",                  # Intel 10/40GbE X710/XL710 (i40ea.sys)
+            "iavf68",                 # Intel Adaptive Virtual Function (iavf68.sys)
+            "ice",                    # Intel 100GbE E810 (in-box or future package)
 
-            # --- 10/40/100GbE Enterprise ---
+            # --- Realtek PCIe (from Get-RealtekEthernetDrivers.ps1 NetAdapterCx packages) ---
+            "rt25cx21x64",            # Realtek 2.5GbE RTL8125 (rt25cx21x64.sys)
+            "rt640x64",               # Realtek 2.5G/5G RTL8126 (rt640x64.sys)
+            "rt27cx21x64",            # Realtek 10GbE RTL8127 (rt27cx21x64.sys)
+            "rt68cx21x64",            # Realtek 1GbE RTL8168 (rt68cx21x64.sys)
+
+            # --- Realtek USB (from Get-RealtekEthernetDrivers.ps1 NetAdapterCx packages) ---
+            "rtu53cx22x64",           # Realtek 1GbE USB RTL8153 (rtu53cx22x64.sys)
+            "rtu56cx22x64",           # Realtek 2.5GbE USB RTL8156 (rtu56cx22x64.sys)
+            "rtucx22x64",             # Realtek 5G/10G USB RTL8157/RTL8159 (rtucx22x64.sys)
+
+            # --- Marvell/Aquantia (from Get-MarvellEthernetDrivers.ps1 packages) ---
+            "atlantic650",            # Aquantia 10GbE AQC107 (atlantic650.sys)
+            "aqnic650",               # Aquantia 2.5/5/10GbE AQC113 (aqnic650.sys)
+
+            # --- Enterprise (in-box or manually added) ---
             "mlx5", "mlx4eth",        # Mellanox ConnectX-3, 4, 5, 6
-            "ixgbe", "ixgben", "ixv", # Intel 10GbE (82599/X540)
-            "i40ea", "i40eb",         # Intel 10/40GbE (X710/XL710)
-            "ice",                    # Intel 100GbE (E810 series)
             "qfle3", "qevb", "bxvbd", # QLogic/Broadcom NetXtreme and FastLinQ
-            "cxgb4",                  # Chelsio 10/40GbE
-
-            # --- Standard 1GbE Fallbacks ---
-            "e1dexpress",             # Intel 1GbE (I219-V / I211-AT)
-            "e1r68x64"                # Intel 1GbE (I210)
+            "cxgb4"                   # Chelsio 10/40GbE
         )
 
         foreach ($driver in $nicDrivers) {

@@ -22,8 +22,17 @@
 [CmdletBinding()]
 param (
     [switch]$Install,
-    [string]$DownloadPath = 'C:\Temp\MediaTek_WiFi'
+    [string]$DownloadPath = 'C:\Temp\MediaTek_WiFi',
+
+    [ValidateSet('x64','arm64','all')]
+    [string]$Architecture = 'x64'
 )
+
+$AcceptedArchs = switch ($Architecture) {
+    'x64'   { @('AMD64') }
+    'arm64' { @('ARM64') }
+    'all'   { @('AMD64','ARM64') }
+}
 
 # Dynamic Admin Check
 if ($Install -and -not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -38,13 +47,13 @@ $Targets = @(
             @{ 
                 ModelId           = "7961"
                 ModelName         = "MT7921_Filogic330"
-                Queries           = @("VEN_14C3&DEV_7961", "MT7921", "Filogic 330")
+                Queries           = @("VEN_14C3&DEV_7961", "MT7921")
                 PreferredBranches = @("3.5")
             },
             @{ 
                 ModelId           = "0608"
                 ModelName         = "MT7921K_RZ608"
-                Queries           = @("VEN_14C3&DEV_0608", "MT7921K", "RZ608")
+                Queries           = @("VEN_14C3&DEV_0608", "RZ608")
                 PreferredBranches = @("3.5")
             },
             @{ 
@@ -113,7 +122,8 @@ foreach ($Target in $Targets) {
                     if ($Version -and $DateString -and $Title -notmatch "NDIS") {
                         try {
                             $DateObj = [datetime]::Parse($DateString)
-                            $Arch = if ($DetailsPage.Content -match "ARM64") { "ARM64" } elseif ($DetailsPage.Content -match "AMD64") { "AMD64" } else { "x86" }
+                            $Arch = if ($DetailsPage.Content -match "ARM64") { "ARM64" } elseif ($DetailsPage.Content -match "AMD64|x64|amd64") { "AMD64" } else { "x86" }
+                            if ($Arch -notin $AcceptedArchs) { continue }
                             $AvailablePackages += [PSCustomObject]@{
                                 ModelId           = $ModelId
                                 ModelName         = $Device.ModelName

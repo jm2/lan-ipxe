@@ -10,8 +10,17 @@
 [CmdletBinding()]
 param (
     [switch]$Install,
-    [string]$DownloadPath = 'C:\Temp\Marvell_Ethernet'
+    [string]$DownloadPath = 'C:\Temp\Marvell_Ethernet',
+
+    [ValidateSet('x64','arm64','all')]
+    [string]$Architecture = 'x64'
 )
+
+$AcceptedArchs = switch ($Architecture) {
+    'x64'   { @('AMD64') }
+    'arm64' { @('ARM64') }
+    'all'   { @('AMD64','ARM64') }
+}
 
 if ($Install -and -not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Error "The -Install flag requires Administrator privileges. Please run PowerShell as Administrator."
@@ -29,7 +38,12 @@ $Targets = @(
     @{ 
         Name    = "Marvell_Aquantia_USB"
         Devices = @(
-            @{ Prefix = "AQC111U"; HWID = "VID_20F4&PID_E05A"; FamilyName = "AQC111U" }
+            # Aquantia's own VID covers most 1st-party and reference-design adapters.
+            # OEM adapters (TRENDnet VID_20F4, ASIX VID_0B95) may use different VIDs
+            # but the same underlying Aquantia driver, so we search multiple.
+            @{ Prefix = "AQC111U"; HWID = "VID_1D6A&PID_D111"; FamilyName = "AQC111U" },
+            @{ Prefix = "AQC111U-TRENDnet"; HWID = "VID_20F4&PID_E05A"; FamilyName = "AQC111U" },
+            @{ Prefix = "AQC111U-ASIX"; HWID = "VID_0B95&PID_2790"; FamilyName = "AQC111U" }
         )
     }
 )
@@ -76,7 +90,8 @@ foreach ($Target in $Targets) {
                 if ($Version -and $DateString) {
                     try {
                         $DateObj = [datetime]::Parse($DateString)
-                        $Arch = if ($DetailsPage.Content -match "ARM64") { "ARM64" } elseif ($DetailsPage.Content -match "AMD64") { "AMD64" } else { "x86" }
+                        $Arch = if ($DetailsPage.Content -match "ARM64") { "ARM64" } elseif ($DetailsPage.Content -match "AMD64|x64|amd64") { "AMD64" } else { "x86" }
+                        if ($Arch -notin $AcceptedArchs) { continue }
                         $AvailablePackages += [PSCustomObject]@{
                             Prefix     = $Prefix
                             FamilyName = $FamilyName
