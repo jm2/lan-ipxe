@@ -46,6 +46,7 @@ actions:
   - gst-plugin-pipewire
   - gst-plugins-ugly
   - hivex
+  - htop
   - intel-ucode
   - less
   - lib32-libva-intel-driver
