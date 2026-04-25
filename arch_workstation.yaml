@@ -45,6 +45,7 @@ actions:
   - grub
   - gst-plugin-pipewire
   - gst-plugins-ugly
+  - hivex
   - intel-ucode
   - less
   - lib32-libva-intel-driver
@@ -77,6 +78,7 @@ actions:
   - mesa-utils
   - mpv
   - nano
+  - net-tools
   - networkmanager
   - noto-fonts
   - noto-fonts-cjk

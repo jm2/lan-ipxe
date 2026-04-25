@@ -240,13 +240,27 @@ try {
         Write-Host "  Configuring $cs..." -ForegroundColor DarkGray
 
         # 1. Core iSCSI and Network Stack Services (Universally Required)
-        $coreServices = @("MSiSCSI", "iScsiPrt", "iscsi", "NDIS", "Tcpip", "NetBT", "Winsock", "netfs")
+        #    Group values are set explicitly to guarantee correct boot load order.
+        #    The root cause of 0x7B is iScsiPrt loading without a Group assignment,
+        #    which puts it after disk enumeration in the boot sequence.
+        $coreServices = @("iScsiPrt", "MSiSCSI", "NDIS", "Tcpip", "NetBT", "Winsock", "netfs")
+        $svcGroups = @{}
+        $svcGroups["iScsiPrt"] = "SCSI miniport"
+        $svcGroups["MSiSCSI"]  = "iSCSI"
+        $svcGroups["NDIS"]     = "NDIS Wrapper"
+        $svcGroups["Tcpip"]    = "PNP_TDI"
+        $svcGroups["NetBT"]    = "PNP_TDI"
+        $svcGroups["Winsock"]  = "PNP_TDI"
+        $svcGroups["netfs"]    = "NetworkProvider"
         foreach ($service in $coreServices) {
             $regPath = "HKLM:\$tempHiveName\$cs\Services\$service"
             if (Test-Path $regPath) {
                 Set-ItemProperty -Path $regPath -Name "Start" -Value 0 -Type DWord
                 Set-ItemProperty -Path $regPath -Name "BootFlags" -Value 1 -Type DWord
-                Write-Host "  Promoted Core Stack: $service"
+                if ($svcGroups.ContainsKey($service)) {
+                    Set-ItemProperty -Path $regPath -Name "Group" -Value $svcGroups[$service] -Type String
+                }
+                Write-Host "  Promoted Core Stack: $service (Group: $($svcGroups[$service]))"
             }
         }
 
@@ -405,7 +419,14 @@ try {
             Set-ItemProperty -Path $tcpipRegPath -Name "PollBootPartitionTimeout" -Value 30000 -Type DWord
         }
 
-        # 6. Disable BitLocker automatic device encryption
+        # 6. Disk timeout — iSCSI is network storage, needs generous timeout
+        $diskRegPath = "HKLM:\$tempHiveName\$cs\Services\disk"
+        if (Test-Path $diskRegPath) {
+            Set-ItemProperty -Path $diskRegPath -Name "TimeOutValue" -Value 120 -Type DWord
+            Write-Host "  Set Disk TimeOutValue: 120 seconds"
+        }
+
+        # 7. Disable BitLocker automatic device encryption
         $bitLockerRegPath = "HKLM:\$tempHiveName\$cs\Control\BitLocker"
         if (-not (Test-Path $bitLockerRegPath)) { New-Item -Path $bitLockerRegPath -Force | Out-Null }
         Set-ItemProperty -Path $bitLockerRegPath -Name "PreventDeviceEncryption" -Value 1 -Type DWord
