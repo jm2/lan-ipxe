@@ -178,26 +178,77 @@ if (-not $CUResults) {
     exit 0
 }
 
-# Sort by date descending — the newest is our target, older ones are potential checkpoints
+# Sort by date descending and deduplicate by Update ID
 $SortedCUs = $CUResults | Sort-Object DateObj -Descending
-
-$TargetCU = $SortedCUs | Select-Object -First 1
-Write-Host "   -> Target CU: $($TargetCU.Title) ($($TargetCU.DateObj.ToString('yyyy-MM-dd')))" -ForegroundColor Green
-
-# For checkpoint support (24H2+), download all CUs in the chain.
-# DISM will automatically skip packages that are already superseded by the target
-# and will apply any required checkpoint prerequisites in the correct order.
-# Deduplicate by Update ID (multiple search queries can return the same package).
 $AllCUs = $SortedCUs | Group-Object Id | ForEach-Object { $_.Group[0] }
 
-if ($AllCUs.Count -gt 1) {
-    Write-Host "   -> Found $($AllCUs.Count) CU packages (including potential checkpoint prerequisites)" -ForegroundColor Yellow
-    Write-Host "      DISM will auto-resolve the dependency chain when pointed at the folder."
+$TargetCU = $AllCUs | Sort-Object DateObj -Descending | Select-Object -First 1
+
+Write-Host "   -> Target CU: $($TargetCU.Title) ($($TargetCU.DateObj.ToString('yyyy-MM-dd')))" -ForegroundColor Green
+Write-Host "   -> Catalog returned $($AllCUs.Count) total CU entries." -ForegroundColor DarkGray
+
+# ============================================================
+# Checkpoint CU Discovery (24H2+)
+# ============================================================
+# Monthly CUs are cumulative within their checkpoint window, so intermediate
+# monthly CUs (Jan, Feb, Mar between checkpoints) are fully superseded by the
+# target. We only need the TARGET + any CHECKPOINT prerequisites.
+#
+# Strategy: search the catalog specifically for checkpoint CU packages.
+# Microsoft titles checkpoints as "Checkpoint Cumulative Update" rather than
+# the standard "Cumulative Update" used for monthly CUs. If no dedicated
+# checkpoint search produces results, fall back to including the oldest CU
+# from the standard results (which is typically the first checkpoint).
+# ============================================================
+
+Write-Host "   -> Searching for checkpoint prerequisites..." -NoNewline
+
+$CheckpointQuery = "Checkpoint Cumulative Update Windows 11 $Version x64"
+$CheckpointResults = Find-CatalogUpdates -Query $CheckpointQuery `
+    -ExcludePatterns @("(?i)\.NET", "(?i)Dynamic", "(?i)Preview", "(?i)Server") `
+    -RequirePattern "(?i)for x64-based Systems"
+
+Write-Host " Done."
+
+$PackagesToDownload = @()
+$PackagesToDownload += $TargetCU
+
+if ($CheckpointResults) {
+    $CheckpointCUs = $CheckpointResults | Sort-Object DateObj -Descending |
+                     Group-Object Id | ForEach-Object { $_.Group[0] }
+
+    # Only include checkpoints that are OLDER than the target (prerequisites)
+    $CheckpointCUs = $CheckpointCUs | Where-Object { $_.DateObj -lt $TargetCU.DateObj }
+
+    foreach ($cp in $CheckpointCUs) {
+        $PackagesToDownload += $cp
+    }
+    Write-Host "   -> Found $($CheckpointCUs.Count) checkpoint prerequisite(s) from catalog." -ForegroundColor Yellow
+}
+else {
+    # Fallback: no dedicated checkpoint search results.
+    # Include the oldest CU from standard results as the likely checkpoint base.
+    $OldestCU = $AllCUs | Sort-Object DateObj | Select-Object -First 1
+    if ($OldestCU.Id -ne $TargetCU.Id) {
+        $PackagesToDownload += $OldestCU
+        Write-Host "   -> No checkpoint-specific results. Including oldest CU as fallback checkpoint base." -ForegroundColor Yellow
+    }
+}
+
+# Deduplicate and sort chronologically
+$PackagesToDownload = $PackagesToDownload | Sort-Object Id -Unique | Sort-Object DateObj
+
+$skippedCount = $AllCUs.Count - $PackagesToDownload.Count
+Write-Host "   -> Selected $($PackagesToDownload.Count) package(s), $skippedCount intermediate monthly CUs skipped." -ForegroundColor Yellow
+
+foreach ($pkg in $PackagesToDownload) {
+    $role = if ($pkg.Id -eq $TargetCU.Id) { "TARGET" } else { "CHECKPOINT" }
+    Write-Host "      [$role] $($pkg.Title) ($($pkg.DateObj.ToString('yyyy-MM-dd')))" -ForegroundColor DarkGray
 }
 
 $downloadedCount = 0
-$downloadedFiles = @{}  # Track by filename to avoid downloading the same .msu twice
-foreach ($cu in $AllCUs) {
+$downloadedFiles = @{}
+foreach ($cu in $PackagesToDownload) {
     $result = Get-CatalogPackage -Update $cu -DestinationPath $DownloadPath
     if ($result) {
         $fileName = Split-Path $result -Leaf
@@ -227,7 +278,8 @@ if ($SSUResults) {
     Write-Host "   -> SSU Found: $($BestSSU.Title) ($($BestSSU.DateObj.ToString('yyyy-MM-dd')))" -ForegroundColor Green
     $result = Get-CatalogPackage -Update $BestSSU -DestinationPath $DownloadPath
     if ($result) { $downloadedCount++ }
-} else {
+}
+else {
     Write-Host "   -> No standalone SSU found (likely integrated into CU packages)." -ForegroundColor DarkGray
 }
 
