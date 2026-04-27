@@ -162,6 +162,7 @@ actions:
   - ottomatic
   - payload-dumper-go-bin
   - powershell-bin
+  - sit-git
   - steamcmd
   - tremulous-grangerhub-bin
   - tributary-bin
