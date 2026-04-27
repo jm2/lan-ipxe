@@ -146,6 +146,7 @@ actions:
   - gnome-icon-theme-symbolic
   - gnome-shell-extension-dash-to-dock
   - google-chrome
+  - hfsutils
   - lgogdownloader
   - lineageos-devel
   - luxtorpeda-bin
