@@ -1,12 +1,21 @@
 #!/bin/bash
 set -euo pipefail
 
+# Capture all output to a logfile and the journal instead of relying on cron mail.
+LOGFILE="/var/log/pacman-update.log"
+exec >>"$LOGFILE" 2>&1
+
+log() {
+    printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*"
+    logger -t pacman-update -- "$*" 2>/dev/null || true
+}
+
 if [[ -f /var/lib/pacman/db.lck ]]; then
-    echo "Pacman database is locked. Aborting scheduled update." >&2
+    log "Pacman database is locked. Aborting scheduled update."
     exit 1
 fi
 
-echo "Updating `hostname` on `date`..."
+log "Updating $(hostname) on $(date)..."
 pacman -Syu --noconfirm
 
 # paccache retains the last 3 versions if available.
@@ -16,7 +25,33 @@ else
     pacman -Sc --noconfirm
 fi
 
-if [[ ! -d "/usr/lib/modules/$(uname -r)" ]]; then
-    echo "Running kernel modules not found (likely upgraded). Scheduling reboot..."
-    wall "Rebooting for kernel upgrade in 30 minutes..." && systemd-run --on-active=30m systemctl reboot -i
+# Reboot handling: only schedule a reboot when the running kernel was actually
+# replaced AND a usable new kernel is fully in place (built modules + a generated
+# initramfs). This avoids rebooting into a half-installed kernel.
+running_kver="$(uname -r)"
+if [[ -d "/usr/lib/modules/${running_kver}" ]]; then
+    log "Running kernel ${running_kver} unchanged; no reboot needed."
+    exit 0
 fi
+
+# Newest installed kernel = the upgrade target.
+new_kver="$(ls -1d /usr/lib/modules/*/ 2>/dev/null | sed 's#/usr/lib/modules/##; s#/##' | sort -V | tail -n1)"
+
+if [[ -z "${new_kver}" || ! -f "/usr/lib/modules/${new_kver}/modules.dep" ]]; then
+    log "Kernel upgraded but new kernel modules are incomplete (no modules.dep for '${new_kver:-unknown}'); NOT rebooting. Investigate manually."
+    exit 0
+fi
+
+# Require that an initramfs has actually been generated for the new kernel.
+# Cover the common mkinitcpio and dracut/kernel-install layouts.
+if ! compgen -G "/boot/initramfs-*.img" > /dev/null \
+   && ! compgen -G "/boot/*/${new_kver}/initrd" > /dev/null \
+   && ! compgen -G "/efi/*/${new_kver}/initrd" > /dev/null \
+   && [[ ! -f "/usr/lib/modules/${new_kver}/initramfs-${new_kver}.img" ]]; then
+    log "Kernel upgraded to ${new_kver} but no initramfs was found; NOT rebooting. Investigate manually."
+    exit 0
+fi
+
+log "New kernel ${new_kver} is installed with modules and initramfs; scheduling reboot in 30 minutes."
+wall "Rebooting for kernel upgrade (${new_kver}) in 30 minutes..."
+systemd-run --on-active=30m systemctl reboot -i

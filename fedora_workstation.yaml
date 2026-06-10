@@ -1,11 +1,13 @@
 where: os.name == "linux"
 actions:
+# NOTE: must run from repo root (repo-relative source path)
 - action: command.run
   privileged: true
   command: cp
   args:
   - files/etc/yum.repos.d/antigravity.repo
   - /etc/yum.repos.d/antigravity.repo
+# NOTE: must run from repo root (repo-relative source path)
 - action: command.run
   privileged: true
   command: cp
@@ -56,6 +58,7 @@ actions:
     tar xzf /tmp/speedtest.tgz -C ~/.local/bin speedtest &&
     chmod +x ~/.local/bin/speedtest &&
     rm -f /tmp/speedtest.tgz )
+# NOTE: must run from repo root (repo-relative source path)
 - action: command.run
   privileged: true
   command: bash
@@ -65,6 +68,7 @@ actions:
     if [ "$(uname -m)" = "x86_64" ]; then
     cp files/etc/yum.repos.d/google-chrome.repo /etc/yum.repos.d/google-chrome.repo;
     fi
+# NOTE: must run from repo root (repo-relative source path)
 - action: command.run
   privileged: true
   command: bash
@@ -74,6 +78,7 @@ actions:
     if [ "$(uname -m)" = "x86_64" ]; then
     cp files/etc/yum.repos.d/rpmfusion-nonfree-nvidia-driver.repo /etc/yum.repos.d/rpmfusion-nonfree-nvidia-driver.repo;
     fi
+# NOTE: must run from repo root (repo-relative source path)
 - action: command.run
   privileged: true
   command: bash
@@ -98,6 +103,19 @@ actions:
     if [ "$(uname -m)" = "x86_64" ]; then
     rpmkeys --import https://dl.google.com/linux/linux_signing_key.pub;
     fi
+# Microsoft production repo for PowerShell (pwsh). NOTE: must run from repo root.
+- action: command.run
+  privileged: true
+  command: cp
+  args:
+  - files/etc/yum.repos.d/microsoft-prod.repo
+  - /etc/yum.repos.d/microsoft-prod.repo
+- action: command.run
+  privileged: true
+  command: rpmkeys
+  args:
+  - --import
+  - https://packages.microsoft.com/keys/microsoft.asc
 - action: package.install
   list:
   - abattis-cantarell-fonts
@@ -105,8 +123,10 @@ actions:
   - antigravity
   - bash-completion
   - bc
+  - bison
   - bluez
   - bluez-tools
+  - boost-devel
   - brasero
   - cargo
   - ccache
@@ -114,6 +134,7 @@ actions:
   - chrony
   - clang
   - clippy
+  - cmake
   - codium
   - cronie
   - cups
@@ -129,9 +150,13 @@ actions:
   - elfutils-libelf-devel
   - erofs-utils
   - flatpak
+  - flex
   - gcc
   - gdb
+  - genisoimage
+  - git
   - git-lfs
+  - gmp-devel
   - '@gnome-desktop'
   - gnome-extensions-app
   - gnome-shell-extension-appindicator
@@ -152,9 +177,11 @@ actions:
   - grub2
   - gstreamer1-devel
   - gtk4-devel
+  - hfsutils
   - ImageMagick
   - less
   - libadwaita-devel
+  - libmpc-devel
   - libva
   - libva-utils
   - libxml2
@@ -167,6 +194,7 @@ actions:
   - lzop
   - maven
   - mesa-vulkan-drivers
+  - mpfr-devel
   - mpv
   - nano
   - ncurses-devel
@@ -177,10 +205,12 @@ actions:
   - pipewire-alsa
   - pipewire-pulseaudio
   - pngcrush
+  - powershell
   - protobuf-compiler
   - python3-protobuf
   - rhythmbox
   - rsync
+  - ruby
   - rust
   - rustfmt
   - schedtool
@@ -189,8 +219,10 @@ actions:
   - squashfs-tools
   - sudo
   - system-config-printer
+  - texinfo
   - tree
   - tributary
+  - unar
   - vim
   - vlc
   - vulkan-loader
@@ -290,12 +322,14 @@ actions:
 - action: file.copy
   source: config/Antigravity/User/settings.json
   target: "{{ env.HOME }}/.config/Antigravity/User/settings.json"
+# NOTE: must run from repo root (repo-relative source path)
 - action: command.run
   privileged: true
   command: cp
   args:
   - files/etc/locale.conf
   - /etc/locale.conf
+# NOTE: must run from repo root (repo-relative source path)
 - action: command.run
   privileged: true
   command: bash
@@ -305,6 +339,7 @@ actions:
     mkdir -p /etc/sysctl.d &&
     cp files/etc/sysctl.d/99-inotify.conf /etc/sysctl.d/99-inotify.conf &&
     restorecon -v /etc/sysctl.d/99-inotify.conf
+# NOTE: must run from repo root (repo-relative source path)
 - action: command.run
   privileged: true
   command: bash
@@ -376,13 +411,14 @@ actions:
   command: bash
   args:
   - -c
-  - cp {{ env.HOME }}/.config/monitors.xml /etc/xdg/monitors.xml && restorecon -v /etc/xdg/monitors.xml
+  - '[ -f "{{ env.HOME }}/.config/monitors.xml" ] && cp "{{ env.HOME }}/.config/monitors.xml" /etc/xdg/monitors.xml && restorecon -v /etc/xdg/monitors.xml || true'
 - action: command.run
   privileged: true
   command: bash
   args:
   - -c
   - mkdir -p /etc/dconf/db/gdm.d
+# NOTE: must run from repo root (repo-relative source path)
 - action: command.run
   privileged: true
   command: bash

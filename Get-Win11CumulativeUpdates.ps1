@@ -9,10 +9,11 @@
     DISM can automatically resolve these dependencies when ALL required packages are placed
     in a single folder and /PackagePath points to that folder.
 
-    This script queries the Update Catalog, identifies all valid CUs for the target
-    version, downloads the latest monthly CU plus all earlier CUs published in the same
-    release cycle (which serve as potential checkpoint prerequisites), and also fetches
-    any Servicing Stack Updates (SSUs) for the target version.
+    This script queries the Update Catalog, identifies the latest monthly CU for the
+    target version, and downloads every .msu its DownloadDialog returns — for
+    checkpoint-era CUs (24H2+) Microsoft bundles the full required checkpoint chain
+    there. All packages land in one folder so DISM can resolve the dependency chain
+    automatically. It also fetches any Servicing Stack Updates (SSUs) for the version.
 
     .EXAMPLE
     .\Get-Win11CumulativeUpdates.ps1 -Version "25H2" -DownloadPath "C:\Temp\Win11_Updates"
@@ -29,6 +30,30 @@ param (
 if (-not (Test-Path $DownloadPath)) { New-Item -ItemType Directory -Path $DownloadPath -Force | Out-Null }
 
 # ============================================================
+# Helper: retry-with-backoff wrapper around Invoke-WebRequest
+# ============================================================
+# The Update Catalog throttles aggressively; transient 429/5xx/timeout failures are
+# common. Retry up to 3 times with an increasing delay, then re-throw so callers can
+# try/catch and skip cleanly. NOTE: this runs only on the main thread — it is NOT
+# available inside ForEach-Object -Parallel runspaces, which carry their own inline
+# retry loop.
+function Invoke-CatalogRequest {
+    param (
+        [Parameter(Mandatory)][hashtable]$Params,
+        [int]$MaxAttempts = 3
+    )
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        try {
+            return Invoke-WebRequest @Params
+        }
+        catch {
+            if ($attempt -ge $MaxAttempts) { throw }
+            Start-Sleep -Seconds ($attempt * 2)
+        }
+    }
+}
+
+# ============================================================
 # Helper: Search the catalog, filter results, return metadata
 # ============================================================
 function Find-CatalogUpdates {
@@ -40,11 +65,23 @@ function Find-CatalogUpdates {
 
     $SearchUrl = "https://www.catalog.update.microsoft.com/Search.aspx?q=$([uri]::EscapeDataString($Query))"
 
+    $SearchPage = $null
     try {
-        $SearchPage = Invoke-WebRequest -Uri $SearchUrl -UseBasicParsing
+        $SearchPage = Invoke-CatalogRequest -Params @{ Uri = $SearchUrl; UseBasicParsing = $true }
     } catch {
         Write-Warning "Failed to query catalog for '$Query': $_"
         return @()
+    }
+
+    # LIMITATION: Search.aspx returns only the first 25 relevance-sorted rows. Picking
+    # "newest by date" below therefore only sees the first 25. Full pagination requires
+    # __EVENTTARGET POST-backs (invasive); for now we parse the "1 - N of M" total and
+    # warn when M > 25 so a missed newer entry is at least visible.
+    if ($SearchPage.Content -match '(\d+)\s*-\s*(\d+)\s+of\s+(\d+)') {
+        $totalResults = [int]$matches[3]
+        if ($totalResults -gt 25) {
+            Write-Warning "Catalog reports $totalResults results for '$Query' but only the first 25 are parsed (pagination not implemented)."
+        }
     }
 
     $UpdateIds = [regex]::Matches($SearchPage.Content, "goToDetails\(['\`"]([a-f0-9\-]+)['\`"]\)") |
@@ -58,7 +95,12 @@ function Find-CatalogUpdates {
         $Id = $_
         $DetailsUrl = "https://www.catalog.update.microsoft.com/ScopedViewInline.aspx?updateid=$Id"
         try {
-            $DetailsPage = Invoke-WebRequest -Uri $DetailsUrl -UseBasicParsing -ErrorAction SilentlyContinue
+            # Inline retry-with-backoff (the script-scope helper is not visible here).
+            $DetailsPage = $null
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+                try { $DetailsPage = Invoke-WebRequest -Uri $DetailsUrl -UseBasicParsing; break }
+                catch { if ($attempt -ge 3) { throw } else { Start-Sleep -Seconds ($attempt * 2) } }
+            }
             $Content = $DetailsPage.Content
 
             $Title = if ($Content -match 'id="ScopedViewHandler_titleText">([^<]+)') { $matches[1].Trim() }
@@ -73,7 +115,9 @@ function Find-CatalogUpdates {
                 }
             }
         }
-        catch {}
+        catch {
+            Write-Warning "Detail fetch/parse failed for update $Id : $($_.Exception.Message)"
+        }
     } -ThrottleLimit 8
 
     # Apply filters on the collected results (can't filter inside -Parallel easily
@@ -93,70 +137,101 @@ function Find-CatalogUpdates {
     return $Results
 }
 
-# Helper: Download a package from the catalog by Update ID
+# Helper: Download ALL packages the catalog lists for one Update ID.
+# Returns an array of [PSCustomObject]@{ Path; FileName; IsTarget }.
 function Get-CatalogPackage {
     param (
         [PSCustomObject]$Update,
-        [string]$DestinationPath
+        [string]$DestinationPath,
+        [string]$TargetKB = ""
     )
 
     $PostData = "[{`"size`":0,`"updateID`":`"$($Update.Id)`",`"uidInfo`":`"$($Update.Id)`"}]"
     try {
-        $DownloadPage = Invoke-WebRequest -Uri "https://www.catalog.update.microsoft.com/DownloadDialog.aspx" -Method Post -Body @{updateIDs = $PostData } -UseBasicParsing
+        $DownloadPage = Invoke-CatalogRequest -Params @{ Uri = "https://www.catalog.update.microsoft.com/DownloadDialog.aspx"; Method = 'Post'; Body = @{updateIDs = $PostData }; UseBasicParsing = $true }
     } catch {
         Write-Warning "   [!] Failed to get download link for: $($Update.Title)"
-        return $null
+        return @()
     }
 
-    # The DownloadDialog page may contain multiple URLs (SSU, checkpoint prereqs, actual CU).
-    # For checkpoint-era CUs (24H2+), the actual target .msu is typically the last link.
+    # FIX: the DownloadDialog can list MULTIPLE packages for one update ID. For
+    # checkpoint-era CUs (24H2+) it returns the ENTIRE required checkpoint chain
+    # (several .msu), and the actual target is NOT reliably the last link (Microsoft
+    # currently puts a checkpoint last). Download ALL of them into one folder so DISM
+    # can resolve the dependency chain automatically, and identify the target by the
+    # KB number rather than by list position.
     $AllUrls = @([regex]::Matches($DownloadPage.Content, 'https://[^''"<]+\.(msu|cab)') |
-               ForEach-Object { $_.Value })
+               ForEach-Object { $_.Value } | Select-Object -Unique)
 
     if (-not $AllUrls) {
-        Write-Warning "   [!] Could not extract download URL for: $($Update.Title)"
-        return $null
+        Write-Warning "   [!] Could not extract any download URL for: $($Update.Title)"
+        return @()
     }
 
-    # Prefer the last .msu URL (the actual CU payload, not the prerequisite/SSU)
-    $MsuUrls = @($AllUrls | Where-Object { $_ -match '\.msu$' })
-    $DownloadUrl = if ($MsuUrls.Count -gt 0) { $MsuUrls[-1] } else { $AllUrls[-1] }
+    $Downloaded = @()
+    foreach ($DownloadUrl in $AllUrls) {
+        $FileName = ($DownloadUrl -split '/')[-1]
+        $OutFile = Join-Path $DestinationPath $FileName
+        $HashFile = "$OutFile.sha256"
+        $IsTarget = [bool]($TargetKB -and ($FileName -match "(?i)kb$TargetKB"))
 
-    $FileName = ($DownloadUrl -split '/')[-1]
-    $OutFile = Join-Path $DestinationPath $FileName
-    $HashFile = "$OutFile.sha256"
-
-    # Check if file already exists and passes integrity verification
-    if (Test-Path $OutFile) {
-        if (Test-Path $HashFile) {
-            $expectedHash = (Get-Content $HashFile -Raw).Trim()
-            $actualHash = (Get-FileHash -Path $OutFile -Algorithm SHA256).Hash
-            if ($actualHash -eq $expectedHash) {
-                Write-Host "   -> Verified (SHA256): $FileName" -ForegroundColor DarkGray
-                return $OutFile
+        # NOTE: the SHA256 sidecar below is a LOCAL CACHE / CORRUPTION check only. It
+        # confirms the file still matches what we previously downloaded (detects
+        # truncated/partial downloads and bit-rot); it does NOT establish authenticity,
+        # because the hash is self-generated, not published by Microsoft. Authenticity
+        # is checked separately via Get-AuthenticodeSignature below.
+        if (Test-Path $OutFile) {
+            if (Test-Path $HashFile) {
+                $expectedHash = (Get-Content $HashFile -Raw).Trim()
+                $actualHash = (Get-FileHash -Path $OutFile -Algorithm SHA256).Hash
+                if ($actualHash -eq $expectedHash) {
+                    Write-Host "   -> Cached (SHA256 cache check OK): $FileName" -ForegroundColor DarkGray
+                    $Downloaded += [PSCustomObject]@{ Path = $OutFile; FileName = $FileName; IsTarget = $IsTarget }
+                    continue
+                }
+                else {
+                    Write-Host "   -> Local cache hash mismatch for $FileName — re-downloading..." -ForegroundColor Yellow
+                    Remove-Item $OutFile -Force
+                    Remove-Item $HashFile -Force
+                }
             }
             else {
-                Write-Host "   -> Hash mismatch for $FileName — re-downloading..." -ForegroundColor Yellow
+                # File exists but no sidecar — can't cache-check, re-download
+                Write-Host "   -> No cache sidecar for $FileName — re-downloading..." -ForegroundColor Yellow
                 Remove-Item $OutFile -Force
-                Remove-Item $HashFile -Force
             }
         }
-        else {
-            # File exists but no sidecar — can't verify, re-download
-            Write-Host "   -> No hash sidecar for $FileName — re-downloading..." -ForegroundColor Yellow
-            Remove-Item $OutFile -Force
+
+        Write-Host "   -> Downloading $FileName..."
+        try {
+            Invoke-CatalogRequest -Params @{ Uri = $DownloadUrl; OutFile = $OutFile; UseBasicParsing = $true } | Out-Null
         }
+        catch {
+            Write-Warning "   [!] Download failed for $FileName : $_"
+            continue
+        }
+
+        # AUTHENTICITY: these .msu are servicing payloads applied to the OS image. Verify
+        # the publisher's Authenticode signature. Warn (do not throw) on failure so the
+        # happy path is preserved; the file is kept (skipping it would break the DISM
+        # chain) but flagged loudly as UNVERIFIED.
+        $sig = Get-AuthenticodeSignature -FilePath $OutFile
+        if ($sig.Status -ne 'Valid') {
+            Write-Warning "   [!] Authenticode signature for $FileName is '$($sig.Status)' (not Valid) — treat this package as UNVERIFIED before servicing."
+        }
+        else {
+            Write-Host "   -> Authenticode signature valid: $FileName" -ForegroundColor DarkGray
+        }
+
+        # Local cache/corruption sidecar (NOT authenticity — see note above).
+        $hash = (Get-FileHash -Path $OutFile -Algorithm SHA256).Hash
+        Set-Content -Path $HashFile -Value $hash -NoNewline
+        Write-Host "   -> Download complete: $FileName" -ForegroundColor Green
+
+        $Downloaded += [PSCustomObject]@{ Path = $OutFile; FileName = $FileName; IsTarget = $IsTarget }
     }
 
-    Write-Host "   -> Downloading $FileName..."
-    Invoke-WebRequest -Uri $DownloadUrl -OutFile $OutFile -UseBasicParsing
-
-    # Write SHA256 sidecar for future verification
-    $hash = (Get-FileHash -Path $OutFile -Algorithm SHA256).Hash
-    Set-Content -Path $HashFile -Value $hash -NoNewline
-    Write-Host "   -> Download complete: $FileName (SHA256: $($hash.Substring(0,12))...)" -ForegroundColor Green
-
-    return $OutFile
+    return $Downloaded
 }
 
 # ============================================================
@@ -188,75 +263,47 @@ Write-Host "   -> Target CU: $($TargetCU.Title) ($($TargetCU.DateObj.ToString('y
 Write-Host "   -> Catalog returned $($AllCUs.Count) total CU entries." -ForegroundColor DarkGray
 
 # ============================================================
-# Checkpoint CU Discovery (24H2+)
+# Checkpoint chain (24H2+)
 # ============================================================
-# Monthly CUs are cumulative within their checkpoint window, so intermediate
-# monthly CUs (Jan, Feb, Mar between checkpoints) are fully superseded by the
-# target. We only need the TARGET + any CHECKPOINT prerequisites.
+# FIX: Previously this section ran a separate catalog search for a
+# "Checkpoint Cumulative Update ..." title. That phrase never appears in catalog
+# titles, so the search always returned nothing and the code fell back to guessing
+# the oldest monthly CU as the "checkpoint base" — which is wrong.
 #
-# Strategy: search the catalog specifically for checkpoint CU packages.
-# Microsoft titles checkpoints as "Checkpoint Cumulative Update" rather than
-# the standard "Cumulative Update" used for monthly CUs. If no dedicated
-# checkpoint search produces results, fall back to including the oldest CU
-# from the standard results (which is typically the first checkpoint).
+# The required checkpoint chain is actually delivered by the TARGET CU's own
+# DownloadDialog: for checkpoint-era CUs Microsoft lists the full set of prerequisite
+# .msu packages there (and the target is NOT reliably the last entry). We therefore
+# download EVERY .msu the target's DownloadDialog returns into one folder and let DISM
+# resolve the chain (/Add-Package /PackagePath <folder>). The target package is
+# identified by the KB number parsed from its catalog title, not by list position.
 # ============================================================
 
-Write-Host "   -> Searching for checkpoint prerequisites..." -NoNewline
-
-$CheckpointQuery = "Checkpoint Cumulative Update Windows 11 $Version x64"
-$CheckpointResults = Find-CatalogUpdates -Query $CheckpointQuery `
-    -ExcludePatterns @("(?i)\.NET", "(?i)Dynamic", "(?i)Preview", "(?i)Server") `
-    -RequirePattern "(?i)for x64-based Systems"
-
-Write-Host " Done."
-
-$PackagesToDownload = @()
-$PackagesToDownload += $TargetCU
-
-if ($CheckpointResults) {
-    $CheckpointCUs = $CheckpointResults | Sort-Object DateObj -Descending |
-                     Group-Object Id | ForEach-Object { $_.Group[0] }
-
-    # Only include checkpoints that are OLDER than the target (prerequisites)
-    $CheckpointCUs = $CheckpointCUs | Where-Object { $_.DateObj -lt $TargetCU.DateObj }
-
-    foreach ($cp in $CheckpointCUs) {
-        $PackagesToDownload += $cp
-    }
-    Write-Host "   -> Found $($CheckpointCUs.Count) checkpoint prerequisite(s) from catalog." -ForegroundColor Yellow
+# Parse the KB number from the target CU title so we can positively identify the
+# target .msu among the (possibly several) packages DownloadDialog returns.
+$TargetKB = if ($TargetCU.Title -match '(?i)KB(\d+)') { $matches[1] } else { "" }
+if ($TargetKB) {
+    Write-Host "   -> Target KB parsed from title: KB$TargetKB" -ForegroundColor DarkGray
 }
 else {
-    # Fallback: no dedicated checkpoint search results.
-    # Include the oldest CU from standard results as the likely checkpoint base.
-    $OldestCU = $AllCUs | Sort-Object DateObj | Select-Object -First 1
-    if ($OldestCU.Id -ne $TargetCU.Id) {
-        $PackagesToDownload += $OldestCU
-        Write-Host "   -> No checkpoint-specific results. Including oldest CU as fallback checkpoint base." -ForegroundColor Yellow
-    }
+    Write-Warning "Could not parse a KB number from the target CU title; target/prereq labelling will be best-effort."
 }
 
-# Deduplicate and sort chronologically
-$PackagesToDownload = $PackagesToDownload | Sort-Object Id -Unique | Sort-Object DateObj
+Write-Host "   -> Downloading target CU and any bundled checkpoint prerequisites..." -ForegroundColor Cyan
 
-$skippedCount = $AllCUs.Count - $PackagesToDownload.Count
-Write-Host "   -> Selected $($PackagesToDownload.Count) package(s), $skippedCount intermediate monthly CUs skipped." -ForegroundColor Yellow
+$DownloadedPackages = @(Get-CatalogPackage -Update $TargetCU -DestinationPath $DownloadPath -TargetKB $TargetKB)
+$downloadedCount = $DownloadedPackages.Count
 
-foreach ($pkg in $PackagesToDownload) {
-    $role = if ($pkg.Id -eq $TargetCU.Id) { "TARGET" } else { "CHECKPOINT" }
-    Write-Host "      [$role] $($pkg.Title) ($($pkg.DateObj.ToString('yyyy-MM-dd')))" -ForegroundColor DarkGray
-}
-
-$downloadedCount = 0
-$downloadedFiles = @{}
-foreach ($cu in $PackagesToDownload) {
-    $result = Get-CatalogPackage -Update $cu -DestinationPath $DownloadPath
-    if ($result) {
-        $fileName = Split-Path $result -Leaf
-        if (-not $downloadedFiles.ContainsKey($fileName)) {
-            $downloadedFiles[$fileName] = $true
-            $downloadedCount++
-        }
+if ($DownloadedPackages.Count -gt 0) {
+    foreach ($f in $DownloadedPackages) {
+        $role = if ($f.IsTarget) { "TARGET" } else { "PREREQ/CHECKPOINT" }
+        Write-Host "      [$role] $($f.FileName)" -ForegroundColor DarkGray
     }
+    if ($TargetKB -and -not ($DownloadedPackages | Where-Object { $_.IsTarget })) {
+        Write-Warning "None of the downloaded .msu filenames matched KB$TargetKB — verify the target payload is present before servicing."
+    }
+}
+else {
+    Write-Warning "No .msu packages were downloaded for the target CU ($($TargetCU.Title))."
 }
 
 # ============================================================
@@ -276,8 +323,8 @@ Write-Host " Done."
 if ($SSUResults) {
     $BestSSU = $SSUResults | Sort-Object DateObj -Descending | Select-Object -First 1
     Write-Host "   -> SSU Found: $($BestSSU.Title) ($($BestSSU.DateObj.ToString('yyyy-MM-dd')))" -ForegroundColor Green
-    $result = Get-CatalogPackage -Update $BestSSU -DestinationPath $DownloadPath
-    if ($result) { $downloadedCount++ }
+    $ssuFiles = @(Get-CatalogPackage -Update $BestSSU -DestinationPath $DownloadPath)
+    if ($ssuFiles.Count -gt 0) { $downloadedCount += $ssuFiles.Count }
 }
 else {
     Write-Host "   -> No standalone SSU found (likely integrated into CU packages)." -ForegroundColor DarkGray

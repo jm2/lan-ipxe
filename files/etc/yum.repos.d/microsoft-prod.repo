@@ -1,0 +1,12 @@
+# Microsoft production RPM repo — source for the `powershell` package.
+# Uses the RHEL 9 prod path: Microsoft's Fedora-specific repos lag and often lack
+# current PowerShell, while rhel/9/prod carries the current build and installs on
+# Fedora fine (PowerShell bundles its own .NET runtime). Signed + verified.
+[packages-microsoft-com-prod]
+name=Microsoft Production
+baseurl=https://packages.microsoft.com/rhel/9/prod/
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://packages.microsoft.com/keys/microsoft.asc
+sslverify=1

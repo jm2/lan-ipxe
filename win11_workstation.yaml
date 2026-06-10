@@ -8,7 +8,7 @@ actions:
   #     - "Bypass"
   #     - "-NoProfile"
   #     - "-Command"
-  #     - "$h=(Get-WindowsOptionalFeature -FeatureName Microsoft-Hyper-V -Online -ErrorAction SilentlyContinue).State; if($h -eq 'Enabled'){exit 0}; $p=Get-ChildItem -Path \"$env:SystemRoot\\servicing\\Packages\" -Filter \"*Hyper-V*.mum\" -ErrorAction SilentlyContinue; if($p.Count -gt 0){ & \"$env:USERPROFILE\\lan-ipxe\\enable-hyperv-win11home.ps1\" }"
+  #     - "$h=(Get-WindowsOptionalFeature -FeatureName Microsoft-Hyper-V -Online -ErrorAction SilentlyContinue).State; if($h -eq 'Enabled'){exit 0}; $p=Get-ChildItem -Path \"$env:SystemRoot\\servicing\\Packages\" -Filter \"*Hyper-V*.mum\" -ErrorAction SilentlyContinue; if($p.Count -gt 0){ $s=@(\"$PWD\\enable-hyperv-win11home.ps1\",\"$env:USERPROFILE\\lan-ipxe\\enable-hyperv-win11home.ps1\") | Where-Object { Test-Path $_ } | Select-Object -First 1; if(-not $s){ Write-Error \"enable-hyperv-win11home.ps1 not found; run comtrya from the repo root or clone the repo to $env:USERPROFILE\\lan-ipxe\"; exit 1 }; & $s }"
   - action: command.run
     command: powershell.exe
     args:
@@ -16,7 +16,7 @@ actions:
       - "Bypass"
       - "-NoProfile"
       - "-Command"
-      - "$val=(Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\OpenSSH' -Name DefaultShell -ErrorAction SilentlyContinue).DefaultShell; if($val -eq 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'){exit 0}; & \"$env:USERPROFILE\\lan-ipxe\\enable-openssh-win11.ps1\""
+      - "$val=(Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\OpenSSH' -Name DefaultShell -ErrorAction SilentlyContinue).DefaultShell; if($val -eq 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'){exit 0}; $s=@(\"$PWD\\enable-openssh-win11.ps1\",\"$env:USERPROFILE\\lan-ipxe\\enable-openssh-win11.ps1\") | Where-Object { Test-Path $_ } | Select-Object -First 1; if(-not $s){ Write-Error \"enable-openssh-win11.ps1 not found; run comtrya from the repo root or clone the repo to $env:USERPROFILE\\lan-ipxe\"; exit 1 }; & $s"
   - action: package.install
     provider: winget
     list:

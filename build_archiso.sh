@@ -7,11 +7,26 @@ set -e
 BASE_DIR="$(dirname "$(realpath "$0")")"
 PROFILE_DIR="$BASE_DIR/custom_archiso"
 
+# ISO filesystem label, captured ONCE here.
+# The same value is forced into profiledef.sh (iso_label) so it is baked into
+# the ISO at build time AND written to iso_label.txt for the PXE menu generator.
+# This guarantees the on-disk label and the recorded label always agree.
+# (releng default recomputes ARCH_$(date +%Y%m) at build time; the menu
+# generator must read iso_label.txt instead of recomputing the date itself,
+# which would drift across a month boundary and break archisolabel matching.)
+ISO_LABEL="ARCH_$(date +%Y%m)"
+
 if [ -w "/media/r0/tmp" ]; then
     WORK_DIR="/media/r0/tmp/archiso-work"
 else
     WORK_DIR="/var/tmp/archiso-work"
 fi
+
+# Remove the (tens of GB) work tree and the generated profile on ANY exit,
+# including a mkarchiso/cp failure under `set -e`. Without this a failed build
+# strands the work tree -- and /media/r0/tmp does not exist on every host, so
+# WORK_DIR usually falls back to /var/tmp on the root filesystem.
+trap 'rm -rf "$WORK_DIR" "$PROFILE_DIR"' EXIT
 
 # Output Directory Logic
 if [ -w "/srv/http/pxe" ]; then
@@ -47,6 +62,32 @@ cp -r /usr/share/archiso/configs/releng/* "$PROFILE_DIR/"
 # ==========================================
 # 2. Customize Configuration
 # ==========================================
+
+# ------------------------------------------------------------------------
+# CLIENT-RAM / BOOT-TRANSPORT NOTES (read before changing the package set)
+# ------------------------------------------------------------------------
+# This airootfs bundles FIVE desktop environments (GNOME, KDE Plasma, XFCE,
+# Sway, Enlightenment) plus a full toolchain (base-devel, clang, llvm, cmake,
+# dkms, kernel headers, graphics stacks). The resulting squashfs is large.
+#
+# HTTP PXE boot caveat: the archiso_pxe_http hook ALWAYS pulls the whole
+# squashfs over HTTP into a tmpfs and archiso then copies it again into the
+# cow/sfs space -- i.e. it effectively behaves as copytoram and IGNORES
+# copytoram=n, and (due to an upstream defect) holds roughly 2x the squashfs
+# size in RAM during early boot. Practical client RAM floor is about
+#     2 x (squashfs size) + working memory
+# so for this multi-DE image only large-RAM clients can HTTP-boot it.
+#
+# Recommendation: prefer NFS or NBD serving for this image. The initramfs
+# already carries archiso_pxe_nfs and archiso_pxe_nbd hooks (see the HOOKS line
+# further down); those mount the rootfs over the network instead of copying it
+# into RAM, removing the RAM floor. (The PXE menu already exposes an NBD entry.)
+#
+# Tunable: if HTTP boot is unavoidable, archiso_http_spc bounds the tmpfs used
+# for the downloaded squashfs (default ~75% of RAM); cow_spacesize /
+# copytoram_size bound the writable overlay. None of these remove the ~2x copy,
+# so NFS/NBD remains the real fix. The package set is intentionally UNCHANGED.
+# ------------------------------------------------------------------------
 
 # --- Packages ---
 echo "Adding custom packages..."
@@ -143,17 +184,35 @@ echo "Configuring mirrors..."
 # We use a loop/sed to be robust
 sed -i 's|^Include = /etc/pacman.d/mirrorlist|Server = https://plug-mirror.rcac.purdue.edu/archlinux/$repo/os/$arch|' "$PROFILE_DIR/pacman.conf"
 # Also handle commented out ones if needed, but releng has them enabled by default.
+grep -q '^Server = https://plug-mirror.rcac.purdue.edu/archlinux' "$PROFILE_DIR/pacman.conf" || { echo "[-] pacman.conf mirror patch failed (Include line not found)"; exit 1; }
 
 # --- Profile Definition ---
+# Each sed below is an exact-string patch against the upstream releng file and
+# would silently no-op if upstream renamed/reformatted the target. Assert each
+# landed so a stale skeleton fails the build loudly instead of shipping a
+# half-customized ISO.
 echo "Updating profile definition..."
 sed -i 's|iso_name="archlinux"|iso_name="archlinux-custom"|' "$PROFILE_DIR/profiledef.sh"
+grep -q 'iso_name="archlinux-custom"' "$PROFILE_DIR/profiledef.sh" || { echo "[-] profiledef.sh iso_name patch failed"; exit 1; }
+
+# Pin a stable ISO label. The releng default is iso_label="ARCH_$(date +%Y%m)",
+# which mkarchiso would re-evaluate at build time; force the literal captured in
+# $ISO_LABEL so the baked-in label matches what we record in iso_label.txt.
+sed -i "s|^iso_label=.*|iso_label=\"${ISO_LABEL}\"|" "$PROFILE_DIR/profiledef.sh"
+grep -q "iso_label=\"${ISO_LABEL}\"" "$PROFILE_DIR/profiledef.sh" || { echo "[-] profiledef.sh iso_label patch failed"; exit 1; }
+
 # Switch to zstd compression for faster build
 sed -i "s|airootfs_image_tool_options=('-comp' 'xz' '-Xbcj' 'x86' '-b' '1M' '-Xdict-size' '1M')|airootfs_image_tool_options=('-comp' 'zstd' '-b' '1M')|" "$PROFILE_DIR/profiledef.sh"
+grep -qF "airootfs_image_tool_options=('-comp' 'zstd' '-b' '1M')" "$PROFILE_DIR/profiledef.sh" || { echo "[-] profiledef.sh compression-options patch failed"; exit 1; }
 
-# Add permissions for our custom scripts
-# Insert before the closing parenthesis of file_permissions
-sed -i '/^)/i \  ["/usr/local/bin/configure-desktop.sh"]="0:0:755"' "$PROFILE_DIR/profiledef.sh"
-sed -i '/^)/i \  ["/usr/lib/systemd/system-generators/archiso-desktop-generator"]="0:0:755"' "$PROFILE_DIR/profiledef.sh"
+# Add permissions for our custom scripts.
+# Anchor to the file_permissions array's opening line and APPEND after it,
+# rather than inserting before "any column-1 )" which could match an unrelated
+# array close. (Verified: the array is named file_permissions in releng.)
+sed -i '/^file_permissions=(/a \  ["/usr/local/bin/configure-desktop.sh"]="0:0:755"' "$PROFILE_DIR/profiledef.sh"
+grep -qF '["/usr/local/bin/configure-desktop.sh"]="0:0:755"' "$PROFILE_DIR/profiledef.sh" || { echo "[-] profiledef.sh configure-desktop.sh permission insert failed"; exit 1; }
+sed -i '/^file_permissions=(/a \  ["/usr/lib/systemd/system-generators/archiso-desktop-generator"]="0:0:755"' "$PROFILE_DIR/profiledef.sh"
+grep -qF '["/usr/lib/systemd/system-generators/archiso-desktop-generator"]="0:0:755"' "$PROFILE_DIR/profiledef.sh" || { echo "[-] profiledef.sh archiso-desktop-generator permission insert failed"; exit 1; }
 
 # ==========================================
 # 3. Inject Custom Files
@@ -319,8 +378,29 @@ EOF
 echo "Starting build..."
 mkdir -p "$OUT_DIR"
 
+# Prune previously built ISOs. mkarchiso emits a fresh dated
+# archlinux-custom-<version>-x86_64.iso into OUT_DIR on every run and never
+# cleans them up, so they accumulate. The PXE flow only consumes the extracted
+# vmlinuz-linux, initramfs-linux.img and airootfs.sfs (copied to fixed names
+# below), so the ISO images are dead weight -- remove them. The glob is anchored
+# to the archlinux-custom- prefix inside OUT_DIR only; rm -f is a no-op when
+# nothing matches (the unexpanded glob is silently ignored).
+rm -f "$OUT_DIR"/archlinux-custom-*.iso
+
 # Cleaning work dir (before build)
 rm -rf "$WORK_DIR"
+
+# Precheck free space on the chosen WORK_DIR filesystem before mkarchiso runs a
+# full pacstrap + squashfs build, so we abort with a clear message instead of
+# dying mid-build with ENOSPC and stranding a partial work tree.
+WORK_PARENT="$(dirname "$WORK_DIR")"
+MIN_FREE_KB=$((50 * 1024 * 1024))   # ~50 GiB
+AVAIL_KB="$(df --output=avail -k "$WORK_PARENT" | tail -n1 | tr -d '[:space:]')"
+if [ -z "$AVAIL_KB" ] || [ "$AVAIL_KB" -lt "$MIN_FREE_KB" ]; then
+    echo "[-] Not enough free space on $WORK_PARENT for the build."
+    echo "    Required: ~50 GiB; available: $(( ${AVAIL_KB:-0} / 1024 / 1024 )) GiB."
+    exit 1
+fi
 
 mkarchiso -v -w "$WORK_DIR" -o "$OUT_DIR" "$PROFILE_DIR"
 
@@ -333,12 +413,18 @@ cp "$WORK_DIR/iso/arch/boot/x86_64/initramfs-linux.img" "$OUT_DIR/"
 echo "Copying airootfs.sfs to $OUT_DIR/arch/x86_64/..."
 mkdir -p "$OUT_DIR/arch/x86_64"
 cp "$WORK_DIR/iso/arch/x86_64/airootfs.sfs" "$OUT_DIR/arch/x86_64/"
+# Note: airootfs.sha512 is NOT used by the PXE flow unless the menu passes
+# checksum=y on the kernel cmdline; copied here only for completeness.
 cp "$WORK_DIR/iso/arch/x86_64/airootfs.sha512" "$OUT_DIR/arch/x86_64/"
 
-# Cleaning work dir (after build)
-rm -rf "$WORK_DIR"
+# Record the authoritative ISO label for the PXE menu generator.
+# update-pxe-images.sh reads this file to set archisolabel=... instead of
+# recomputing $(date +%Y%m) at menu-generation time (which drifts across month
+# boundaries and breaks the label match). vmlinuz-linux / initramfs-linux.img
+# are copied to OUT_DIR (served at http://<server>/pxe/archiso/), so the label
+# file sits alongside them at OUT_DIR/iso_label.txt.
+echo "$ISO_LABEL" > "$OUT_DIR/iso_label.txt"
+echo "Recorded ISO label '$ISO_LABEL' to $OUT_DIR/iso_label.txt"
 
-# Cleaning profile dir (after build)
-rm -rf "$PROFILE_DIR"
-
+# Work dir and profile dir are removed by the EXIT trap installed near the top.
 echo "Build Complete!"

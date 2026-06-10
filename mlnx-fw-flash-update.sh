@@ -23,6 +23,18 @@ if ! command -v lspci &> /dev/null; then
     exit 1
 fi
 
+# Ensure runtime dependencies for download / extraction / reset are present
+for _dep in curl unzip mstfwreset; do
+    if ! command -v "$_dep" &> /dev/null; then
+        echo "[-] Error: required utility '$_dep' not found."
+        case "$_dep" in
+            mstfwreset) echo "    'mstfwreset' normally ships with mstflint; reinstall the mstflint package." ;;
+            *)          echo "    On Arch Linux, run: pacman -S $_dep" ;;
+        esac
+        exit 1
+    fi
+done
+
 # --- Helper Functions ---
 
 get_mlx_family() {
@@ -57,6 +69,39 @@ get_oem_from_psid() {
     elif [[ "$psid" == VMD* || "$psid" == GIG* ]]; then echo "Gigabyte OEM"
     else echo "Unknown OEM (Requires KCORES manual lookup)"
     fi
+}
+
+# Map a hardware family name to a coarse silicon generation key. Variants that
+# share a firmware branch (e.g. CX5 / CX5 Ex, CX3 / CX3 Pro) collapse together.
+get_gen_from_family() {
+    case "$1" in
+        "ConnectX-3"|"ConnectX-3 Pro") echo "CX3" ;;
+        "ConnectX-4")                  echo "CX4" ;;
+        "ConnectX-4 Lx")               echo "CX4Lx" ;;
+        "ConnectX-5"|"ConnectX-5 Ex")  echo "CX5" ;;
+        "ConnectX-6")                  echo "CX6" ;;
+        "ConnectX-6 Dx")               echo "CX6Dx" ;;
+        "ConnectX-6 Lx")               echo "CX6Lx" ;;
+        "ConnectX-7")                  echo "CX7" ;;
+        *)                             echo "" ;;
+    esac
+}
+
+# Map a firmware MAJOR version to the same coarse silicon generation key.
+# (ConnectX-3=2.x, CX4=12.x, CX4 Lx=14.x, CX5=16.x, CX6=20.x, CX6 Dx=22.x,
+#  CX6 Lx=26.x, CX7=28.x)
+get_gen_from_fw_major() {
+    case "$1" in
+        2)  echo "CX3" ;;
+        12) echo "CX4" ;;
+        14) echo "CX4Lx" ;;
+        16) echo "CX5" ;;
+        20) echo "CX6" ;;
+        22) echo "CX6Dx" ;;
+        26) echo "CX6Lx" ;;
+        28) echo "CX7" ;;
+        *)  echo "" ;;
+    esac
 }
 
 # --- Main Logic ---
@@ -240,40 +285,84 @@ if [[ "$FW_URL" == "skip" || "$FW_URL" == "s" ]]; then
     echo "[*] Skipping firmware flash..."
 elif [[ "$FW_URL" =~ ^https?:// ]]; then
 
+    # --- Safety gate: never flash a device whose initial query failed ---
+    # A failed 'mstflint query' leaves TARGET_PSID empty. An empty PSID can never
+    # equal the image PSID, so the logic below would auto-classify the burn as a
+    # cross-flash and blindly apply -allow_psid_change/-allow_rom_change.
+    if [[ -z "$TARGET_PSID" ]]; then
+        echo "[-] Device $TARGET_DEV is not queryable (empty PSID) -- refusing to flash."
+        echo "    A blank PSID means 'mstflint query' failed; this is normal for a card stuck"
+        echo "    in livefish/recovery mode. Auto-flashing here would force -allow_psid_change"
+        echo "    and -allow_rom_change against an unknown device, which can BRICK the card."
+        echo "    If this card is genuinely in recovery mode, flash it directly with mstflint"
+        echo "    recovery mode AFTER you have confirmed the exact correct image, e.g.:"
+        echo "        mstflint -d $TARGET_DEV -i <image>.bin -allow_psid_change burn"
+        exit 1
+    fi
+
     # Create a temporary working directory
     TMP_DIR=$(mktemp -d -t mlnx_fw_XXXXXX)
     echo "[*] Created temporary working directory: $TMP_DIR"
-    
+
     ZIP_PATH="$TMP_DIR/firmware.zip"
     echo "[*] Downloading firmware archive from NVIDIA..."
-    
-    # Download the file, following redirects (-L) and showing a progress bar (-#)
-    curl -L -# -o "$ZIP_PATH" "$FW_URL"
-    
-    if [ ! -f "$ZIP_PATH" ]; then
-        echo "[-] Error: Failed to download firmware archive from $FW_URL"
+
+    # Download the file: -f fails on HTTP errors (so a 404 HTML page is NOT saved as
+    # firmware.zip), -L follows redirects, -# shows a progress bar.
+    curl -fL -# -o "$ZIP_PATH" "$FW_URL"
+    CURL_RC=$?
+    if [ "$CURL_RC" -ne 0 ]; then
+        echo "[-] Error: Failed to download firmware archive from $FW_URL (curl exit $CURL_RC)."
+        echo "    Make sure this is a DIRECT link to the .zip; error pages/redirects to HTML are rejected."
         rm -rf "$TMP_DIR"
         exit 1
     fi
-    
+
+    if [ ! -s "$ZIP_PATH" ]; then
+        echo "[-] Error: Downloaded archive is empty or missing."
+        rm -rf "$TMP_DIR"
+        exit 1
+    fi
+
+    # Verify archive integrity first so a truncated / partial download is caught
+    # cleanly instead of producing a confusing half-extracted tree.
+    if ! unzip -tq "$ZIP_PATH" &> /dev/null; then
+        echo "[-] Error: $ZIP_PATH is not a valid/complete zip (download may be truncated or an HTML error page)."
+        rm -rf "$TMP_DIR"
+        exit 1
+    fi
+
     echo "[*] Extracting firmware archive..."
-    unzip -q "$ZIP_PATH" -d "$TMP_DIR"
-    
-    if [ $? -ne 0 ]; then
+    if ! unzip -q "$ZIP_PATH" -d "$TMP_DIR"; then
         echo "[-] Error: Failed to extract $ZIP_PATH. Is it a valid zip file?"
         rm -rf "$TMP_DIR"
         exit 1
     fi
-    
-    # Find the .bin file inside the extracted directory
-    BIN_PATH=$(find "$TMP_DIR" -type f -name "*.bin" | head -n 1)
-    
-    if [ -z "$BIN_PATH" ]; then
+
+    # Find the .bin file(s) inside the extracted directory. If more than one is
+    # present, make the operator choose rather than silently guessing.
+    mapfile -t BIN_FILES < <(find "$TMP_DIR" -type f -name "*.bin" | sort)
+
+    if [ "${#BIN_FILES[@]}" -eq 0 ]; then
         echo "[-] Error: No .bin file found inside the downloaded archive."
         rm -rf "$TMP_DIR"
         exit 1
+    elif [ "${#BIN_FILES[@]}" -eq 1 ]; then
+        BIN_PATH="${BIN_FILES[0]}"
+    else
+        echo "[!] Multiple .bin files were found in the archive:"
+        for idx in "${!BIN_FILES[@]}"; do
+            echo "    [$((idx + 1))] ${BIN_FILES[$idx]}"
+        done
+        read -p "Select which .bin to flash (1-${#BIN_FILES[@]}): " BIN_CHOICE
+        if ! [[ "$BIN_CHOICE" =~ ^[0-9]+$ ]] || [ "$BIN_CHOICE" -lt 1 ] || [ "$BIN_CHOICE" -gt "${#BIN_FILES[@]}" ]; then
+            echo "[-] Invalid selection."
+            rm -rf "$TMP_DIR"
+            exit 1
+        fi
+        BIN_PATH="${BIN_FILES[$((BIN_CHOICE - 1))]}"
     fi
-    
+
     echo "[+] Found firmware image: $(basename "$BIN_PATH")"
 
     echo "[*] Validating firmware image..."
@@ -287,6 +376,7 @@ elif [[ "$FW_URL" =~ ^https?:// ]]; then
 
     IMAGE_PSID=$(echo "$IMAGE_QUERY" | grep -E "PSID:" | head -n 1 | awk '{print $2}')
     IMAGE_FW=$(echo "$IMAGE_QUERY" | grep -E "FW Version:" | awk '{print $3}')
+    IMAGE_PN=$(echo "$IMAGE_QUERY" | grep -iE "Part Number:" | head -n 1 | sed 's/^[ \t]*Part Number:[ \t]*//')
 
     if [ -z "$IMAGE_PSID" ]; then
         echo "[-] Error: Could not extract PSID from the provided image. Aborting."
@@ -300,31 +390,61 @@ elif [[ "$FW_URL" =~ ^https?:// ]]; then
     echo "============================================================"
     echo "Target Device:      $TARGET_DEV ($TARGET_FAMILY)"
     echo "Current OEM:        $TARGET_OEM"
+    echo "Current Part No:    $TARGET_PN"
+    echo "Image Part No:      ${IMAGE_PN:-<not present in image>}"
     echo "Current PSID:       $TARGET_PSID"
     echo "Image PSID:         $IMAGE_PSID"
     echo "Current FW Version: $TARGET_FW"
     echo "Image FW Version:   $IMAGE_FW"
     echo "============================================================"
 
-    if [[ "$TARGET_FW" == "$IMAGE_FW" ]]; then
+    # --- Image vs device family cross-check (defense-in-depth) ---
+    # mstflint's own chip-type check already blocks cross-GENERATION images, but
+    # -allow_psid_change disables the within-generation wrong-board guard, so we
+    # independently derive the image's family from its FW major version and refuse
+    # any burn where the families disagree.
+    IMAGE_FW_MAJOR="${IMAGE_FW%%.*}"
+    IMAGE_GEN=$(get_gen_from_fw_major "$IMAGE_FW_MAJOR")
+    TARGET_GEN=$(get_gen_from_family "$TARGET_FAMILY")
+
+    if [[ -n "$IMAGE_GEN" && -n "$TARGET_GEN" && "$IMAGE_GEN" != "$TARGET_GEN" ]]; then
+        echo ""
+        echo "[-] FATAL: Firmware family mismatch -- refusing to flash."
+        echo "    Device family: $TARGET_FAMILY (generation $TARGET_GEN)"
+        echo "    Image FW $IMAGE_FW implies generation: $IMAGE_GEN"
+        echo "    Burning a wrong-family image (especially with -allow_psid_change) WILL brick the card."
+        rm -rf "$TMP_DIR"
+        exit 1
+    elif [[ -z "$IMAGE_GEN" || -z "$TARGET_GEN" ]]; then
+        echo "[!] Warning: could not positively cross-check image family"
+        echo "    (image generation='${IMAGE_GEN:-unknown}', device generation='${TARGET_GEN:-unknown}')."
+        echo "    Verify manually that this image matches the hardware before continuing."
+    fi
+
+    if [[ "$TARGET_FW" == "$IMAGE_FW" && "$TARGET_PSID" == "$IMAGE_PSID" ]]; then
         echo ""
         echo "[+] The current firmware version ($TARGET_FW) matches the image."
         echo "    Skipping flash operation."
     else
-        # Determine if we are cross-flashing or doing a standard update
+        # Determine if we are cross-flashing or doing a standard update.
+        # A cross-flash == the image PSID differs from the device PSID (note the
+        # empty-PSID case is already rejected by the safety gate above).
         FLASH_CMD="mstflint -d \"$TARGET_DEV\" -i \"$BIN_PATH\""
-        IS_CROSSFLASH=0
-
         if [[ "$TARGET_PSID" == "$IMAGE_PSID" ]]; then
-            echo "[+] Standard Update Detected (PSIDs match)."
-            FLASH_CMD="$FLASH_CMD burn"
+            IS_CROSSFLASH=0
         else
+            IS_CROSSFLASH=1
+        fi
+
+        if [[ "$IS_CROSSFLASH" -eq 1 ]]; then
             echo "[!] CROSS-FLASH DETECTED (PSID mismatch)."
             echo "    The script forces -allow_psid_change and -allow_rom_change."
             echo "    WARNING: If this image is not meant for a $TARGET_FAMILY architecture, "
             echo "    it WILL brick the network card!"
             FLASH_CMD="$FLASH_CMD -allow_psid_change -allow_rom_change burn"
-            IS_CROSSFLASH=1
+        else
+            echo "[+] Standard Update Detected (PSIDs match)."
+            FLASH_CMD="$FLASH_CMD burn"
         fi
 
         echo ""
@@ -338,12 +458,23 @@ elif [[ "$FW_URL" =~ ^https?:// ]]; then
             
             if [ $? -eq 0 ]; then
                 echo "[+] Flash successful!"
-                
-                # Further automation: Prompt to reset device immediately
-                read -p "Would you like to reset the NIC firmware now (avoids system reboot)? (y/n): " DO_RESET
-                if [[ "$DO_RESET" == "y" || "$DO_RESET" == "Y" ]]; then
-                    echo "[*] Resetting firmware on $TARGET_DEV..."
-                    mstfwreset -d "$TARGET_DEV" -y reset
+
+                # ConnectX-3 / CX3 Pro (4th-gen silicon) does NOT support mstfwreset.
+                if [[ "$TARGET_FAMILY" == "ConnectX-3" || "$TARGET_FAMILY" == "ConnectX-3 Pro" ]]; then
+                    echo "[!] $TARGET_FAMILY does not support mstfwreset."
+                    echo "    Reboot the system (or unload/reload the mlx4_core driver) to activate the new firmware."
+                else
+                    # Further automation: Prompt to reset device immediately
+                    read -p "Would you like to reset the NIC firmware now (avoids system reboot)? (y/n): " DO_RESET
+                    if [[ "$DO_RESET" == "y" || "$DO_RESET" == "Y" ]]; then
+                        echo "[*] Resetting firmware on $TARGET_DEV..."
+                        if mstfwreset -d "$TARGET_DEV" -y reset; then
+                            echo "[+] Firmware reset complete."
+                        else
+                            echo "[-] Firmware reset FAILED. The new firmware is flashed but NOT yet active."
+                            echo "    A full system reboot (or driver unload/reload) is REQUIRED to load it."
+                        fi
+                    fi
                 fi
             else
                 echo "[-] Flash failed. Check the error output above."
@@ -369,20 +500,56 @@ echo "============================================================"
 read -p "Would you like to configure this card for UEFI PXE boot now? (y/n): " DO_UEFI
 
 if [[ "$DO_UEFI" == "y" || "$DO_UEFI" == "Y" ]]; then
-    echo "[*] Applying mstconfig UEFI settings to $TARGET_DEV..."
-    mstconfig -y -d "$TARGET_DEV" set \
-        EXP_ROM_UEFI_x86_ENABLE=1 \
-        EXP_ROM_UEFI_ARM_ENABLE=0 \
-        UEFI_HII_EN=1 \
-        EXP_ROM_PXE_ENABLE=0 \
-        LEGACY_BOOT_PROTOCOL=0
-        
-    if [ $? -eq 0 ]; then
-        echo "[+] UEFI configuration applied successfully."
+    if [[ "$TARGET_FAMILY" == "ConnectX-3" || "$TARGET_FAMILY" == "ConnectX-3 Pro" ]]; then
+        # ConnectX-3 / CX3 Pro do NOT have the 5th-gen+ UEFI TLVs
+        # (EXP_ROM_UEFI_x86_ENABLE / EXP_ROM_UEFI_ARM_ENABLE / UEFI_HII_EN /
+        # EXP_ROM_PXE_ENABLE). Applying that block as a single atomic 'set' fails
+        # outright, so we apply only CX3-relevant keys, each in its OWN call, and
+        # tolerate per-key failure so one unsupported key does not void the rest.
+        echo "[*] $TARGET_FAMILY uses legacy firmware-config TLVs; applying CX3 boot keys one at a time..."
+        echo "    NOTE: the CX3 key/value names below are best-effort; unsupported keys are skipped with a warning."
+        CX3_KEYS=(
+            "LEGACY_BOOT_PROTOCOL_P1=1"
+            "LEGACY_BOOT_PROTOCOL_P2=1"
+            "BOOT_OPTION_ROM_EN_P1=1"
+            "BOOT_OPTION_ROM_EN_P2=1"
+        )
+        CX3_APPLIED=0
+        for kv in "${CX3_KEYS[@]}"; do
+            echo "    -> mstconfig set $kv"
+            if mstconfig -y -d "$TARGET_DEV" set "$kv" &> /dev/null; then
+                echo "       [+] applied"
+                CX3_APPLIED=1
+            else
+                echo "       [!] skipped (key unsupported on this firmware)"
+            fi
+        done
+        if [ "$CX3_APPLIED" -eq 1 ]; then
+            echo "[+] ConnectX-3 boot configuration applied (see per-key results above)."
+        else
+            echo "[-] No ConnectX-3 boot keys were accepted."
+            echo "    Inspect the supported keys with: mstconfig -d $TARGET_DEV query"
+        fi
     else
-        echo "[-] Failed to apply UEFI configuration."
+        echo "[*] Applying mstconfig UEFI settings to $TARGET_DEV..."
+        mstconfig -y -d "$TARGET_DEV" set \
+            EXP_ROM_UEFI_x86_ENABLE=1 \
+            EXP_ROM_UEFI_ARM_ENABLE=0 \
+            UEFI_HII_EN=1 \
+            EXP_ROM_PXE_ENABLE=0 \
+            LEGACY_BOOT_PROTOCOL=0
+
+        if [ $? -eq 0 ]; then
+            echo "[+] UEFI configuration applied successfully."
+        else
+            echo "[-] Failed to apply UEFI configuration."
+        fi
     fi
 fi
 
 echo ""
-echo "[!] A complete system reboot (or 'mstfwreset -d $TARGET_DEV -y reset') is required for changes to take effect."
+if [[ "$TARGET_FAMILY" == "ConnectX-3" || "$TARGET_FAMILY" == "ConnectX-3 Pro" ]]; then
+    echo "[!] A complete system reboot (or unload/reload of the mlx4_core driver) is required for changes to take effect."
+else
+    echo "[!] A complete system reboot (or 'mstfwreset -d $TARGET_DEV -y reset') is required for changes to take effect."
+fi

@@ -12,6 +12,14 @@ PXE_SERVER="192.168.1.11:81"
 PXE_HTTP_DIR="/srv/http/pxe"
 TFTP_DIR="/srv/tftp"
 
+# iSCSI identity for the Windows 11 sanboot entry. Single source of truth — these
+# must match the LIO/targetcli target and ACL configuration on the server.
+# The initiator IQN is made per-client at boot (mac suffix) so two machines never
+# share one writable LUN (which would corrupt the NTFS volume); give each client
+# its own target/LUN or ACL accordingly.
+ISCSI_TARGET_IQN="iqn.2026-02.lan.pxe:win11"
+ISCSI_INITIATOR_PREFIX="iqn.2026-02.lan.pxe"
+
 ENABLE_LOCAL_ARCH="false"        # Set to "true" to copy local Arch Kernel/Initrd
 ENABLE_TFTP_BOOTSTRAP="false"    # Set to "true" to download iPXE binaries to TFTP_DIR
 ENABLE_CUSTOM_ARCHISO="false"    # Set to "true" to enable Custom Archiso Menu
@@ -21,27 +29,45 @@ PURDUE_MIRROR="https://plug-mirror.rcac.purdue.edu"
 FEDORA_MIRROR_BASE="https://plug-mirror.rcac.purdue.edu/fedora/fedora/linux/releases"
 NETBOOT_XYZ_URL="https://boot.netboot.xyz"
 
+# Clonezilla is pinned (its debian-squash assets have been restructured before, so
+# auto-detection is risky). Single source of truth — update by hand when needed.
+CLONEZILLA_TAG="3.3.0-33-1a41a72c"
+
 # ==========================================
 # Setup & Permissions Check
 # ==========================================
 
-# Fallback for testing if directories aren't writable
-if [ ! -w "$PXE_HTTP_DIR" ]; then
-    echo "WARNING: $PXE_HTTP_DIR is not writable. Using ./pxe_test/http instead."
-    PXE_HTTP_DIR="./pxe_test/http"
-    mkdir -p "$PXE_HTTP_DIR"
-fi
+# Mode handling. Test mode must be EXPLICIT (--test/--dry-run or DRY_RUN=true) so a
+# forgotten sudo under cron fails loudly instead of silently writing to ./pxe_test
+# and reporting success while the live menu goes stale.
+DRY_RUN="${DRY_RUN:-false}"
+case "${1:-}" in
+    --test|--dry-run) DRY_RUN="true" ;;
+esac
 
-if [ ! -w "$TFTP_DIR" ]; then
-    echo "WARNING: $TFTP_DIR is not writable. Using ./pxe_test/tftp instead."
+if [ "$DRY_RUN" = "true" ]; then
+    PXE_HTTP_DIR="./pxe_test/http"
     TFTP_DIR="./pxe_test/tftp"
-    mkdir -p "$TFTP_DIR"
+    mkdir -p "$PXE_HTTP_DIR" "$TFTP_DIR"
+    echo "TEST MODE: generating into ./pxe_test (no production paths touched)."
+elif [ ! -w "$PXE_HTTP_DIR" ] || [ ! -w "$TFTP_DIR" ]; then
+    echo "ERROR: $PXE_HTTP_DIR and/or $TFTP_DIR is not writable."
+    echo "       Run as root (server paths need write access), or pass --test"
+    echo "       (or DRY_RUN=true) to generate into ./pxe_test instead." >&2
+    exit 1
 fi
 
 # Ensure HTTP dir exists (for bg.png)
 mkdir -p "$PXE_HTTP_DIR"
 
-IPXE_FILE="$TFTP_DIR/default.ipxe"
+# Generate into a temp file and atomically move it into place at the very end, so
+# clients never observe a half-written menu and a failed/degraded run leaves the
+# previous default.ipxe intact (a .bak copy is also kept).
+IPXE_FINAL="$TFTP_DIR/default.ipxe"
+IPXE_FILE="$(mktemp "${TFTP_DIR}/.default.ipxe.XXXXXX")"
+# Remove the temp menu if the script exits before the atomic publish (which renames
+# it away, making this a harmless no-op on success).
+trap 'rm -f "$IPXE_FILE" 2>/dev/null' EXIT
 
 echo "========================================"
 echo " PXE Update & Generator Script"
@@ -49,7 +75,7 @@ echo "========================================"
 echo "PXE Server: $PXE_SERVER"
 echo "HTTP Dir:   $PXE_HTTP_DIR"
 echo "TFTP Dir:   $TFTP_DIR"
-echo "Output:     $IPXE_FILE"
+echo "Output:     $IPXE_FINAL"
 echo "========================================"
 
 # ==========================================
@@ -63,6 +89,23 @@ check_url_exists() {
     [[ "$code" =~ ^2[0-9][0-9]$ ]]
 }
 
+# Download to a temp file with hard failure on HTTP errors / timeouts, verify its
+# type with file(1), then atomically move into place. Prevents a 404/captive-portal
+# page from replacing a known-good boot binary (which would break every PXE client).
+fetch_verified() {
+    local url=$1 dest=$2 magic=$3 tmp
+    tmp="$(mktemp "${dest}.XXXXXX")" || return 1
+    if ! curl -fsSL --max-time 120 --connect-timeout 10 -o "$tmp" "$url"; then
+        echo "  [ERROR] download failed: $url"
+        rm -f "$tmp"; return 1
+    fi
+    if [ -n "$magic" ] && ! file "$tmp" | grep -q "$magic"; then
+        echo "  [ERROR] $url did not look like '$magic' — not installing."
+        rm -f "$tmp"; return 1
+    fi
+    mv -f "$tmp" "$dest"
+}
+
 # Resolve the latest tag in a netboot.xyz repo whose name starts with $prefix-.
 # Used to find the current kernel/initrd assets for live boot.
 # Note: as of 2026-04, kernel/initrd for Debian live moved out of debian-squash
@@ -71,16 +114,28 @@ check_url_exists() {
 get_netbootxyz_tag() {
     local repo=$1     # ubuntu-squash, debian-core-13, etc.
     local prefix=$2   # e.g. 13.4.0 or 26.04
-    curl -sL --max-time 15 "https://api.github.com/repos/netbootxyz/${repo}/releases?per_page=100" 2>/dev/null | \
-        grep -oP '"tag_name":\s*"\K[^"]+' | \
-        grep "^${prefix}-" | head -n 1
+    # Unauthenticated GitHub allows 60 req/hr per IP; a 403/429 returns no tag and
+    # would otherwise look identical to "release missing", silently dropping the
+    # distro from the menu. Detect it explicitly (and honor GITHUB_TOKEN if set).
+    local auth=()
+    [ -n "$GITHUB_TOKEN" ] && auth=(-H "Authorization: Bearer $GITHUB_TOKEN")
+    local resp code body
+    resp=$(curl -sL --max-time 15 --connect-timeout 5 -w $'\n%{http_code}' "${auth[@]}" \
+        "https://api.github.com/repos/netbootxyz/${repo}/releases?per_page=100" 2>/dev/null)
+    code="${resp##*$'\n'}"
+    body="${resp%$'\n'*}"
+    if [ "$code" = "403" ] || [ "$code" = "429" ]; then
+        echo "  [WARNING] GitHub API rate-limited (HTTP $code) for ${repo}; set GITHUB_TOKEN to raise the limit." >&2
+        return 0
+    fi
+    printf '%s' "$body" | grep -oP '"tag_name":\s*"\K[^"]+' | grep "^${prefix}-" | head -n 1
 }
 
 # --- Debian ---
 get_debian_version() {
     local arch=$1
     # Debian arch in URL: amd64, arm64
-    curl -sL "${PURDUE_MIRROR}/debian-cd/current-live/${arch}/iso-hybrid/" | \
+    curl -sL --max-time 20 --connect-timeout 5 "${PURDUE_MIRROR}/debian-cd/current-live/${arch}/iso-hybrid/" | \
         grep -oP 'debian-live-\K[\d\.]+(?=-'"${arch}"'-gnome\.iso)' | head -n 1
 }
 
@@ -89,7 +144,7 @@ get_fedora_version() {
     local arch=$1 # x86_64, aarch64
     # Scrape RIT mirror
     
-    local versions=$(curl -sL "${FEDORA_MIRROR_BASE}/" | grep -oP 'href="\K\d+(?=/")' | sort -rV)
+    local versions=$(curl -sL --max-time 20 --connect-timeout 5 "${FEDORA_MIRROR_BASE}/" | grep -oP 'href="\K\d+(?=/")' | sort -rV)
     for ver in $versions; do
         # Check if directories exist
         if check_url_exists "${FEDORA_MIRROR_BASE}/${ver}/Workstation/${arch}/iso/"; then
@@ -112,27 +167,31 @@ get_fedora_iso() {
 
     case "$variant" in
         gnome)
-            iso=$(curl -sL "${url_base}/Workstation/${arch}/iso/" 2>/dev/null | \
+            iso=$(curl -sL --max-time 20 --connect-timeout 5 "${url_base}/Workstation/${arch}/iso/" 2>/dev/null | \
                 grep -oP "Fedora-Workstation-Live-[^\"]*${arch}\.iso" | head -n 1)
             [ -n "$iso" ] && echo "Workstation|${iso}"
             ;;
         kde)
-            iso=$(curl -sL "${url_base}/KDE/${arch}/iso/" 2>/dev/null | \
+            iso=$(curl -sL --max-time 20 --connect-timeout 5 "${url_base}/KDE/${arch}/iso/" 2>/dev/null | \
                 grep -oP "Fedora-KDE-Desktop-Live-[^\"]*${arch}\.iso" | head -n 1)
             if [ -n "$iso" ]; then
                 echo "KDE|${iso}"
             else
-                iso=$(curl -sL "${url_base}/Spins/${arch}/iso/" 2>/dev/null | \
+                iso=$(curl -sL --max-time 20 --connect-timeout 5 "${url_base}/Spins/${arch}/iso/" 2>/dev/null | \
                     grep -oP "Fedora-KDE-Live-[^\"]*${arch}\.iso" | head -n 1)
                 [ -n "$iso" ] && echo "Spins|${iso}"
             fi
             ;;
         xfce)
-            iso=$(curl -sL "${url_base}/Spins/${arch}/iso/" 2>/dev/null | \
+            iso=$(curl -sL --max-time 20 --connect-timeout 5 "${url_base}/Spins/${arch}/iso/" 2>/dev/null | \
                 grep -oP "Fedora-Xfce-Live-[^\"]*${arch}\.iso" | head -n 1)
             [ -n "$iso" ] && echo "Spins|${iso}"
             ;;
     esac
+    # Always succeed: callers use `_g=$(get_fedora_iso ...)`, and under `set -e`
+    # a non-zero return from the trailing `[ -n "$iso" ] && echo` (when a variant
+    # is missing) would abort the ENTIRE script, defeating the SKIP_FEDORA logic.
+    return 0
 }
 
 # --- Rocky ---
@@ -150,7 +209,7 @@ get_rocky_live_dir() {
 }
 get_rocky_version() {
     local arch=$1 # x86_64, aarch64
-    local versions=$(curl -sL "${PURDUE_MIRROR}/rocky/" | grep -oP 'href="\K[\d\.]+(?=/")' | sort -rV)
+    local versions=$(curl -sL --max-time 20 --connect-timeout 5 "${PURDUE_MIRROR}/rocky/" | grep -oP 'href="\K[\d\.]+(?=/")' | sort -rV)
     for ver in $versions; do
         if [ -n "$(get_rocky_live_dir "$ver" "$arch")" ]; then
             echo "$ver"
@@ -172,14 +231,14 @@ get_rocky_iso() {
         xfce)  iso_pattern="href=\"\KRocky-[\d\.\-]+-XFCE(-Live)?-${arch}[^\"]*\.iso" ;;
     esac
 
-    curl -sL "${PURDUE_MIRROR}/rocky/${ver}/${live_dir}/${arch}/" | grep -oP "$iso_pattern" | head -n 1
+    curl -sL --max-time 20 --connect-timeout 5 "${PURDUE_MIRROR}/rocky/${ver}/${live_dir}/${arch}/" | grep -oP "$iso_pattern" | head -n 1
 }
 
 # --- Ubuntu LTS (x86_64 only — desktop ISO ships GNOME) ---
 # LTS = even-numbered year, .04 release. We pick the highest YY.04 with an even YY.
 get_ubuntu_lts_version() {
     local versions
-    versions=$(curl -sL "${PURDUE_MIRROR}/ubuntu-releases/" | grep -oP 'href="\K\d+\.\d+(?=/")' | sort -rV | uniq)
+    versions=$(curl -sL --max-time 20 --connect-timeout 5 "${PURDUE_MIRROR}/ubuntu-releases/" | grep -oP 'href="\K\d+\.\d+(?=/")' | sort -rV | uniq)
     for ver in $versions; do
         local year="${ver%%.*}"
         local point="${ver##*.}"
@@ -195,7 +254,7 @@ get_ubuntu_lts_version() {
 get_ubuntu_iso() {
     local ver=$1
     # Matches both ubuntu-26.04-desktop-amd64.iso and ubuntu-24.04.3-desktop-amd64.iso
-    curl -sL "${PURDUE_MIRROR}/ubuntu-releases/${ver}/" | \
+    curl -sL --max-time 20 --connect-timeout 5 "${PURDUE_MIRROR}/ubuntu-releases/${ver}/" | \
         grep -oP "ubuntu-${ver}(\.\d+)?-desktop-amd64\.iso" | head -n 1
 }
 
@@ -207,14 +266,18 @@ if [ "$ENABLE_TFTP_BOOTSTRAP" = "true" ]; then
     # x86_64
     echo "  [x86_64] ipxe.efi (Using snponly.efi for better UEFI keyboard compatibility)"
     # We save snponly.efi as ipxe.efi so we don't have to change DHCP server config.
-    curl -sL -o "$TFTP_DIR/ipxe.efi" "http://boot.ipxe.org/x86_64-efi/snponly.efi"
+    # All fetches use https + verification; a failed download leaves the existing
+    # known-good binary untouched.
+    fetch_verified "https://boot.ipxe.org/x86_64-efi/snponly.efi" "$TFTP_DIR/ipxe.efi" "PE32+" \
+        || echo "  [WARNING] kept existing ipxe.efi (download/verify failed)."
     echo "  [Legacy] undionly.kpxe"
-    curl -sL -o "$TFTP_DIR/undionly.kpxe" "https://boot.ipxe.org/undionly.kpxe"
-    # AArch64 (ARM64) - using ipxe.org stock
-    # Using snponly.efi for ARM64 as well to avoid similar driver conflicts
-    if curl -sI "http://boot.ipxe.org/arm64-efi/snponly.efi" | head -n 1 | grep -q "200"; then
+    fetch_verified "https://boot.ipxe.org/undionly.kpxe" "$TFTP_DIR/undionly.kpxe" "" \
+        || echo "  [WARNING] kept existing undionly.kpxe (download failed)."
+    # AArch64 (ARM64) - using ipxe.org stock snponly.efi
+    if check_url_exists "https://boot.ipxe.org/arm64-efi/snponly.efi"; then
         echo "  [ARM64]  ipxe-arm64.efi (snponly.efi)"
-        curl -sL -o "$TFTP_DIR/ipxe-arm64.efi" "http://boot.ipxe.org/arm64-efi/snponly.efi"
+        fetch_verified "https://boot.ipxe.org/arm64-efi/snponly.efi" "$TFTP_DIR/ipxe-arm64.efi" "PE32+" \
+            || echo "  [WARNING] kept existing ipxe-arm64.efi (download/verify failed)."
     else
         echo "  [WARNING] Could not find stock arm64 snponly.efi. Skipping."
     fi
@@ -225,13 +288,8 @@ fi
 # Check for Background Image (Required for Console)
 if [ ! -f "$PXE_HTTP_DIR/bg.png" ]; then
     echo "Downloading background image to $PXE_HTTP_DIR/bg.png..."
-    curl -sL -o "$PXE_HTTP_DIR/bg.png" "http://boot.ipxe.org/ipxe.png"
-    
-    # Verify it is actually a PNG (magic bytes)
-    if ! file "$PXE_HTTP_DIR/bg.png" | grep -q "PNG image data"; then
-        echo "  [WARNING] Downloaded bg.png is not a valid PNG. Deleting..."
-        rm -f "$PXE_HTTP_DIR/bg.png"
-    fi
+    fetch_verified "https://boot.ipxe.org/ipxe.png" "$PXE_HTTP_DIR/bg.png" "PNG image data" \
+        || echo "  [WARNING] Could not fetch a valid bg.png."
 fi
 
 # ==========================================
@@ -270,7 +328,7 @@ fi
 # 3. Clonezilla (Netboot.xyz)
 # ==========================================
 echo "Processing Clonezilla..."
-echo "  Using Netboot.xyz assets (3.3.0-33-1a41a72c)"
+echo "  Using Netboot.xyz assets (${CLONEZILLA_TAG})"
 
 # ==========================================
 # 4. Version Scrape (x86_64)
@@ -439,7 +497,7 @@ fi
 
 cat >> "$IPXE_FILE" <<EOF
 
-choose --default netbootxyz --timeout 10000 bootoption && goto \${bootoption} || goto :arm64_menu
+choose --default netbootxyz --timeout 10000 bootoption && goto \${bootoption} || goto arm64_menu
 
 # ============================================================================
 #                               x86_64 MENU
@@ -509,19 +567,22 @@ item --gap --             ------------------------- Network Tools --------------
 item netbootxyz           Netboot.xyz
 item shell                iPXE Shell
 
-choose --default local --timeout 60000 bootoption && goto \${bootoption} || goto :x86_64_menu
+choose --default local --timeout 60000 bootoption && goto \${bootoption} || goto x86_64_menu
 
 :local
-exit
+# On BIOS, exiting iPXE can hang some firmware; sanboot the first local disk is the
+# documented workaround. On UEFI, exit returns to the boot manager (next entry).
+iseq \${platform} pcbios && sanboot --no-describe --drive 0x80 || exit
 
 :shell
 shell
+iseq \${buildarch} arm64 && goto arm64_menu || goto x86_64_menu
 
 :netbootxyz
 chain --autofree ${NETBOOT_XYZ_URL}
 
 :clonezilla
-set cz_version 3.3.0-33-1a41a72c
+set cz_version ${CLONEZILLA_TAG}
 set gh_base https://github.com/netbootxyz/debian-squash/releases/download/\${cz_version}
 kernel \${gh_base}/vmlinuz boot=live config noswap edd=on nomodeset ocs_live_run="ocs-live-general" ocs_live_extra_param="" keyboard-layouts="" ocs_live_batch="no" locales="" vga=788 nosplash noprompt fetch=\${gh_base}/filesystem.squashfs
 initrd \${gh_base}/initrd
@@ -542,8 +603,13 @@ if [ "$ENABLE_WIN11_PXE" = "true" ]; then
 :win11-pxe
 echo Booting Windows 11 from Network...
 set keep-san 1
-set initiator-iqn iqn.2026-02.lan.pxe:client
-sanboot iscsi:${PXE_SERVER%%:*}:::0:iqn.2026-02.lan.pxe:win11 || goto shell
+# Per-client initiator IQN (mac suffix) so clients never collide on one LUN.
+set initiator-iqn ${ISCSI_INITIATOR_PREFIX}:\${mac:hexhyp}
+# Clear the iBFT default gateway: with a non-zero gateway, once Windows takes over
+# some routers will not hairpin packets back to the originating subnet and the
+# iSCSI session drops (ipxe.org/howto/wds_iscsi). Harmless on a same-subnet target.
+set net0/gateway 0.0.0.0 ||
+sanboot iscsi:${PXE_SERVER%%:*}:::0:${ISCSI_TARGET_IQN} || goto shell
 EOF
 fi
 
@@ -632,12 +698,20 @@ fi
 
 # ==================== ARCH LINUX (ARCHISO) ====================
 if [ "$ENABLE_CUSTOM_ARCHISO" = "true" ]; then
+    # Read the real ISO label that build_archiso.sh recorded at build time, rather
+    # than recomputing $(date) here — the two can disagree across a month boundary,
+    # which would make archisolabel= not match the squashfs and break the boot.
+    ARCH_ISO_LABEL=""
+    if [ -f "$PXE_HTTP_DIR/archiso/iso_label.txt" ]; then
+        ARCH_ISO_LABEL="$(tr -d '[:space:]' < "$PXE_HTTP_DIR/archiso/iso_label.txt")"
+    fi
+    [ -z "$ARCH_ISO_LABEL" ] && ARCH_ISO_LABEL="ARCH_$(date +%Y%m)"
     cat >> "$IPXE_FILE" <<EOF
 :arch-common
 # Artifacts are in http://<server>/pxe/archiso/
 # We extracted vmlinuz-linux and initramfs-linux.img to the root of archiso/ during build
 set arch_http http://${PXE_SERVER}/pxe/archiso
-set arch_iso_label ARCH_$(date +%Y%m)
+set arch_iso_label ${ARCH_ISO_LABEL}
 
 kernel \${arch_http}/vmlinuz-linux
 initrd \${arch_http}/initramfs-linux.img
@@ -688,7 +762,42 @@ boot || shell
 EOF
 fi
 
-echo "Done! Generated $IPXE_FILE"
+# FEDORA ARM — emit boot stanzas for the menu items added above (previously the
+# items existed with no matching labels, so selecting them aborted the script).
+if [ -n "$FEDORA_VER_ARM" ]; then
+    echo "" >> "$IPXE_FILE"
+    [ -n "$FEDORA_ISO_GNOME_ARM" ] && printf ':fedora-gnome-arm\nset iso_name %s\nset flavor_dir %s\ngoto fedora-boot-arm\n\n' "$FEDORA_ISO_GNOME_ARM" "$FEDORA_DIR_GNOME_ARM" >> "$IPXE_FILE"
+    [ -n "$FEDORA_ISO_KDE_ARM" ]   && printf ':fedora-kde-arm\nset iso_name %s\nset flavor_dir %s\ngoto fedora-boot-arm\n\n' "$FEDORA_ISO_KDE_ARM" "$FEDORA_DIR_KDE_ARM" >> "$IPXE_FILE"
+    [ -n "$FEDORA_ISO_XFCE_ARM" ]  && printf ':fedora-xfce-arm\nset iso_name %s\nset flavor_dir %s\ngoto fedora-boot-arm\n\n' "$FEDORA_ISO_XFCE_ARM" "$FEDORA_DIR_XFCE_ARM" >> "$IPXE_FILE"
+    cat >> "$IPXE_FILE" <<EOF
+:fedora-boot-arm
+set mirror ${FEDORA_MIRROR_BASE}/${FEDORA_VER_ARM}/Server/aarch64/os
+set live_url ${FEDORA_MIRROR_BASE}/${FEDORA_VER_ARM}/\${flavor_dir}/aarch64/iso/\${iso_name}
+kernel \${mirror}/images/pxeboot/vmlinuz
+initrd \${mirror}/images/pxeboot/initrd.img
+imgargs vmlinuz initrd=initrd.img root=live:\${live_url} rd.live.image rd.live.overlay.overlayfs=1 ip=dhcp
+boot || shell
+EOF
+fi
+
+# ROCKY ARM
+if [ -n "$ROCKY_VER_ARM" ]; then
+    echo "" >> "$IPXE_FILE"
+    [ -n "$ROCKY_ISO_GNOME_ARM" ] && printf ':rocky-gnome-arm\nset iso_name %s\ngoto rocky-boot-arm\n\n' "$ROCKY_ISO_GNOME_ARM" >> "$IPXE_FILE"
+    [ -n "$ROCKY_ISO_KDE_ARM" ]   && printf ':rocky-kde-arm\nset iso_name %s\ngoto rocky-boot-arm\n\n' "$ROCKY_ISO_KDE_ARM" >> "$IPXE_FILE"
+    [ -n "$ROCKY_ISO_XFCE_ARM" ]  && printf ':rocky-xfce-arm\nset iso_name %s\ngoto rocky-boot-arm\n\n' "$ROCKY_ISO_XFCE_ARM" >> "$IPXE_FILE"
+    cat >> "$IPXE_FILE" <<EOF
+:rocky-boot-arm
+set mirror ${PURDUE_MIRROR}/rocky/${ROCKY_VER_ARM}/BaseOS/aarch64/os
+set live_url ${PURDUE_MIRROR}/rocky/${ROCKY_VER_ARM}/${ROCKY_LIVE_DIR_ARM}/aarch64/\${iso_name}
+kernel \${mirror}/images/pxeboot/vmlinuz
+initrd \${mirror}/images/pxeboot/initrd.img
+imgargs vmlinuz initrd=initrd.img root=live:\${live_url} rd.live.image rd.live.overlay.overlayfs=1 ip=dhcp
+boot || shell
+EOF
+fi
+
+echo "Done! Generated menu (pending validation + publish)."
 
 # ==========================================
 # 7. Post-generation URL Validation
@@ -697,10 +806,11 @@ echo "Done! Generated $IPXE_FILE"
 # Reports broken links but does not exit non-zero — the script must remain
 # usable when one upstream is temporarily down.
 echo "Validating embedded URLs..."
-# Capture URL tokens including any iPXE-time-evaluated ${var} sections,
-# then drop any URL that contains an unresolved variable — those can only be
-# checked at boot time, not at script-generation time.
-mapfile -t URLS < <(grep -oE 'https?://[^[:space:]"]+' "$IPXE_FILE" \
+# Capture URL tokens, skipping comment lines (which may carry placeholder pseudo-
+# URLs like http://<server>/...) and any URL containing an unresolved iPXE-time
+# ${var} (those can only be checked at boot time, not at generation time).
+mapfile -t URLS < <(grep -v '^[[:space:]]*#' "$IPXE_FILE" \
+    | grep -oE 'https?://[^[:space:]"]+' \
     | grep -v "boot.netboot.xyz" \
     | grep -v -F '${' \
     | sort -u)
@@ -719,3 +829,15 @@ if [ "$BROKEN" -eq 0 ]; then
 else
     echo "  [WARNING] ${BROKEN} of ${#URLS[@]} URLs failed validation. The iPXE menu may have boot failures for those entries."
 fi
+
+# ==========================================
+# 8. Atomic publish
+# ==========================================
+# Keep one backup of the previous menu, then move the freshly generated temp file
+# into place in a single rename so clients never read a partial file.
+if [ -f "$IPXE_FINAL" ]; then
+    cp -f "$IPXE_FINAL" "${IPXE_FINAL}.bak"
+fi
+mv -f "$IPXE_FILE" "$IPXE_FINAL"
+chmod 644 "$IPXE_FINAL"
+echo "Published $IPXE_FINAL (previous menu saved as ${IPXE_FINAL}.bak)."

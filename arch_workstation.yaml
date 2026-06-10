@@ -6,19 +6,30 @@ actions:
   args:
   - -c
   - pacman -Q jre-openjdk &>/dev/null && pacman -Rdd --noconfirm jre-openjdk || true
+# Enable the [multilib] repo BEFORE installing any lib32-* / steam packages.
+# Idempotent: only edits pacman.conf and re-syncs if multilib isn't already enabled.
+- action: command.run
+  privileged: true
+  command: bash
+  args:
+  - -c
+  - 'pacman-conf --repo-list 2>/dev/null | grep -qx multilib || { sed -i "/^#\[multilib\]$/{N;s/^#\[multilib\]\n#Include/[multilib]\nInclude/}" /etc/pacman.conf; pacman -Sy --noconfirm; }'
 - action: package.install
   list:
   - base-devel
   - bash-completion
   - bash-preexec
+  - bison
   - bluez
   - bluez-utils
+  - boost
   - brasero
   - cantarell-fonts
   - ccache
   - chrony
   - clang
   - chromium
+  - cmake
   - colordiff
   - cronie
   - cups
@@ -27,9 +38,12 @@ actions:
   - dracut
   - efibootmgr
   - erofs-utils
+  - flex
   - gcc
   - gdb
+  - git
   - github-cli
+  - gmp
   - gnome
   - gnome-circle
   - gnome-extra
@@ -63,6 +77,7 @@ actions:
   - lib32-vulkan-radeon
   - lib32-vulkan-swrast
   - lib32-vulkan-virtio
+  - libmpc
   - libpulse
   - libva-intel-driver
   - libva-nvidia-driver
@@ -77,6 +92,7 @@ actions:
   - lutris
   - maven
   - mesa-utils
+  - mpfr
   - mpv
   - nano
   - net-tools
@@ -106,8 +122,8 @@ actions:
   - steam
   - sudo
   - system-config-printer
+  - texinfo
   - tree
-  - unarchiver
   - vim
   - vlc
   - vulkan-devel
@@ -138,6 +154,7 @@ actions:
   - antigravity
   - bugdom
   - bugdom2
+  - cdrtools # AUR: provides genisoimage/mkisofs (Fedora genisoimage equivalent)
   - claude-code
   - comtrya
   - cro-mag-rally-net
@@ -168,6 +185,7 @@ actions:
   - tremulous-grangerhub-bin
   - tributary-bin
   - tuxracer
+  - unarchiver # AUR: provides unar/lsar (moved here from the official list; not in repos)
   - unigine-heaven
   - ventoy-bin
   - video-downloader
@@ -178,12 +196,21 @@ actions:
 - action: file.copy
   source: vimrc
   target: "{{ env.HOME }}/.vimrc"
+# NOTE: must run from repo root (repo-relative source path)
 - action: command.run
   privileged: true
   command: cp
   args:
   - files/grub
   - /etc/default/grub
+# Regenerate grub.cfg so the /etc/default/grub changes actually take effect.
+- action: command.run
+  privileged: true
+  command: grub-mkconfig
+  args:
+  - -o
+  - /boot/grub/grub.cfg
+# NOTE: must run from repo root (repo-relative source path)
 - action: command.run
   privileged: true
   command: cp
@@ -196,18 +223,21 @@ actions:
 #   args:
 #   - files/etc/pacman.conf
 #   - /etc/pacman.conf
+# NOTE: must run from repo root (repo-relative source path)
 - action: command.run
   privileged: true
   command: cp
   args:
   - files/etc/locale.conf
   - /etc/locale.conf
+# NOTE: must run from repo root (repo-relative source path)
 - action: command.run
   privileged: true
   command: bash
   args:
   - -c
   - mkdir -p /etc/sysctl.d && cp files/etc/sysctl.d/99-inotify.conf /etc/sysctl.d/99-inotify.conf
+# NOTE: must run from repo root (repo-relative source path)
 - action: command.run
   privileged: true
   command: cp
@@ -292,13 +322,14 @@ actions:
   command: bash
   args:
   - -c
-  - cp {{ env.HOME }}/.config/monitors.xml /etc/xdg/monitors.xml
+  - '[ -f "{{ env.HOME }}/.config/monitors.xml" ] && cp "{{ env.HOME }}/.config/monitors.xml" /etc/xdg/monitors.xml || true'
 - action: command.run
   privileged: true
   command: bash
   args:
   - -c
   - mkdir -p /etc/dconf/db/gdm.d
+# NOTE: must run from repo root (repo-relative source path)
 - action: command.run
   privileged: true
   command: cp
@@ -310,70 +341,3 @@ actions:
   command: dconf
   args:
   - update
-# - action: package.install
-#   provider: yay
-#   list:
-#   - aoe3-wine-steam
-#   - blur-wine-steam
-#   - broforce-gog
-#   - cod4-wine-steam
-#   - codaw-wine-steam
-#   - codghosts-wine-steam
-#   - codmw2-wine-steam
-#   - codwaw-wine-steam
-#   - daikatana-bin
-#   - daikatana-data-gog
-#   - dhewm3
-#   - dirt2-wine-steam
-#   - dirt3-wine-steam
-#   - dirt4-wine-steam
-#   - dirtrally2-wine-steam
-#   - dirtshowdown-wine-steam
-#   - distance-hib
-#   - doom3-data-steam
-#   - doom3bfg-data-gog
-#   - doom3xp-data-steam
-#   - dungeondefenders-hib
-#   - eliteforce-data-gog
-#   - enemy-territory
-#   - enemy-territory-data
-#   - etlegacy
-#   - etqw
-#   - etqw-data-steam
-#   - flatout2-wine-gog
-#   - grid-wine-gog
-#   - grid2019-wine-steam
-#   - ioquake3-git
-#   - iortcw
-#   - lib32-libxxf86misc
-#   - libxxf86dga
-#   - lilium-voyager-git
-#   - minimetro
-#   - prey
-#   - prey-data-steam
-#   - quake2-data-gog
-#   - quake2-retexture
-#   - quake2rtx-bin
-#   - quake3-data-gog
-#   - quake4
-#   - quake4-data-gog
-#   - rbdoom3-bfg-git
-#   - rocketleague-steam
-#   - rtcw-data-gog
-#   - savage2
-#   - serioussam2-steam
-#   - serioussam3-steam
-#   - serioussamfusion-steam
-#   - simcity-3000-gog
-#   - sm64ex-redrawn-git
-#   - supermeatboy
-#   - torchlight2-gog
-#   - unreal-tournament-bin
-#   - unreal-tournament-data-archiveorg
-#   - ut2004-bin
-#   - ut2004-data-archiveorg
-#   - ut3-wine-steam
-#   - warcraft3-wine
-#   - wreckfest-wine-gog
-#   - wreckfest-wine-steam
-#   - wreckfest2-wine-steam
