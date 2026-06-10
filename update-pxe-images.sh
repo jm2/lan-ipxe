@@ -144,7 +144,8 @@ get_fedora_version() {
     local arch=$1 # x86_64, aarch64
     # Scrape RIT mirror
     
-    local versions=$(curl -sL --max-time 20 --connect-timeout 5 "${FEDORA_MIRROR_BASE}/" | grep -oP 'href="\K\d+(?=/")' | sort -rV)
+    local versions
+    versions=$(curl -sL --max-time 20 --connect-timeout 5 "${FEDORA_MIRROR_BASE}/" | grep -oP 'href="\K\d+(?=/")' | sort -rV)
     for ver in $versions; do
         # Check if directories exist
         if check_url_exists "${FEDORA_MIRROR_BASE}/${ver}/Workstation/${arch}/iso/"; then
@@ -209,7 +210,8 @@ get_rocky_live_dir() {
 }
 get_rocky_version() {
     local arch=$1 # x86_64, aarch64
-    local versions=$(curl -sL --max-time 20 --connect-timeout 5 "${PURDUE_MIRROR}/rocky/" | grep -oP 'href="\K[\d\.]+(?=/")' | sort -rV)
+    local versions
+    versions=$(curl -sL --max-time 20 --connect-timeout 5 "${PURDUE_MIRROR}/rocky/" | grep -oP 'href="\K[\d\.]+(?=/")' | sort -rV)
     for ver in $versions; do
         if [ -n "$(get_rocky_live_dir "$ver" "$arch")" ]; then
             echo "$ver"
