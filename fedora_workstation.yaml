@@ -211,6 +211,7 @@ actions:
   - rhythmbox
   - rsync
   - ruby
+  - rust-analyzer
   - rust
   - rustfmt
   - schedtool
