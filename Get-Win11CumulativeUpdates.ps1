@@ -42,6 +42,10 @@ function Invoke-CatalogRequest {
         [Parameter(Mandatory)][hashtable]$Params,
         [int]$MaxAttempts = 3
     )
+    # Bounded timeout + browser UA so a stalled catalog connection can't hang the run
+    # (callers can override TimeoutSec, e.g. the large .msu download).
+    if (-not $Params.ContainsKey('TimeoutSec')) { $Params['TimeoutSec'] = 60 }
+    if (-not $Params.ContainsKey('UserAgent')) { $Params['UserAgent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) lan-ipxe-catalog-scrape' }
     for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
         try {
             return Invoke-WebRequest @Params
@@ -98,7 +102,7 @@ function Find-CatalogUpdates {
             # Inline retry-with-backoff (the script-scope helper is not visible here).
             $DetailsPage = $null
             for ($attempt = 1; $attempt -le 3; $attempt++) {
-                try { $DetailsPage = Invoke-WebRequest -Uri $DetailsUrl -UseBasicParsing; break }
+                try { $DetailsPage = Invoke-WebRequest -Uri $DetailsUrl -UseBasicParsing -TimeoutSec 60 -UserAgent 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) lan-ipxe-catalog-scrape'; break }
                 catch { if ($attempt -ge 3) { throw } else { Start-Sleep -Seconds ($attempt * 2) } }
             }
             $Content = $DetailsPage.Content
@@ -107,7 +111,10 @@ function Find-CatalogUpdates {
             $DateString = if ($Content -match 'id="ScopedViewHandler_date">([^<]+)') { $matches[1].Trim() }
 
             if ($Title -and $DateString) {
-                $DateObj = [datetime]::Parse($DateString)
+                # Locale-independent parse: the catalog serves US M/d/yyyy. Plain [datetime]::Parse
+                # is CurrentCulture-bound, so on a non-US host a day>12 throws (caught below -> the
+                # CU is silently dropped, possibly the newest) and day<=12 silently swaps day/month.
+                $DateObj = [datetime]::ParseExact($DateString, [string[]]@('M/d/yyyy', 'MM/dd/yyyy'), [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None)
                 [PSCustomObject]@{
                     Title   = $Title
                     DateObj = $DateObj
@@ -156,8 +163,8 @@ function Get-CatalogPackage {
 
     # FIX: the DownloadDialog can list MULTIPLE packages for one update ID. For
     # checkpoint-era CUs (24H2+) it returns the ENTIRE required checkpoint chain
-    # (several .msu), and the actual target is NOT reliably the last link (Microsoft
-    # currently puts a checkpoint last). Download ALL of them into one folder so DISM
+    # (several .msu), and the actual target is NOT reliably the last link (the checkpoint's
+    # position varies — observed FIRST for 25H2, LAST for 24H2). Download ALL into one folder so DISM
     # can resolve the dependency chain automatically, and identify the target by the
     # KB number rather than by list position.
     $AllUrls = @([regex]::Matches($DownloadPage.Content, 'https://[^''"<]+\.(msu|cab)') |
@@ -173,7 +180,9 @@ function Get-CatalogPackage {
         $FileName = ($DownloadUrl -split '/')[-1]
         $OutFile = Join-Path $DestinationPath $FileName
         $HashFile = "$OutFile.sha256"
-        $IsTarget = [bool]($TargetKB -and ($FileName -match "(?i)kb$TargetKB"))
+        # Anchor on the surrounding boundary so a shorter KB can't prefix-match a longer one
+        # (e.g. KB5012 vs KB50123); catalog filenames are windows11.0-kb<num>-x64_...
+        $IsTarget = [bool]($TargetKB -and ($FileName -match "(?i)kb$([regex]::Escape($TargetKB))(?:\D|$)"))
 
         # NOTE: the SHA256 sidecar below is a LOCAL CACHE / CORRUPTION check only. It
         # confirms the file still matches what we previously downloaded (detects
@@ -186,6 +195,13 @@ function Get-CatalogPackage {
                 $actualHash = (Get-FileHash -Path $OutFile -Algorithm SHA256).Hash
                 if ($actualHash -eq $expectedHash) {
                     Write-Host "   -> Cached (SHA256 cache check OK): $FileName" -ForegroundColor DarkGray
+                    # Re-verify authenticity on cache reuse too: the sidecar is self-generated
+                    # (byte-stability only), so it must NOT bypass the Authenticode check that the
+                    # fresh-download path performs.
+                    $cachedSig = Get-AuthenticodeSignature -FilePath $OutFile
+                    if ($cachedSig.Status -ne 'Valid') {
+                        Write-Warning "   [!] Authenticode signature for cached $FileName is '$($cachedSig.Status)' (not Valid) — treat this package as UNVERIFIED before servicing."
+                    }
                     $Downloaded += [PSCustomObject]@{ Path = $OutFile; FileName = $FileName; IsTarget = $IsTarget }
                     continue
                 }
@@ -204,7 +220,8 @@ function Get-CatalogPackage {
 
         Write-Host "   -> Downloading $FileName..."
         try {
-            Invoke-CatalogRequest -Params @{ Uri = $DownloadUrl; OutFile = $OutFile; UseBasicParsing = $true } | Out-Null
+            # Large .msu (often 600 MB - 1.5 GB) — generous timeout so a slow link doesn't abort.
+            Invoke-CatalogRequest -Params @{ Uri = $DownloadUrl; OutFile = $OutFile; UseBasicParsing = $true; TimeoutSec = 3600 } | Out-Null
         }
         catch {
             Write-Warning "   [!] Download failed for $FileName : $_"
@@ -291,7 +308,6 @@ else {
 Write-Host "   -> Downloading target CU and any bundled checkpoint prerequisites..." -ForegroundColor Cyan
 
 $DownloadedPackages = @(Get-CatalogPackage -Update $TargetCU -DestinationPath $DownloadPath -TargetKB $TargetKB)
-$downloadedCount = $DownloadedPackages.Count
 
 if ($DownloadedPackages.Count -gt 0) {
     foreach ($f in $DownloadedPackages) {
@@ -323,8 +339,8 @@ Write-Host " Done."
 if ($SSUResults) {
     $BestSSU = $SSUResults | Sort-Object DateObj -Descending | Select-Object -First 1
     Write-Host "   -> SSU Found: $($BestSSU.Title) ($($BestSSU.DateObj.ToString('yyyy-MM-dd')))" -ForegroundColor Green
-    $ssuFiles = @(Get-CatalogPackage -Update $BestSSU -DestinationPath $DownloadPath)
-    if ($ssuFiles.Count -gt 0) { $downloadedCount += $ssuFiles.Count }
+    # Download the SSU into the same folder (the final summary recounts from disk).
+    Get-CatalogPackage -Update $BestSSU -DestinationPath $DownloadPath | Out-Null
 }
 else {
     Write-Host "   -> No standalone SSU found (likely integrated into CU packages)." -ForegroundColor DarkGray
