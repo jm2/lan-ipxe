@@ -1,16 +1,30 @@
 @{
     # Marvell Ethernet NICs. Marvell's modern NIC portfolio is two acquired lines:
-    #   * Aquantia AQtion (AQC1xx, multi-gig / 10G)  — acquired 2019
-    #   * QLogic FastLinQ (QL41xxx/45xxx, 10/25/100G) — acquired via Cavium
-    # Both are current Marvell products, so both live here. (Marvell's own-design "Yukon"
-    # 88E80xx is GbE-only and in-box; out of this 10GbE+ scope.)
+    #   * Aquantia AQtion (AQC1xx, multi-gig / 10G) — acquired 2019; unified aqnic650 driver.
+    #   * QLogic FastLinQ (QL41xxx/45xxx, 10/25/100G; VEN_1077, qend.sys) — acquired via Cavium.
+    #
+    # FastLinQ is deliberately NOT scraped here: the qend driver is NOT on the Microsoft Update
+    # Catalog in any form. Verified (2026-06) that EVERY VEN_1077&DEV_*, "qend", "QLogic FastLinQ",
+    # "QL41162/41164", and "FastLinQ 41000/45000" query returns 0 results. A bare "Marvell FastLinQ"
+    # name search returns only Aquantia "Marvell - Net" packages (Marvell tags its whole NIC line
+    # with the brand) — every hit extracts to aqnic650.sys / VEN_1D6A, i.e. the SAME Aquantia driver
+    # the AQC entry below already pulls (and an OLDER build than the HWID query finds). So a FastLinQ
+    # entry would be mislabeled, redundant, and a downgrade. Source qend from Marvell's site / OEM
+    # channel, or rely on the in-box driver; it cannot be obtained from the catalog.
+    #
+    # Marvell's own-design "Yukon" 88E80xx is GbE-only and in-box; out of this 10GbE+ scope.
     VendorKey = 'Marvell_Ethernet'
     Targets   = @(
         @{
             Name    = 'Marvell_Aquantia_PCIe'
             Devices = @(
-                @{ Key = 'AQC107'; Label = 'AQC107'; Queries = @('VEN_1D6A&DEV_D107') }
-                @{ Key = 'AQC113'; Label = 'AQC113'; Queries = @('VEN_1D6A&DEV_04C0') }
+                # One unified driver (aqnic650.sys, Provider=Marvell, VEN_1D6A) covers the ENTIRE
+                # AQC1xx PCIe family — its INF binds 25 device ids including DEV_D107 (AQC107) and
+                # DEV_04C0 (AQC113). Verified both HWID searches resolve to byte-identical INF/SYS.
+                # Both ids are queried for robustness; results dedup to the single newest package
+                # (live: v3.1.11.0, 2026-03-19) and produce ONE download, not two.
+                @{ Key = 'AQC1xx'; Label = 'Aquantia AQtion AQC1xx 10G/multi-gig (AQC107/AQC113)';
+                    Queries = @('VEN_1D6A&DEV_D107', 'VEN_1D6A&DEV_04C0') }
             )
         }
         @{
@@ -23,22 +37,6 @@
                 # also zeroes them: query bare. Drivers are chipset-wide, so the single
                 # first-party id covers the TRENDnet/ASIX rebrands too.
                 @{ Key = 'AQC111U'; Label = 'AQC111U'; Queries = @('VID_2ECA&PID_C101') }
-            )
-        }
-        @{
-            Name    = 'Marvell_FastLinQ'
-            Devices = @(
-                # FastLinQ (qend) is ONE unified Windows driver across the whole 41000 (QL41xxx,
-                # 10/25/40/50G incl. QL41162/41164 10GBASE-T) AND 45000 (QL45xxx, up to 100G)
-                # series, so the single name query covers both. The catalog has NO 45xxx- or HWID-
-                # specific entry (every QL45000/FastLinQ 45000/VEN_1077&DEV_* search returns 0);
-                # the driver is reachable only by NAME, as OEM (Lenovo/Dell/HPE) "Marvell - Net"
-                # listings — newest v3.1.4.0 (2021-08). Bare (name-based); not in-box; storage
-                # personalities excluded. Adding 45xxx-specific queries would be dead (0 results) —
-                # 45xxx is covered by the same unified package this already pulls.
-                @{ Key = 'FastLinQ'; Label = 'FastLinQ 41xxx/45xxx 10-100G (QL41162/41164, QL45xxx)';
-                    Queries = @('Marvell FastLinQ', 'FastLinQ');
-                    TitleExclude = @('(?i)FCoE', '(?i)iSCSI', '(?i)storage') }
             )
         }
     )

@@ -90,7 +90,7 @@ Assert { $exHwid -contains 'VEN_8086&DEV_1592' -and $exHwid -contains 'VEN_8086&
 $exUsb = Expand-CsQuery 'VID_2ECA&PID_C101'
 Assert { (@($exUsb).Count -eq 2) -and ($exUsb -contains 'VID_2ECA&PID_C101 Windows 11') } 'USB VID/PID expands too'
 Assert { @(Expand-CsQuery 'Killer AX500').Count -eq 1 } 'marketing name not expanded'
-Assert { @(Expand-CsQuery 'Marvell FastLinQ')[0] -eq 'Marvell FastLinQ' } 'name query passes through bare'
+Assert { @(Expand-CsQuery 'Aquantia AQtion')[0] -eq 'Aquantia AQtion' } 'name query passes through bare'
 Assert { @(Expand-CsQuery 'BCM57416 RDMA Ethernet').Count -eq 1 } 'phrase query not expanded'
 
 '== Get-CsBranchRank =='
@@ -117,7 +117,7 @@ Assert { $null -ne $bestTie } 'equal-version tiebreak returns a deterministic pi
 
 '== .psd1 data tables load + schema =='
 $expectKeys = @{
-    'intel-eth.psd1'  = 10; 'intel-wifi.psd1' = 2; 'marvell.psd1' = 4
+    'intel-eth.psd1'  = 10; 'intel-wifi.psd1' = 2; 'marvell.psd1' = 2
     'realtek.psd1'    = 8; 'qualcomm.psd1' = 3; 'mediatek.psd1' = 5; 'broadcom.psd1' = 3
 }
 foreach ($f in $expectKeys.Keys) {
@@ -137,8 +137,13 @@ Assert { ($null -ne $x520) -and ($x520.Queries -contains 'VEN_8086&DEV_10FB') } 
 $mv = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'marvell.psd1')
 $aqc = $mv.Targets.Devices | Where-Object Key -eq 'AQC111U'
 Assert { $aqc.Queries[0] -eq 'VID_2ECA&PID_C101' } 'AQC111U fixed USB id'
+# AQC107+AQC113 merged into one AQC1xx family device (both resolve to the byte-identical
+# unified aqnic650 driver); both HWIDs are queried for robustness.
+$aqcFam = $mv.Targets.Devices | Where-Object Key -eq 'AQC1xx'
+Assert { ($null -ne $aqcFam) -and ($aqcFam.Queries -contains 'VEN_1D6A&DEV_D107') -and ($aqcFam.Queries -contains 'VEN_1D6A&DEV_04C0') } 'AQC1xx merges AQC107(D107)+AQC113(04C0)'
+# FastLinQ (qend) is NOT on the catalog; the old name entry only pulled redundant Aquantia.
 $fl = $mv.Targets.Devices | Where-Object Key -eq 'FastLinQ'
-Assert { ($null -ne $fl) -and ($fl.Queries -contains 'Marvell FastLinQ') } 'FastLinQ consolidated into Marvell module'
+Assert { $null -eq $fl } 'FastLinQ entry removed (qend not catalog-available)'
 $iw = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'intel-wifi.psd1')
 $be = $iw.Targets.Devices | Where-Object Key -eq 'BE200'
 Assert { $be.Queries[0] -eq 'VEN_8086&DEV_272B' } 'BE200 keeps correct 272B (not gonefishin 2725)'
