@@ -55,8 +55,20 @@ BitLocker auto-encryption, injects LabConfig hardware-check bypasses and `Bypass
 and drops an `unattend.xml` (local `lan` admin account with autologon) plus a
 `SetupComplete.cmd` that disables NIC power management.
 
-- `-Drivers` runs every `Get-*Drivers.ps1` scraper in parallel and injects the
-  results with `DISM /Add-Driver`.
+- `-Drivers` runs every NIC/Wi-Fi `Get-*Drivers.ps1` scraper in parallel (the
+  `Get-*GraphicsDrivers.ps1` shims are excluded — see `-GraphicsDrivers`) and injects
+  the results with `DISM /Add-Driver`.
+- `-GraphicsDrivers Intel|AMD|NVIDIA|All` additionally injects GPU display drivers
+  (also catalog-sourced) into the same image. GPU CABs are large (~0.6–1.2 GB each),
+  so it is opt-in and separate from `-Drivers`; `All` injects the ~3–5 GB union of all
+  three vendors, so prefer a single vendor matching the target machine. GPU drivers are
+  post-boot-only (a GPU never serves iSCSI boot), so they get plain `DISM /Add-Driver`
+  with **no** boot-start promotion. A bare INF install yields a fully accelerated driver
+  (incl. the OpenGL/Vulkan/OpenCL/D3D and CUDA/NVENC runtimes); the vendor control-panel
+  apps (NVIDIA App, AMD Adrenalin, Intel Graphics Software — all Microsoft Store) are not
+  installed, and Radeon Pro cards get the base WHQL driver, not the ISV-certified PRO
+  Edition. x64 only (discrete GPUs have no ARM64 Windows driver; Qualcomm Adreno is not
+  on the catalog). The same shims run standalone on a live system (`-Install` → `pnputil`).
 - `-Updates` runs `Get-Win11CumulativeUpdates.ps1` and injects the latest cumulative
   update (with checkpoint prerequisites) via folder-based `DISM /Add-Package`.
 
@@ -96,6 +108,9 @@ Driver/update scrapers (Microsoft Update Catalog):
 | `Get-IntelWiFiDrivers.ps1` | Intel Wi-Fi 6/6E/7 (post-boot convenience) |
 | `Get-MediatekWiFiDrivers.ps1` | MediaTek MT79xx Wi-Fi (post-boot convenience) |
 | `Get-QualcommWiFiDrivers.ps1` | Qualcomm WCN/FastConnect Wi-Fi (post-boot convenience) |
+| `Get-IntelGraphicsDrivers.ps1` | Intel Arc / Iris Xe / UHD GPU (post-boot convenience) |
+| `Get-NvidiaGraphicsDrivers.ps1` | NVIDIA GeForce + RTX/Quadro GPU (post-boot convenience) |
+| `Get-AmdGraphicsDrivers.ps1` | AMD Radeon RX + Radeon Pro GPU (post-boot convenience) |
 | `Get-Win11CumulativeUpdates.ps1` | Latest monthly CU + checkpoint chain + SSU per Windows version |
 
 **Status:** the `0x7B INACCESSIBLE_BOOT_DEVICE` failure (DISM apply + service-key

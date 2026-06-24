@@ -119,6 +119,8 @@ Assert { $null -ne $bestTie } 'equal-version tiebreak returns a deterministic pi
 $expectKeys = @{
     'intel-eth.psd1'  = 10; 'intel-wifi.psd1' = 2; 'marvell.psd1' = 2
     'realtek.psd1'    = 8; 'qualcomm.psd1' = 3; 'mediatek.psd1' = 5; 'broadcom.psd1' = 3
+    # GPU graphics tables (catalog-sourced, post-boot convenience — same engine, no Source block)
+    'intel-gfx.psd1'  = 1; 'nvidia-gfx.psd1' = 2; 'amd-gfx.psd1' = 5
 }
 foreach ($f in $expectKeys.Keys) {
     $cfg = Import-PowerShellDataFile (Join-Path $PSScriptRoot $f)
@@ -150,6 +152,18 @@ Assert { $be.Queries[0] -eq 'VEN_8086&DEV_272B' } 'BE200 keeps correct 272B (not
 $md = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'mediatek.psd1')
 $mt7925 = $md.Targets.Devices | Where-Object Key -eq '7925'
 Assert { $mt7925.PreferredBranches[0] -eq '26.30' } 'MT7925 preferred branch refreshed to 26.30'
+
+# GPU graphics tables: unified Intel device, NVIDIA consumer/pro split, AMD Radeon Pro present.
+$ig = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'intel-gfx.psd1')
+$arcXe = $ig.Targets.Devices | Where-Object Key -eq 'Arc_Xe'
+Assert { ($null -ne $arcXe) -and ($arcXe.Queries.Count -ge 2) -and ($arcXe.Queries -contains 'VEN_8086&DEV_E20B') } 'intel-gfx Arc_Xe unified (multi-HWID, incl Arc B580 E20B)'
+$ng = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'nvidia-gfx.psd1')
+$nvGeForce = $ng.Targets.Devices | Where-Object Key -eq 'GeForce'
+$nvPro = $ng.Targets.Devices | Where-Object Key -eq 'RTX_Pro'
+Assert { ($nvGeForce.Queries -contains 'VEN_10DE&DEV_2684') -and ($nvPro.Queries -contains 'VEN_10DE&DEV_26B1') } 'nvidia-gfx splits consumer GeForce (2684) from RTX-pro (26B1)'
+$ag = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'amd-gfx.psd1')
+$amdPro = $ag.Targets.Devices | Where-Object Key -eq 'ProW7000'
+Assert { $amdPro.Queries[0] -eq 'VEN_1002&DEV_7448' } 'amd-gfx Radeon Pro W7900 (7448) present'
 
 "`n== RESULT: $script:pass passed, $script:fail failed =="
 if ($script:fail -gt 0) { exit 1 } else { exit 0 }
