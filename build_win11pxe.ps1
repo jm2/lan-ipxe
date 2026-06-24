@@ -11,6 +11,9 @@ to allow the OS to boot from an iSCSI target (iBFT).
 
 .EXAMPLE
 .\build_win11pxe.ps1 -IsoPath .\Win11_25H2_English_x64.iso -OutPath .\win11_netboot.vhdx -ImageIndex 6
+
+.EXAMPLE
+.\build_win11pxe.ps1 -IsoPath .\Win11_25H2_English_x64.iso -Drivers -GraphicsDrivers NVIDIA -Updates
 #>
 
 param(
@@ -31,6 +34,15 @@ param(
 
     [Parameter(Mandatory = $false)]
     [switch]$Updates,
+
+    # Inject GPU display drivers (post-boot only; a GPU never serves iSCSI boot, so unlike the NIC
+    # scrapers these get NO boot-start promotion — see the $nicDriverDefs note). Catalog-sourced like
+    # every other scraper. GPU CABs are large (~0.6-1.2 GB each), so this is opt-in and separate from
+    # -Drivers. 'All' runs Intel+AMD+NVIDIA (heavier, ~3-5 GB union); pick a single vendor to inject only
+    # the target machine's GPU driver. x64 only — discrete GPUs have no ARM64 Windows driver.
+    [Parameter(Mandatory = $false)]
+    [ValidateSet('Intel', 'AMD', 'NVIDIA', 'All')]
+    [string]$GraphicsDrivers,
 
     # Adapter GUID(s) of the boot NIC, for the offline DISM /Add-NetAdapter step
     # that actually makes Windows able to boot over iSCSI (see notes below).
@@ -179,13 +191,39 @@ try {
         throw "DISM /Apply-Image failed with exit code $LASTEXITCODE. Check log: $dismLogPath"
     }
 
-    if ($Drivers) {
+    if ($Drivers -or $GraphicsDrivers) {
         Write-Host ">>> Executing Driver Scrapers (parallel)..." -ForegroundColor Cyan
         $driverTempPath = Join-Path $env:TEMP "Win11Drivers_$(Get-Random)"
         # Pre-create the root so the post-run enumeration never hits a missing path
         # when every scraper fails.
         New-Item -ItemType Directory -Path $driverTempPath -Force | Out-Null
-        $driverScripts = Get-ChildItem -Path $PSScriptRoot -Filter "Get-*Drivers.ps1"
+
+        # NIC/Wi-Fi scrapers (-Drivers). Graphics shims are named Get-*GraphicsDrivers.ps1 and are
+        # EXCLUDED here so they run only on explicit -GraphicsDrivers opt-in (their CABs are large).
+        $driverScripts = @()
+        if ($Drivers) {
+            $driverScripts += Get-ChildItem -Path $PSScriptRoot -Filter "Get-*Drivers.ps1" |
+                Where-Object { $_.Name -notlike '*Graphics*' }
+        }
+        # GPU scrapers (-GraphicsDrivers Intel|AMD|NVIDIA|All). All feed the SAME $driverTempPath and the
+        # single DISM /Add-Driver below; a GPU is post-boot-only so none is added to $nicDriverDefs.
+        if ($GraphicsDrivers) {
+            $gpuShims = [ordered]@{
+                Intel  = 'Get-IntelGraphicsDrivers.ps1'
+                AMD    = 'Get-AmdGraphicsDrivers.ps1'
+                NVIDIA = 'Get-NvidiaGraphicsDrivers.ps1'
+            }
+            $wantedGpu = if ($GraphicsDrivers -eq 'All') { $gpuShims.Values } else { @($gpuShims[$GraphicsDrivers]) }
+            foreach ($gpuName in $wantedGpu) {
+                $gpuPath = Join-Path $PSScriptRoot $gpuName
+                if (Test-Path $gpuPath) { $driverScripts += Get-Item $gpuPath }
+                else { Write-Warning "    [!] Graphics scraper not found: $gpuName" }
+            }
+        }
+
+        # GPU CABs are far larger than NIC CABs, so allow more wall-clock when graphics are included.
+        # NOTE: this Wait-Job timeout is a single GLOBAL budget shared across all scrapers.
+        $scraperTimeoutSec = if ($GraphicsDrivers) { 3600 } else { 1800 }
 
         # Launch all scrapers concurrently — each writes to its own subdirectory
         $scraperJobs = foreach ($script in $driverScripts) {
@@ -200,8 +238,8 @@ try {
         # must NOT abort the build — Receive-Job under $ErrorActionPreference='Stop'
         # would otherwise rethrow a single flaky HTTP failure as terminating, after
         # the hour-long image apply. -ErrorAction Continue keeps it non-fatal.
-        Write-Host "    -> Waiting for $($scraperJobs.Count) scrapers to complete (max 30 min)..."
-        $scraperJobs | Wait-Job -Timeout 1800 | Out-Null
+        Write-Host "    -> Waiting for $($scraperJobs.Count) scrapers to complete (max $([int]($scraperTimeoutSec / 60)) min)..."
+        $scraperJobs | Wait-Job -Timeout $scraperTimeoutSec | Out-Null
         foreach ($job in $scraperJobs) {
             if ($job.State -eq 'Running') {
                 Write-Warning "    [!] $($job.Name) timed out — stopping."
@@ -480,6 +518,10 @@ try {
         #    System32\drivers, and manually create the service registry key.
         #    NOTE: INF AddService names often differ from .sys basenames (e.g.
         #    e1dexpress → e1d.sys), so Service and Sys are specified independently.
+        #    GPU drivers (-GraphicsDrivers: nvlddmkm/amdkmdag/igdkmd*) are deliberately
+        #    NOT listed here — a GPU is on neither the boot nor the iSCSI data path
+        #    (UEFI GOP → Basic Display Adapter → lazy PnP bind), so it must stay a plain
+        #    DISM /Add-Driver with no boot-start promotion. Do not add one.
         $nicDriverDefs = @(
             # --- Virtual Ethernet ---
             @{ Service = "netvsc"; Sys = "netvsc.sys" }          # Hyper-V
