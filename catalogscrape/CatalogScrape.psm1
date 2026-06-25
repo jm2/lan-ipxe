@@ -269,11 +269,21 @@ function Invoke-DriverScrape {
     foreach ($Target in $Config.Targets) {
         Write-Host "`n=> Investigating Microsoft Update Catalog for $($Target.Name)..." -ForegroundColor Cyan
         $AvailablePackages = @()
+        # Devices whose only candidates fell below their MinVersion floor — tracked so the
+        # manifest can say WHY they were skipped (vs the catalog returning nothing at all).
+        $floorBlocked = @{}
 
         foreach ($Device in $Target.Devices) {
             $deviceKey = $Device.Key
             $label = $Device.Label
             $titleExclude = if ($Device.ContainsKey('TitleExclude')) { @($Device.TitleExclude) } else { @() }
+            # Optional per-device version floor. Drivers below it are dropped — used when the
+            # only catalog matches for an HWID are a stale generic legacy driver (e.g. a 2016
+            # driver whose INF blankets dozens of PIDs), so the device skips rather than ships
+            # the antique. A real per-chip driver (whose [version] major encodes the model, e.g.
+            # 1157.x) clears the floor automatically once Realtek publishes it.
+            $minVersion = if ($Device.ContainsKey('MinVersion')) { ConvertTo-CsVersion $Device.MinVersion } else { $null }
+            $floorDropped = 0
             $seenIds = [System.Collections.Generic.HashSet[string]]::new()
 
             # Expand each base query into its dual-query-union variants, then dedup.
@@ -321,6 +331,12 @@ function Invoke-DriverScrape {
                         continue
                     }
 
+                    if ($minVersion -and $ver -lt $minVersion) {
+                        $floorDropped++
+                        Write-Verbose "Dropped $label candidate $($d.Id): version $($d.Version) below MinVersion $($Device.MinVersion)."
+                        continue
+                    }
+
                     $AvailablePackages += [pscustomobject]@{
                         Key              = $deviceKey
                         Label            = $label
@@ -334,6 +350,12 @@ function Invoke-DriverScrape {
                     }
                 }
             }
+
+            # A device whose every candidate was floored out: record why, for the manifest.
+            if ($minVersion -and $floorDropped -gt 0 -and -not ($AvailablePackages | Where-Object { $_.Key -eq $deviceKey })) {
+                $floorBlocked[$deviceKey] = $Device.MinVersion
+                Write-Host "      [!] ${label}: $floorDropped candidate(s) found but all below MinVersion $($Device.MinVersion); none selected." -ForegroundColor Yellow
+            }
         }
 
         if (-not $AvailablePackages) {
@@ -346,7 +368,12 @@ function Invoke-DriverScrape {
         $foundKeys = @($AvailablePackages.Key | Select-Object -Unique)
         foreach ($Device in $Target.Devices) {
             if ($Device.Key -notin $foundKeys) {
-                $Manifest.Add("SKIPPED: $($Device.Label) (no catalog candidates)")
+                $reason = if ($floorBlocked.ContainsKey($Device.Key)) {
+                    "all candidates below MinVersion $($floorBlocked[$Device.Key])"
+                } else {
+                    'no catalog candidates'
+                }
+                $Manifest.Add("SKIPPED: $($Device.Label) ($reason)")
             }
         }
 
