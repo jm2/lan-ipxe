@@ -103,9 +103,16 @@ Assert { (Get-CsBranchRank ([version]'9.9.9.9') @('26.30')) -eq ([int]::MaxValue
 $bestMt = Select-CsBestPackage -Packages @((Pkg '5.7.0.5659' '2026-03-06'), (Pkg '26.30.3.62' '2026-04-08')) -PreferredBranches @('26.30', '25.30', '5.7')
 Assert { $bestMt.Version -eq [version]'26.30.3.62' } "MediaTek picks 26.30.3.62 (got $($bestMt.Version))"
 
-# Realtek RTL8159: higher version wins DESPITE older catalog date (the core date-vs-version fix)
+# Higher version wins DESPITE older catalog date (the core date-vs-version fix). NB: these two
+# stale builds are exactly what RTL8157/8159 now floor out via MinVersion (asserted below).
 $bestRtl = Select-CsBestPackage -Packages @((Pkg '11.19.602.2025' '2016-03-30'), (Pkg '11.19.20.602' '2018-03-30'))
-Assert { $bestRtl.Version -eq [version]'11.19.602.2025' } "Realtek picks 11.19.602.2025 over newer-dated 11.19.20.602 (got $($bestRtl.Version))"
+Assert { $bestRtl.Version -eq [version]'11.19.602.2025' } "version beats older date: picks 11.19.602.2025 over newer-dated 11.19.20.602 (got $($bestRtl.Version))"
+
+# MinVersion floor (RTL8157/8159): the stale 2016/2018 generic driver is below the 1157/1159
+# floor, so the device skips it; a real per-chip 115x.x driver clears the floor automatically.
+Assert { ([version]'11.19.602.2025') -lt (ConvertTo-CsVersion '1157') } 'MinVersion floor: legacy 11.19.x is below the 1157 floor (8157/8159 skip the stale generic)'
+Assert { (ConvertTo-CsVersion '1157.22.113.2026') -ge (ConvertTo-CsVersion '1157') } 'MinVersion floor: a real 1157.x driver clears the floor'
+Assert { (ConvertTo-CsVersion '1159') -gt [version]'11.19.20.602' } 'MinVersion floor: 1159 floor sits above the legacy 815A driver'
 
 # Intel I226-V: re-released older version has a NEWER date; highest version must still win
 $bestIntel = Select-CsBestPackage -Packages @((Pkg '2.1.5.10' '2025-12-29'), (Pkg '2.1.5.7' '2026-01-19'))
@@ -152,6 +159,12 @@ Assert { $be.Queries[0] -eq 'VEN_8086&DEV_272B' } 'BE200 keeps correct 272B (not
 $md = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'mediatek.psd1')
 $mt7925 = $md.Targets.Devices | Where-Object Key -eq '7925'
 Assert { $mt7925.PreferredBranches[0] -eq '26.30' } 'MT7925 preferred branch refreshed to 26.30'
+# Realtek RTL8157/8159 carry a MinVersion floor so the stale 2016 generic driver is skipped.
+$rt = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'realtek.psd1')
+$rt57 = $rt.Targets.Devices | Where-Object Key -eq '1157'
+$rt59 = $rt.Targets.Devices | Where-Object Key -eq '1159'
+Assert { (ConvertTo-CsVersion $rt57.MinVersion) -eq (ConvertTo-CsVersion '1157') } 'realtek RTL8157 has MinVersion 1157 floor'
+Assert { (ConvertTo-CsVersion $rt59.MinVersion) -eq (ConvertTo-CsVersion '1159') } 'realtek RTL8159 has MinVersion 1159 floor'
 
 # GPU graphics tables: unified Intel device, NVIDIA consumer/pro split, AMD Radeon Pro present.
 $ig = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'intel-gfx.psd1')
