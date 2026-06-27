@@ -116,6 +116,14 @@ actions:
   args:
   - --import
   - https://packages.microsoft.com/keys/microsoft.asc
+# sing-box repo (modern multi-protocol proxy; provides shadowsocks incl. 2022 ciphers).
+# Guarded: dnf config-manager addrepo errors if the repo file already exists.
+- action: command.run
+  privileged: true
+  command: bash
+  args:
+  - -c
+  - '[ -f /etc/yum.repos.d/sing-box.repo ] || dnf config-manager addrepo --from-repofile=https://sing-box.app/sing-box.repo'
 - action: package.install
   list:
   - abattis-cantarell-fonts
@@ -217,10 +225,16 @@ actions:
   - schedtool
   - SDL-devel
   - seahorse
+  - sing-box
   - squashfs-tools
   - sudo
   - system-config-printer
   - texinfo
+  - transmission
+  - transmission-cli
+  - transmission-daemon
+  - transmission-gtk
+  - transmission-remote-gtk
   - tree
   - tributary
   - unar
@@ -245,10 +259,9 @@ actions:
     dnf install -y
     glibc-devel.i686
     google-chrome-stable
-    intel-media-driver
+    libva-intel-media-driver
     libstdc++-devel.i686
     libva.i686
-    libva-intel-driver
     mesa-vulkan-drivers.i686
     readline-devel.i686
     steam
