@@ -21,6 +21,7 @@ actions:
     provider: winget
     list:
       - 7zip.7zip
+      - Anthropic.ClaudeCode
       - Apple.iTunes
       # - Blizzard.BattleNet # Broken due to interactive installer.
       - ExtremeTuxRacer.ExtremeTuxRacer
@@ -32,6 +33,8 @@ actions:
       - GoLang.Go
       - Google.AndroidStudio
       - Google.Antigravity
+      - Google.AntigravityCLI
+      - Google.AntigravityIDE
       - Google.Chrome
       - Google.GoogleDrive
       - Google.PlatformTools
@@ -46,6 +49,7 @@ actions:
       - Meld.Meld
       - Microsoft.PowerShell
       - Microsoft.VisualStudio.Community
+      - Microsoft.VisualStudioCode
       - Microsoft.WindowsTerminal
       - Microsoft.WingetCreate
       - Microsoft.WSL
@@ -55,6 +59,7 @@ actions:
       - Ninja-build.Ninja
       - Ookla.Speedtest.CLI
       - Ookla.Speedtest.Desktop
+      - OpenAI.Codex
       - Plex.Plex
       - PuTTY.PuTTY
       - Python.Python.3.14
@@ -73,8 +78,8 @@ actions:
       - WinSCP.WinSCP
       - WiresharkFoundation.Wireshark
       - Xming.Xming
-  - action: package.install
-    provider: winget
-    where: os.arch == "x86_64"
-    list:
-      - Intel.IntelDriverAndSupportAssistant
+#  - action: package.install
+#    provider: winget
+#    where: os.arch == "x86_64"
+#    list:
+#      - Intel.IntelDriverAndSupportAssistant
