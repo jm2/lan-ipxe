@@ -5,11 +5,12 @@
 
     .DESCRIPTION
     Thin shim over catalogscrape\CatalogScrape.psm1, driven by catalogscrape\mediatek.psd1.
-    Covers MT7921/MT7921K(RZ608)/MT7922(RZ616)/MT7925(RZ717)/MT7927(RZ738/MT6639).
-    Bluetooth/UART combo-chip entries are excluded by title; selection is highest-version-first
-    per Key+Arch group: x64 picks the 26.40 branch for MT7925/MT7927, while -Architecture
-    arm64/all picks the ARM64-only 6.4 branch (first shipped 6.4.0.3037, May 2026 — one
-    package covers both chips and the RZ rebrands).
+    Two family entries (one unified INF per driver generation):
+      WiFi6 — MT7921/MT7921K(RZ608)/MT7922(RZ616), x64 branch 3.5 -> 25.40 -> 26.40
+      WiFi7 — MT7925(RZ717)/MT7927(RZ738/MT6639), x64 on 26.40; ARM64 on its own 6.4 branch
+    Bluetooth/UART combo-chip entries are excluded by title; candidates are hwid-verified
+    (catalog record pre-download, extracted INF post-download); selection is
+    highest-version-first per family+arch.
 
     .NOTES
     SCOPE: POST-BOOT CONVENIENCE drivers only. Wi-Fi cannot serve iSCSI/PXE boot, so nothing

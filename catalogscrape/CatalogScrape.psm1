@@ -12,6 +12,15 @@
     lower build, Realtek USB picking a stale-dated older build, MediaTek preferred-branch
     filtering out the newer 26.30 branch).
 
+    HWID verification (two layers, patterns derived from each device's HWID-shaped queries
+    plus an optional Hwids override in the .psd1):
+      1. Pre-download: a candidate's "Supported Hardware IDs" (detail page) must include one
+         of the device's hwids — relevance search drags wrong-device records into the 25-row
+         window (e.g. an RTL8168 ARM64 record under the DEV_8127 query).
+      2. Post-extract: the shipped INF must list one of the device's hwids, or the extract
+         is removed so DISM /Add-Driver /Recurse can never inject a wrong-device package.
+    Name-query-only devices have no patterns and skip both layers.
+
     Pure helpers (parsing/version/date/selection) are factored out and unit-tested on any OS
     via catalogscrape/Test-CatalogScrape.ps1; the Windows-only I/O (Authenticode/expand/
     pnputil) mirrors the original scripts verbatim.
@@ -123,12 +132,25 @@ function ConvertFrom-CsDetailHtml {
     $arch = if ($Content -match 'ARM64') { 'ARM64' }
     elseif ($Content -match 'AMD64|x64|amd64') { 'AMD64' }
     else { 'x86' }
+    # "Supported Hardware IDs" block: this is the SUBMISSION'S targeting (a subset of the
+    # INF's coverage — e.g. an OEM RZ616 record lists only its dev_0616 subsys id while the
+    # INF inside covers five DEV ids), so it is used for per-device verification, never for
+    # cross-device discovery. Entities are &amp;-encoded; hwids are stored decoded+lowercase.
+    $hwids = @()
+    $hwBlock = [regex]::Match($Content, 'id="driverhwIDs".*?id="driverupdateIDs"', 'Singleline')
+    if ($hwBlock.Success) {
+        $decoded = $hwBlock.Value -replace '&amp;', '&'
+        $hwids = @([regex]::Matches($decoded, '[a-zA-Z0-9]+\\[^\s<]+') |
+            ForEach-Object { $_.Value.ToLowerInvariant() } |
+            Select-Object -Unique)
+    }
     return [pscustomobject]@{
         Id      = $Id
         Title   = $title
         Version = $verRaw
         DateObj = $dateObj
         Arch    = $arch
+        Hwids   = $hwids
     }
 }
 
@@ -138,6 +160,38 @@ function Test-CsTitleExcluded {
     if (-not $Patterns) { return $false }
     if ([string]::IsNullOrEmpty($Title)) { return $false }
     foreach ($p in $Patterns) { if ($Title -match $p) { return $true } }
+    return $false
+}
+
+function Get-CsDeviceHwids {
+    # Hwid verification patterns for a device table entry: every HWID-shaped query
+    # (VEN_/VID_ pair), lowercased, plus any explicit Hwids list from the .psd1. An empty
+    # result means the device is name-query-only and hwid verification is skipped for it.
+    param([Parameter(Mandatory)][hashtable]$Device)
+    $h = @()
+    foreach ($q in @($Device.Queries)) {
+        if ($q -match '^(VEN|VID)_[0-9A-Fa-f]+&(DEV|PID)_[0-9A-Fa-f]+$') { $h += $q.ToLowerInvariant() }
+    }
+    if ($Device.ContainsKey('Hwids')) {
+        foreach ($x in @($Device.Hwids)) { $h += ([string]$x).ToLowerInvariant() }
+    }
+    return @($h | Select-Object -Unique)
+}
+
+function Test-CsHwidMatch {
+    # $true when any device pattern is a substring of any package hwid (both lowercase).
+    # No device patterns -> $true (verification not applicable). Patterns present but the
+    # package page listed no hwids -> $false (fail closed: every real driver record carries
+    # a Supported Hardware IDs block, so an empty parse means either a non-driver record or
+    # a markup change the caller should surface).
+    param([string[]]$PackageHwids, [string[]]$DeviceHwids)
+    if (-not $DeviceHwids -or @($DeviceHwids).Count -eq 0) { return $true }
+    if (-not $PackageHwids -or @($PackageHwids).Count -eq 0) { return $false }
+    foreach ($p in $PackageHwids) {
+        foreach ($dh in $DeviceHwids) {
+            if ($p.Contains($dh)) { return $true }
+        }
+    }
     return $false
 }
 
@@ -265,6 +319,8 @@ function Invoke-DriverScrape {
     if (-not (Test-Path $vendorRoot)) { New-Item -ItemType Directory -Path $vendorRoot -Force | Out-Null }
 
     $Manifest = [System.Collections.Generic.List[string]]::new()
+    # Per-device-key hwid patterns, reused by the post-extract INF verification.
+    $DeviceHwidLookup = @{}
 
     foreach ($Target in $Config.Targets) {
         Write-Host "`n=> Investigating Microsoft Update Catalog for $($Target.Name)..." -ForegroundColor Cyan
@@ -274,6 +330,9 @@ function Invoke-DriverScrape {
             $deviceKey = $Device.Key
             $label = $Device.Label
             $titleExclude = if ($Device.ContainsKey('TitleExclude')) { @($Device.TitleExclude) } else { @() }
+            $deviceHwids = Get-CsDeviceHwids $Device
+            $DeviceHwidLookup[$deviceKey] = $deviceHwids
+            $hwidRejected = 0
             $seenIds = [System.Collections.Generic.HashSet[string]]::new()
 
             # Expand each base query into its dual-query-union variants, then dedup.
@@ -313,6 +372,14 @@ function Invoke-DriverScrape {
                     if (-not $d) { continue }
                     if ($d.Arch -notin $AcceptedArchs) { continue }
                     if (Test-CsTitleExcluded -Title $d.Title -Patterns $titleExclude) { continue }
+                    # HWID verification (pre-download): the record's Supported Hardware IDs
+                    # must include one of this device's hwids. Kills wrong-device picks that
+                    # relevance search drags into the 25-row window (e.g. an RTL8168 ARM64
+                    # record surfacing under the DEV_8127 query).
+                    if (-not (Test-CsHwidMatch -PackageHwids $d.Hwids -DeviceHwids $deviceHwids)) {
+                        $hwidRejected++
+                        continue
+                    }
                     if (-not $seenIds.Add($d.Id)) { continue }  # dedup across this device's queries
 
                     $ver = ConvertTo-CsVersion $d.Version
@@ -333,6 +400,10 @@ function Invoke-DriverScrape {
                         PreferredBranches = if ($Device.ContainsKey('PreferredBranches')) { @($Device.PreferredBranches) } else { @() }
                     }
                 }
+            }
+
+            if ($hwidRejected -gt 0) {
+                Write-Host "      [i] $label : $hwidRejected candidate(s) rejected by hwid verification." -ForegroundColor DarkGray
             }
         }
 
@@ -423,6 +494,32 @@ function Invoke-DriverScrape {
 
             $infCount = @(Get-ChildItem -Path $extractDir -Recurse -Filter *.inf -ErrorAction SilentlyContinue).Count
             $sysCount = @(Get-ChildItem -Path $extractDir -Recurse -Filter *.sys -ErrorAction SilentlyContinue).Count
+
+            # HWID verification (post-extract, ground truth): the shipped INF must actually
+            # list one of this device's hwids. The pre-download check trusts the catalog
+            # page; this one trusts nothing. Remove the extract on failure so DISM
+            # /Add-Driver /Recurse can never inject a wrong-device package.
+            $hwidPatterns = $DeviceHwidLookup[$deviceKey]
+            if ($infCount -gt 0 -and $hwidPatterns -and @($hwidPatterns).Count -gt 0) {
+                $infHit = $false
+                foreach ($inf in (Get-ChildItem -Path $extractDir -Recurse -Filter *.inf -ErrorAction SilentlyContinue)) {
+                    # Get-Content -Raw honors the BOM, so UTF-16 INFs read correctly.
+                    $infText = Get-Content -Raw -LiteralPath $inf.FullName -ErrorAction SilentlyContinue
+                    if (-not $infText) { continue }
+                    $infText = $infText.ToLowerInvariant()
+                    foreach ($p in $hwidPatterns) {
+                        if ($infText.Contains($p)) { $infHit = $true; break }
+                    }
+                    if ($infHit) { break }
+                }
+                if (-not $infHit) {
+                    Write-Warning "INF hwid verification FAILED for $label [$arch]: extracted INF(s) list none of [$($hwidPatterns -join ', ')] — discarding package $($best.Id)."
+                    Remove-Item $extractDir -Recurse -Force -ErrorAction SilentlyContinue
+                    $Manifest.Add("SKIPPED: $label [$arch] (INF hwid verification failed)")
+                    continue
+                }
+            }
+
             if ($infCount -gt 0 -and $sysCount -gt 0) {
                 $Manifest.Add("ACQUIRED: $label [$arch]")
             }
@@ -470,5 +567,6 @@ Export-ModuleMember -Function @(
     'Invoke-CsRequest', 'Get-CsDetail',
     'Get-CsAcceptedArch', 'Get-CsCatalogTotal', 'Get-CsCatalogUpdateId', 'Expand-CsQuery',
     'ConvertTo-CsVersion', 'ConvertTo-CsDate', 'ConvertFrom-CsDetailHtml',
-    'Test-CsTitleExcluded', 'Get-CsBranchRank', 'Select-CsBestPackage'
+    'Test-CsTitleExcluded', 'Get-CsDeviceHwids', 'Test-CsHwidMatch',
+    'Get-CsBranchRank', 'Select-CsBestPackage'
 )

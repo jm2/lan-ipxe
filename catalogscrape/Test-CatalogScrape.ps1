@@ -68,6 +68,17 @@ $detailHtml = if (Test-Path $detailFixture) { Get-Content $detailFixture -Raw } 
 <div>Architecture: AMD64</div>
 <span id="ScopedViewHandler_version">2.1.5.10</span>
 <span id="ScopedViewHandler_versionDate">12/29/2025</span>
+<div class="tabDriverPackageContentBox" id="driverhwIDs" TABINDEX="1">
+    <div style="padding-bottom: 0.3em;">
+        PCI\VEN_8086&amp;DEV_15F3&amp;SUBSYS_00008086
+    </div>
+    <div style="padding-bottom: 0.3em;">
+        pci\ven_8086&amp;dev_15f2
+    </div>
+</div>
+<div class="tabDriverPackageContentBox" id="driverupdateIDs" TABINDEX="1">
+    <div>99d896e5-2483-4db0-b181-c2eccd77e8a7</div>
+</div>
 '@ }
 $d = ConvertFrom-CsDetailHtml -Content $detailHtml -Id 'test-id'
 Assert { $null -ne $d } 'parsed non-null'
@@ -75,6 +86,8 @@ Assert { $d.Version -eq '2.1.5.10' } "version 2.1.5.10 (got '$($d.Version)')"
 Assert { $d.DateObj -eq [datetime]'2025-12-29' } 'versionDate 12/29/2025'
 Assert { $d.Arch -eq 'AMD64' } "arch AMD64 (got '$($d.Arch)')"
 Assert { $d.Title -like 'Intel Net Driver Update*' } 'title parsed'
+Assert { @($d.Hwids).Count -eq 2 } "2 hwids parsed (got $(@($d.Hwids).Count))"
+Assert { $d.Hwids -contains 'pci\ven_8086&dev_15f3&subsys_00008086' } 'hwid &amp;-decoded + lowercased'
 Assert { $null -eq (ConvertFrom-CsDetailHtml -Content '<html>no fields</html>' -Id 'x') } 'missing version/date -> null'
 
 '== Test-CsTitleExcluded =='
@@ -82,6 +95,22 @@ Assert { Test-CsTitleExcluded 'Qualcomm Bluetooth UART' @('NDIS', '(?i)bluetooth
 Assert { Test-CsTitleExcluded 'Legacy NDIS adapter' @('NDIS') } 'NDIS excluded'
 Assert { -not (Test-CsTitleExcluded 'WCN6855 Wi-Fi' @('NDIS', '(?i)bluetooth|uart')) } 'wifi kept'
 Assert { -not (Test-CsTitleExcluded 'anything' @()) } 'empty patterns -> kept'
+
+'== Get-CsDeviceHwids (patterns from HWID-shaped queries + optional Hwids key) =='
+$devMixed = @{ Key = 'x'; Label = 'x'; Queries = @('VEN_14C3&DEV_7925', 'MT7925', 'VID_0BDA&PID_8157', 'Killer AX500') }
+$hw = Get-CsDeviceHwids $devMixed
+Assert { @($hw).Count -eq 2 } "2 patterns from mixed queries (got $(@($hw).Count))"
+Assert { $hw -contains 'ven_14c3&dev_7925' -and $hw -contains 'vid_0bda&pid_8157' } 'patterns lowercased, names skipped'
+$devExplicit = @{ Key = 'x'; Label = 'x'; Queries = @('Marvell FastLinQ'); Hwids = @('VEN_1077&DEV_8070') }
+Assert { (Get-CsDeviceHwids $devExplicit) -contains 'ven_1077&dev_8070' } 'explicit Hwids key honored'
+Assert { @(Get-CsDeviceHwids @{ Key = 'x'; Label = 'x'; Queries = @('name only') }).Count -eq 0 } 'name-only device -> no patterns'
+
+'== Test-CsHwidMatch (pre-download hwid verification) =='
+$pkgHwids = @('pci\ven_10ec&dev_8168&rev_15', 'pci\ven_10ec&dev_8161&rev_15')
+Assert { Test-CsHwidMatch -PackageHwids $pkgHwids -DeviceHwids @('ven_10ec&dev_8168') } 'substring match accepts'
+Assert { -not (Test-CsHwidMatch -PackageHwids $pkgHwids -DeviceHwids @('ven_10ec&dev_8127')) } 'wrong-device record rejected (RTL8168 pkg vs DEV_8127)'
+Assert { Test-CsHwidMatch -PackageHwids @() -DeviceHwids @() } 'no device patterns -> verification skipped'
+Assert { -not (Test-CsHwidMatch -PackageHwids @() -DeviceHwids @('ven_10ec&dev_8127')) } 'patterns present but empty page hwids -> fail closed'
 
 '== Expand-CsQuery (dual-query union for HWID-shaped queries) =='
 $exHwid = Expand-CsQuery 'VEN_8086&DEV_1592'
@@ -118,7 +147,7 @@ Assert { $null -ne $bestTie } 'equal-version tiebreak returns a deterministic pi
 '== .psd1 data tables load + schema =='
 $expectKeys = @{
     'intel-eth.psd1'  = 10; 'intel-wifi.psd1' = 2; 'marvell.psd1' = 2
-    'realtek.psd1'    = 8; 'qualcomm.psd1' = 3; 'mediatek.psd1' = 5; 'broadcom.psd1' = 3
+    'realtek.psd1'    = 8; 'qualcomm.psd1' = 3; 'mediatek.psd1' = 2; 'broadcom.psd1' = 3
     # GPU graphics tables (catalog-sourced, post-boot convenience — same engine, no Source block)
     'intel-gfx.psd1'  = 1; 'nvidia-gfx.psd1' = 2; 'amd-gfx.psd1' = 5
 }
@@ -150,12 +179,17 @@ $iw = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'intel-wifi.psd1')
 $be = $iw.Targets.Devices | Where-Object Key -eq 'BE200'
 Assert { $be.Queries[0] -eq 'VEN_8086&DEV_272B' } 'BE200 keeps correct 272B (not gonefishin 2725)'
 $md = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'mediatek.psd1')
-$mt7925 = $md.Targets.Devices | Where-Object Key -eq '7925'
-Assert { $mt7925.PreferredBranches[0] -eq '26.40' } 'MT7925 preferred branch refreshed to 26.40'
-Assert { $mt7925.PreferredBranches -contains '6.4' } 'MT7925 lists the ARM64-only 6.4 branch'
-Assert { $mt7925.Queries -contains 'VEN_14C3&DEV_0717' } 'MT7925 covers the RZ717 rebrand hwid'
-$mt7927 = $md.Targets.Devices | Where-Object Key -eq '7927'
-Assert { ($mt7927.Queries -contains 'VEN_14C3&DEV_0738') -and ($mt7927.Queries -contains 'VEN_14C3&DEV_6639') } 'MT7927 covers the RZ738 rebrand + MT6639 silicon hwids'
+Assert { @($md.Targets.Devices).Count -eq 2 } 'mediatek consolidated to 2 family devices (one unified INF per generation)'
+$mtW6 = $md.Targets.Devices | Where-Object Key -eq 'WiFi6'
+Assert { ($mtW6.Queries -contains 'VEN_14C3&DEV_7961') -and ($mtW6.Queries -contains 'VEN_14C3&DEV_0608') -and ($mtW6.Queries -contains 'VEN_14C3&DEV_0616') } 'WiFi6 family covers MT7921/RZ608/RZ616 hwids'
+Assert { $mtW6.PreferredBranches[0] -eq '26.40' } 'WiFi6 top branch 26.40 (renumbered from 3.5)'
+$mtW7 = $md.Targets.Devices | Where-Object Key -eq 'WiFi7'
+Assert { ($mtW7.Queries -contains 'VEN_14C3&DEV_7925') -and ($mtW7.Queries -contains 'VEN_14C3&DEV_7927') } 'WiFi7 family covers MT7925+MT7927 hwids'
+Assert { ($mtW7.Queries -contains 'VEN_14C3&DEV_0717') -and ($mtW7.Queries -contains 'VEN_14C3&DEV_0738') -and ($mtW7.Queries -contains 'VEN_14C3&DEV_6639') } 'WiFi7 family covers RZ717/RZ738/MT6639 hwids'
+Assert { $mtW7.PreferredBranches -contains '6.4' } 'WiFi7 lists the ARM64-only 6.4 branch'
+$qc = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'qualcomm.psd1')
+$qca6390 = $qc.Targets.Devices | Where-Object Key -eq '1101'
+Assert { $qca6390.PreferredBranches[0] -eq '1.0' } 'QCA6390 branch refreshed to 1.0 (x64 line ended 2021)'
 
 # GPU graphics tables: unified Intel device, NVIDIA consumer/pro split, AMD Radeon Pro present.
 $ig = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'intel-gfx.psd1')
