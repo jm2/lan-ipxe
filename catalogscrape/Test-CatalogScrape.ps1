@@ -151,7 +151,11 @@ $be = $iw.Targets.Devices | Where-Object Key -eq 'BE200'
 Assert { $be.Queries[0] -eq 'VEN_8086&DEV_272B' } 'BE200 keeps correct 272B (not gonefishin 2725)'
 $md = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'mediatek.psd1')
 $mt7925 = $md.Targets.Devices | Where-Object Key -eq '7925'
-Assert { $mt7925.PreferredBranches[0] -eq '26.30' } 'MT7925 preferred branch refreshed to 26.30'
+Assert { $mt7925.PreferredBranches[0] -eq '26.40' } 'MT7925 preferred branch refreshed to 26.40'
+Assert { $mt7925.PreferredBranches -contains '6.4' } 'MT7925 lists the ARM64-only 6.4 branch'
+Assert { $mt7925.Queries -contains 'VEN_14C3&DEV_0717' } 'MT7925 covers the RZ717 rebrand hwid'
+$mt7927 = $md.Targets.Devices | Where-Object Key -eq '7927'
+Assert { ($mt7927.Queries -contains 'VEN_14C3&DEV_0738') -and ($mt7927.Queries -contains 'VEN_14C3&DEV_6639') } 'MT7927 covers the RZ738 rebrand + MT6639 silicon hwids'
 
 # GPU graphics tables: unified Intel device, NVIDIA consumer/pro split, AMD Radeon Pro present.
 $ig = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'intel-gfx.psd1')

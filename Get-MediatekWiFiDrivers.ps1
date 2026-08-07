@@ -5,9 +5,11 @@
 
     .DESCRIPTION
     Thin shim over catalogscrape\CatalogScrape.psm1, driven by catalogscrape\mediatek.psd1.
-    Covers MT7921/MT7921K/MT7922/MT7925/MT7927 (native ARM64 included via -Architecture).
-    Bluetooth/UART combo-chip entries are excluded by title; selection is highest-version-first,
-    so the current 26.30 branch wins for MT7925/MT7927.
+    Covers MT7921/MT7921K(RZ608)/MT7922(RZ616)/MT7925(RZ717)/MT7927(RZ738/MT6639).
+    Bluetooth/UART combo-chip entries are excluded by title; selection is highest-version-first
+    per Key+Arch group: x64 picks the 26.40 branch for MT7925/MT7927, while -Architecture
+    arm64/all picks the ARM64-only 6.4 branch (first shipped 6.4.0.3037, May 2026 — one
+    package covers both chips and the RZ rebrands).
 
     .NOTES
     SCOPE: POST-BOOT CONVENIENCE drivers only. Wi-Fi cannot serve iSCSI/PXE boot, so nothing
