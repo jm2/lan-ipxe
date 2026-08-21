@@ -188,7 +188,7 @@ fi
 #--- Packages ---------------------------------------------------------------
 log "Installing podman + baseline packages"
 dnf -y install podman container-selinux openssl \
-  dnf-automatic NetworkManager-wifi nano net-tools rsync udisks2 \
+  dnf-automatic git NetworkManager-wifi nano net-tools rsync udisks2 \
   vim-enhanced wget iperf3 bash-completion \
   pciutils usbutils >/dev/null
 if (( ENABLE_DNS )); then
