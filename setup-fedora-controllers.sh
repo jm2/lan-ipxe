@@ -599,10 +599,11 @@ grep -Eq '^[[:space:]]*conf-dir=/etc/dnsmasq\.d' /etc/dnsmasq.conf \
   || echo 'conf-dir=/etc/dnsmasq.d' >> /etc/dnsmasq.conf
 
 # Stock Fedora/EL dnsmasq.conf ships an ACTIVE local-service line (newer
-# builds even local-service=host = localhost-only, useless for a LAN
-# resolver), and dnsmasq fatals on a repeated keyword. Comment the stock
-# line out so lan-dns.conf's subnet-scoped local-service is the only one.
-# (Idempotent: once commented, the pattern no longer matches.)
+# builds even local-service=host = localhost-only). Our except-interface
+# option makes any local-service inert (documented), but comment the
+# stock line out anyway so the config doesn't pretend to a protection it
+# isn't providing. (Idempotent: once commented, the pattern no longer
+# matches.)
 sed -i -E 's/^[[:space:]]*local-service.*/#&/' /etc/dnsmasq.conf
 
 cat > /etc/dnsmasq.d/lan-dns.conf <<EOF
@@ -614,8 +615,15 @@ cat > /etc/dnsmasq.d/lan-dns.conf <<EOF
 domain-needed
 bogus-priv
 
-# Answer only hosts on directly attached subnets - a LAN resolver, not open
-local-service
+# Bind addresses individually as interfaces appear - NEVER the 0.0.0.0
+# wildcard: podman's aardvark-dns holds <gateway>:53 on every container
+# network (that is how the containers resolve each other, e.g. unifi-db)
+# and a wildcard bind collides with it. Skip the podman bridges; the
+# containers use aardvark, not us. NOTE: an except-interface option makes
+# dnsmasq ignore local-service (documented behaviour), so LAN-only
+# exposure comes from firewalld and RFC1918 addressing instead.
+bind-dynamic
+except-interface=podman*
 
 # Upstreams: Cloudflare + Google, IPv4 + IPv6; never read /etc/resolv.conf.
 # dnsmasq favours whichever of these is answering.
@@ -940,8 +948,13 @@ if (( ENABLE_DNS )); then
       die "dnsmasq --test failed on the merged config"
     fi
     log "Restarting dnsmasq (inputs changed or not running)"
-    systemctl restart dnsmasq.service
-    record_applied dnsmasq "${DNSMASQ_FILES[@]}"
+    # Non-fatal here: a dnsmasq failure must never strand the containers
+    # stopped mid-run - the verify section below still fails the run
+    if systemctl restart dnsmasq.service; then
+      record_applied dnsmasq "${DNSMASQ_FILES[@]}"
+    else
+      warn "dnsmasq failed to start - continuing so the containers still come up; see: journalctl -eu dnsmasq.service"
+    fi
   else
     log "dnsmasq unchanged - leaving it running"
   fi
