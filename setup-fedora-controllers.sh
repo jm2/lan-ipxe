@@ -19,6 +19,10 @@
 # the podman bridge network. Use set-inform / controller IP / DHCP opt 43+138.
 #
 # Idempotent: safe to re-run; credentials and data are always preserved.
+# Re-runs restart only services whose input files changed since their last
+# successful start (or that aren't running) - a no-op re-run leaves every
+# running service untouched, so it costs zero downtime. JVM restarts take
+# minutes on this hardware, which is why this is worth the bookkeeping.
 # If the very first MongoDB init is interrupted, wipe /opt/unifi/db and
 # re-run (the init script only executes against an empty db dir).
 #
@@ -65,6 +69,8 @@ OMADA_DIR=/opt/omada
 UNIFI_DIR=/opt/unifi
 SS_DIR=/opt/shadowsocks
 QUADLET_DIR=/etc/containers/systemd
+# Per-service hash of the inputs in force at its last successful start
+STATE_DIR=/var/lib/controller-setup
 # Holds every generated secret; same path on every box regardless of flags
 CRED_FILE=${UNIFI_DIR}/credentials.env
 OMADA_IMAGE=docker.io/mbentley/omada-controller:6.2-openj9
@@ -279,11 +285,44 @@ systemctl enable --now dnf-automatic.timer >/dev/null 2>&1 \
   || die "could not enable dnf-automatic.timer"
 
 #--- Directories ------------------------------------------------------------
-mkdir -p "${UNIFI_DIR}" "${QUADLET_DIR}"   # CRED_FILE lives in UNIFI_DIR on every box
+mkdir -p "${UNIFI_DIR}" "${QUADLET_DIR}" "${STATE_DIR}"   # CRED_FILE lives in UNIFI_DIR on every box
 if (( ENABLE_OMADA ));       then mkdir -p "${OMADA_DIR}"/{data,logs}; fi
 if (( ENABLE_MONGO ));       then mkdir -p "${UNIFI_DIR}"/db; fi
 if (( ENABLE_UNIFI ));       then mkdir -p "${UNIFI_DIR}"/config; fi
 if (( ENABLE_SHADOWSOCKS )); then mkdir -p "${SS_DIR}"; fi
+
+#--- Change tracking: restart only services whose inputs changed ------------
+# A service's inputs are the config files this script writes for it. At
+# each successful (re)start its combined hash is recorded in ${STATE_DIR};
+# a later run restarts the service only when the current files differ from
+# that record, or when it isn't running. This catches script changes,
+# manual edits under /etc, and a run interrupted between write and restart
+# - while a no-op re-run leaves every running service untouched. Images
+# are pinned (never re-pulled), so an image change always appears as a
+# quadlet Image= edit, i.e. file hashes cover images too.
+UNIFI_DB_FILES=("${QUADLET_DIR}/unifi-db.container" "${QUADLET_DIR}/unifi.network"
+                "${UNIFI_DIR}/unifi-db.env" "${UNIFI_DIR}/init-mongo.sh")
+OMADA_FILES=("${QUADLET_DIR}/omada.container" "${OMADA_DIR}/omada.env")
+UNIFI_FILES=("${QUADLET_DIR}/unifi.container" "${UNIFI_DIR}/unifi.env")
+SS_FILES=("${QUADLET_DIR}/shadowsocks.container" "${SS_DIR}/config.json")
+# hagezi-pro.conf and lancache.conf are excluded on purpose: their own
+# updater/toggle already restart dnsmasq exactly when they change
+DNSMASQ_FILES=(/etc/dnsmasq.conf /etc/dnsmasq.d/lan-dns.conf)
+
+# The || true keeps a missing input file from tripping set -e/pipefail:
+# it still changes the hash (restart), it must never kill the script
+input_hash() { { sha256sum "$@" 2>/dev/null || true; } | sha256sum | awk '{print $1}'; }
+needs_restart() {  # <svc> <input files...>
+  local svc=$1; shift
+  systemctl is-active --quiet "${svc}.service" || return 0
+  [[ $(input_hash "$@") == $(cat "${STATE_DIR}/${svc}.applied" 2>/dev/null) ]] \
+    && return 1
+  return 0
+}
+record_applied() {  # <svc> <input files...>
+  local svc=$1; shift
+  input_hash "$@" > "${STATE_DIR}/${svc}.applied"
+}
 
 #--- Credentials (generated once, reused on re-run) -------------------------
 if [[ ! -f ${CRED_FILE} ]]; then
@@ -742,27 +781,30 @@ fi
 # unit still exists (before the daemon-reload below removes it)
 if (( ! ENABLE_UNIFI )); then
   systemctl stop unifi.service 2>/dev/null || true
-  rm -f "${QUADLET_DIR}/unifi.container" "${UNIFI_DIR}/unifi.env"
+  rm -f "${QUADLET_DIR}/unifi.container" "${UNIFI_DIR}/unifi.env" \
+        "${STATE_DIR}/unifi.applied"
 fi
 if (( ! ENABLE_OMADA )); then
   systemctl stop omada.service 2>/dev/null || true
-  rm -f "${QUADLET_DIR}/omada.container" "${OMADA_DIR}/omada.env"
+  rm -f "${QUADLET_DIR}/omada.container" "${OMADA_DIR}/omada.env" \
+        "${STATE_DIR}/omada.applied"
 fi
 if (( ! ENABLE_SHADOWSOCKS )); then
   systemctl stop shadowsocks.service 2>/dev/null || true
-  rm -f "${QUADLET_DIR}/shadowsocks.container"
+  rm -f "${QUADLET_DIR}/shadowsocks.container" "${STATE_DIR}/shadowsocks.applied"
 fi
 if (( ! ENABLE_MONGO )); then
   systemctl stop unifi-db.service 2>/dev/null || true
   rm -f "${QUADLET_DIR}/unifi-db.container" "${QUADLET_DIR}/unifi.network" \
-        "${UNIFI_DIR}/unifi-db.env" "${UNIFI_DIR}/init-mongo.sh"
+        "${UNIFI_DIR}/unifi-db.env" "${UNIFI_DIR}/init-mongo.sh" \
+        "${STATE_DIR}/unifi-db.applied"
 fi
 if (( ! ENABLE_DNS )); then
   systemctl disable --now hagezi-update.timer lancache-watch.timer 2>/dev/null || true
   systemctl disable --now dnsmasq.service 2>/dev/null || true
   rm -f /etc/dnsmasq.d/lan-dns.conf "${HAGEZI_CONF}" "${HAGEZI_CONF}.old" \
         "${LANCACHE_CONF}" "${DNS_UPDATE_SCRIPT}" "${LANCACHE_TOGGLE}" \
-        /run/lancache-dns.state \
+        /run/lancache-dns.state "${STATE_DIR}/dnsmasq.applied" \
         /etc/systemd/system/hagezi-update.{service,timer} \
         /etc/systemd/system/lancache-watch.{service,timer}
   # /etc/systemd/resolved.conf.d/10-no-stub-listener.conf is left alone -
@@ -827,12 +869,35 @@ for u in "${SERVICES[@]}"; do
     || die "Quadlet generation failed for ${u}.service. Debug with: /usr/lib/systemd/system-generators/podman-system-generator --dryrun"
 done
 
-# Stop-then-start (rather than plain start) so re-runs apply config changes
-systemctl stop unifi.service omada.service shadowsocks.service unifi-db.service 2>/dev/null || true
+# Decide the restart set: only services whose inputs changed (or that
+# aren't running). A unifi-db restart implies both apps - stopping the db
+# stops them anyway (Requires=), and they need a clean reconnect.
+RESTART_DB=0 RESTART_UNIFI=0 RESTART_OMADA=0 RESTART_SS=0
+if (( ENABLE_MONGO ))       && needs_restart unifi-db    "${UNIFI_DB_FILES[@]}"; then RESTART_DB=1; fi
+if (( ENABLE_UNIFI ))       && needs_restart unifi       "${UNIFI_FILES[@]}";    then RESTART_UNIFI=1; fi
+if (( ENABLE_OMADA ))       && needs_restart omada       "${OMADA_FILES[@]}";    then RESTART_OMADA=1; fi
+if (( ENABLE_SHADOWSOCKS )) && needs_restart shadowsocks "${SS_FILES[@]}";       then RESTART_SS=1; fi
+if (( RESTART_DB )); then
+  RESTART_UNIFI=${ENABLE_UNIFI}
+  RESTART_OMADA=${ENABLE_OMADA}
+fi
+
+# Stop the restart set up front (apps before their db), then start below
+if (( RESTART_UNIFI )); then systemctl stop unifi.service 2>/dev/null || true; fi
+if (( RESTART_OMADA )); then systemctl stop omada.service 2>/dev/null || true; fi
+if (( RESTART_SS ));    then systemctl stop shadowsocks.service 2>/dev/null || true; fi
+if (( RESTART_DB ));    then systemctl stop unifi-db.service 2>/dev/null || true; fi
 
 if (( ENABLE_MONGO )); then
-# Notify=healthy in the quadlet: start blocks until mongod answers ping
+if (( RESTART_DB )); then
+  log "Starting unifi-db (inputs changed or not running)"
+else
+  log "unifi-db unchanged - leaving it running"
+fi
+# No-op when already running, so the user verification below still runs.
+# Notify=healthy in the quadlet: a real start blocks until mongod answers ping
 systemctl start unifi-db.service
+record_applied unifi-db "${UNIFI_DB_FILES[@]}"
 
 # The healthcheck can also be satisfied by the entrypoint's temporary
 # first-init instance. Require real auth + both app users before starting
@@ -867,14 +932,19 @@ if (( ENABLE_DNS )); then
     || warn "initial hagezi pull failed - dnsmasq starts without the blocklist (hagezi-update.timer retries daily)"
   systemctl enable --now hagezi-update.timer >/dev/null 2>&1 \
     || die "could not enable hagezi-update.timer"
-  # Gate on the MERGED config (stock conf + conf-dir) so a conflict dies
-  # here with the parser's message, not as a failed unit after the fact
-  if ! dnsmasq --test >/dev/null 2>&1; then
-    dnsmasq --test 2>&1 | tail -5 || true
-    die "dnsmasq --test failed on the merged config"
+  if needs_restart dnsmasq "${DNSMASQ_FILES[@]}"; then
+    # Gate on the MERGED config (stock conf + conf-dir) so a conflict dies
+    # here with the parser's message, not as a failed unit after the fact
+    if ! dnsmasq --test >/dev/null 2>&1; then
+      dnsmasq --test 2>&1 | tail -5 || true
+      die "dnsmasq --test failed on the merged config"
+    fi
+    log "Restarting dnsmasq (inputs changed or not running)"
+    systemctl restart dnsmasq.service
+    record_applied dnsmasq "${DNSMASQ_FILES[@]}"
+  else
+    log "dnsmasq unchanged - leaving it running"
   fi
-  # Restart (not just start) so re-runs apply config changes, like the containers
-  systemctl restart dnsmasq.service
   if [[ -n ${LANCACHE_IP} ]]; then
     systemctl enable --now lancache-watch.timer >/dev/null 2>&1 \
       || die "could not enable lancache-watch.timer"
@@ -899,18 +969,33 @@ wait_for() {
 # Start the JVM apps one at a time - concurrent first-runs of two JVMs
 # overcommit 2GB hard (first boot on this hardware can take several minutes)
 if (( ENABLE_UNIFI )); then
-  log "Starting unifi"
-  systemctl start unifi.service
-  wait_for "UniFi" https://localhost:8443
+  if (( RESTART_UNIFI )); then
+    log "Starting unifi"
+    systemctl start unifi.service
+    record_applied unifi "${UNIFI_FILES[@]}"
+    wait_for "UniFi" https://localhost:8443
+  else
+    log "unifi unchanged - leaving it running"
+  fi
 fi
 if (( ENABLE_OMADA )); then
-  log "Starting omada"
-  systemctl start omada.service
-  wait_for "Omada" https://localhost:8043
+  if (( RESTART_OMADA )); then
+    log "Starting omada"
+    systemctl start omada.service
+    record_applied omada "${OMADA_FILES[@]}"
+    wait_for "Omada" https://localhost:8043
+  else
+    log "omada unchanged - leaving it running"
+  fi
 fi
 if (( ENABLE_SHADOWSOCKS )); then
-  log "Starting shadowsocks"
-  systemctl start shadowsocks.service
+  if (( RESTART_SS )); then
+    log "Starting shadowsocks"
+    systemctl start shadowsocks.service
+    record_applied shadowsocks "${SS_FILES[@]}"
+  else
+    log "shadowsocks unchanged - leaving it running"
+  fi
 fi
 
 #--- Verify boot enablement -------------------------------------------------
