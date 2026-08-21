@@ -559,6 +559,13 @@ fi
 grep -Eq '^[[:space:]]*conf-dir=/etc/dnsmasq\.d' /etc/dnsmasq.conf \
   || echo 'conf-dir=/etc/dnsmasq.d' >> /etc/dnsmasq.conf
 
+# Stock Fedora/EL dnsmasq.conf ships an ACTIVE local-service line (newer
+# builds even local-service=host = localhost-only, useless for a LAN
+# resolver), and dnsmasq fatals on a repeated keyword. Comment the stock
+# line out so lan-dns.conf's subnet-scoped local-service is the only one.
+# (Idempotent: once commented, the pattern no longer matches.)
+sed -i -E 's/^[[:space:]]*local-service.*/#&/' /etc/dnsmasq.conf
+
 cat > /etc/dnsmasq.d/lan-dns.conf <<EOF
 # LAN resolver - written by setup-fedora-controllers.sh; edits are overwritten.
 # DNS only: no dhcp-range is configured anywhere, so the DHCP/TFTP engine
@@ -860,6 +867,12 @@ if (( ENABLE_DNS )); then
     || warn "initial hagezi pull failed - dnsmasq starts without the blocklist (hagezi-update.timer retries daily)"
   systemctl enable --now hagezi-update.timer >/dev/null 2>&1 \
     || die "could not enable hagezi-update.timer"
+  # Gate on the MERGED config (stock conf + conf-dir) so a conflict dies
+  # here with the parser's message, not as a failed unit after the fact
+  if ! dnsmasq --test >/dev/null 2>&1; then
+    dnsmasq --test 2>&1 | tail -5 || true
+    die "dnsmasq --test failed on the merged config"
+  fi
   # Restart (not just start) so re-runs apply config changes, like the containers
   systemctl restart dnsmasq.service
   if [[ -n ${LANCACHE_IP} ]]; then
