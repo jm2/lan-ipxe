@@ -5,15 +5,24 @@
 #
 # Architecture: ONE shared MongoDB container (unifi-db) serves both apps.
 #   - AVX CPU:    mongo:8.0
-#   - no AVX:     mongo:4.4 (last pre-AVX major; same pairing TP-Link ships
-#                 for native installs)
-#   Omada always runs mbentley/omada-controller:6.2 with MONGO_EXTERNAL=true.
+#   - no AVX:     mongo:4.4 (last pre-AVX major; the external-Mongo path
+#                 mbentley documents for non-AVX hosts. 4.4 is EOL -
+#                 accepted risk: LAN-only, never published to the host)
+#   Omada always runs mbentley/omada-controller:6.2-openj9 (OpenJ9 JVM,
+#   30-50% lower RSS than HotSpot - matters on 2GB) with MONGO_EXTERNAL=true.
+#   All app images are PINNED: pulled once, never re-pulled or auto-updated.
+#   To update deliberately: podman pull <image> && systemctl restart <svc>,
+#   then podman image prune -f. Before updating unifi, confirm the new
+#   version still supports MongoDB 4.4 (its mongo floor will rise one day).
+#
+# Adoption is L3-only: discovery broadcasts (10001/29810/udp) do not cross
+# the podman bridge network. Use set-inform / controller IP / DHCP opt 43+138.
 #
 # Idempotent: safe to re-run; credentials and data are always preserved.
 # If the very first MongoDB init is interrupted, wipe /opt/unifi/db and
 # re-run (the init script only executes against an empty db dir).
 #
-# Includes small-disk/eMMC hygiene: image prune after every auto-update,
+# Includes small-disk/eMMC hygiene: superseded-image cleanup,
 # 2-kernel retention, capped journal, zram swap, dnf cache cleanup,
 # ext4 root reserve trimmed to 1%, fstrim.timer enabled.
 # Also installs the box's baseline package set and enables dnf-automatic
@@ -35,7 +44,7 @@ UNIFI_DIR=/opt/unifi
 SS_DIR=/opt/shadowsocks
 QUADLET_DIR=/etc/containers/systemd
 CRED_FILE=${UNIFI_DIR}/credentials.env
-OMADA_IMAGE=docker.io/mbentley/omada-controller:6.2
+OMADA_IMAGE=docker.io/mbentley/omada-controller:6.2-openj9
 UNIFI_IMAGE=lscr.io/linuxserver/unifi-network-application:latest
 SS_IMAGE=ghcr.io/shadowsocks/ssserver-rust:latest
 SS_PORT=8388
@@ -51,7 +60,15 @@ die()  { printf '\033[1;31m==> ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 [[ ${EUID} -eq 0 ]] || die "Run as root."
 
-TZ_VAL=$(timedatectl show -p Timezone --value 2>/dev/null) || TZ_VAL=Etc/UTC
+# Preflight: image pulls need ~1.9GB; manual updates hold old+new layers
+AVAIL_MB=$(df --output=avail -BM / | tail -1 | tr -dc '0-9')
+(( AVAIL_MB >= 2048 )) \
+  || die "Only ${AVAIL_MB}MB free on / - need at least 2GB for image pulls."
+(( AVAIL_MB >= 3584 )) \
+  || warn "${AVAIL_MB}MB free on / - image updates need ~1.5GB transient headroom"
+
+TZ_VAL=$(timedatectl show -p Timezone --value 2>/dev/null) || TZ_VAL=
+[[ -n ${TZ_VAL} ]] || TZ_VAL=Etc/UTC
 log "Timezone: ${TZ_VAL}"
 
 #--- AVX check -> MongoDB tag (Omada is 6.2 either way) ---------------------
@@ -71,7 +88,7 @@ dnf -y install podman container-selinux openssl \
   pciutils usbutils >/dev/null
 
 #--- Small-disk / eMMC hygiene ----------------------------------------------
-log "Applying small-disk hygiene (kernel retention, journal cap, prune hook, zram)"
+log "Applying small-disk hygiene (kernel retention, journal cap, zram)"
 
 # Keep at most 2 installed kernels (default is 3)
 if grep -q '^installonly_limit=' /etc/dnf/dnf.conf; then
@@ -90,19 +107,33 @@ SystemMaxUse=100M
 EOF
 systemctl restart systemd-journald
 
-# Prune dangling images every time podman-auto-update runs so superseded
-# image layers never accumulate after container updates
-mkdir -p /etc/systemd/system/podman-auto-update.service.d
-cat > /etc/systemd/system/podman-auto-update.service.d/10-prune.conf <<EOF
-[Service]
-ExecStartPost=/usr/bin/podman image prune -f
-EOF
+# Images are pinned - make sure auto-update machinery from earlier runs of
+# this script is off, and drop its prune hook if present
+systemctl disable --now podman-auto-update.timer >/dev/null 2>&1 || true
+rm -f /etc/systemd/system/podman-auto-update.service.d/10-prune.conf
 
-# zram swap instead of a disk swap partition (2GB RAM, eMMC endurance)
+# zram swap instead of a disk swap partition (2GB RAM, eMMC endurance).
+# Sized to full RAM (default is ram/2): both JVMs + mongod overcommit 2GB,
+# so swap capacity matters more than the compressed-pages RAM cost.
 if dnf -y install zram-generator-defaults >/dev/null 2>&1; then
+  cat > /etc/systemd/zram-generator.conf <<EOF
+[zram0]
+zram-size = ram
+compression-algorithm = zstd
+EOF
+  cat > /etc/sysctl.d/99-zram.conf <<EOF
+# zram-friendly paging: push cold anon pages to compressed RAM early
+vm.swappiness = 180
+vm.page-cluster = 0
+EOF
+  sysctl -q --system >/dev/null
   systemctl daemon-reload
-  systemctl start systemd-zram-setup@zram0.service 2>/dev/null \
-    || warn "zram will activate on next boot"
+  if [[ -e /dev/zram0 ]]; then
+    warn "zram0 already active - new size takes effect on next boot"
+  else
+    systemctl start systemd-zram-setup@zram0.service 2>/dev/null \
+      || warn "zram will activate on next boot"
+  fi
 else
   warn "zram-generator-defaults not available - skipping zram setup"
 fi
@@ -115,7 +146,8 @@ if [[ $(findmnt -n -o FSTYPE /) == ext4 ]]; then
 else
   warn "root is not ext4 - skipping tune2fs root-reserve trim"
 fi
-systemctl enable --now fstrim.timer >/dev/null 2>&1
+systemctl enable --now fstrim.timer >/dev/null 2>&1 \
+  || warn "could not enable fstrim.timer"
 
 dnf clean all >/dev/null
 
@@ -135,7 +167,8 @@ set_automatic() {
 }
 set_automatic apply_updates yes
 set_automatic reboot when-needed
-systemctl enable --now dnf-automatic.timer >/dev/null 2>&1
+systemctl enable --now dnf-automatic.timer >/dev/null 2>&1 \
+  || die "could not enable dnf-automatic.timer"
 
 #--- Directories ------------------------------------------------------------
 mkdir -p "${OMADA_DIR}"/{data,logs} "${UNIFI_DIR}"/{config,db} "${SS_DIR}" "${QUADLET_DIR}"
@@ -160,6 +193,24 @@ grep -q '^SS_PASSWORD=' "${CRED_FILE}" \
 source "${CRED_FILE}"
 [[ -n ${MONGO_ROOT_PASS:-} && -n ${MONGO_UNIFI_PASS:-} && -n ${MONGO_OMADA_PASS:-} && -n ${SS_PASSWORD:-} ]] \
   || die "${CRED_FILE} is missing one of MONGO_ROOT_PASS / MONGO_UNIFI_PASS / MONGO_OMADA_PASS / SS_PASSWORD"
+
+# Secret-bearing env vars go into root-only files referenced from the
+# quadlets via EnvironmentFile= - quadlet Environment= would end up on
+# podman run's world-readable /proc/<pid>/cmdline
+install -m 600 /dev/null "${UNIFI_DIR}/unifi-db.env"
+cat > "${UNIFI_DIR}/unifi-db.env" <<EOF
+MONGO_INITDB_ROOT_PASSWORD=${MONGO_ROOT_PASS}
+MONGO_PASS=${MONGO_UNIFI_PASS}
+MONGO_OMADA_PASS=${MONGO_OMADA_PASS}
+EOF
+install -m 600 /dev/null "${UNIFI_DIR}/unifi.env"
+cat > "${UNIFI_DIR}/unifi.env" <<EOF
+MONGO_PASS=${MONGO_UNIFI_PASS}
+EOF
+install -m 600 /dev/null "${OMADA_DIR}/omada.env"
+cat > "${OMADA_DIR}/omada.env" <<EOF
+EAP_MONGOD_URI=mongodb://omada:${MONGO_OMADA_PASS}@unifi-db:27017/omada
+EOF
 
 #--- Mongo first-run init script (runs only against an empty /data/db) ------
 cat > "${UNIFI_DIR}/init-mongo.sh" <<'EOS'
@@ -221,15 +272,22 @@ Exec=--wiredTigerCacheSizeGB ${MONGO_CACHE_GB}
 Volume=${UNIFI_DIR}/db:/data/db:Z
 Volume=${UNIFI_DIR}/init-mongo.sh:/docker-entrypoint-initdb.d/init-mongo.sh:ro,Z
 Environment=MONGO_INITDB_ROOT_USERNAME=root
-Environment=MONGO_INITDB_ROOT_PASSWORD=${MONGO_ROOT_PASS}
 Environment=MONGO_USER=unifi
-Environment=MONGO_PASS=${MONGO_UNIFI_PASS}
 Environment=MONGO_DBNAME=unifi
 Environment=MONGO_AUTHSOURCE=admin
-Environment=MONGO_OMADA_PASS=${MONGO_OMADA_PASS}
+EnvironmentFile=${UNIFI_DIR}/unifi-db.env
+# Dependents wait for a mongod that actually answers, not just a spawned
+# container; generous start window covers post-crash repair on slow eMMC
+Notify=healthy
+HealthCmd=sh -c 'mongosh --quiet --eval "db.adminCommand({ping:1})" || mongo --quiet --eval "db.adminCommand({ping:1})"'
+HealthStartPeriod=120s
+# mongod gets podman's 10s SIGKILL by default - let it flush cleanly
+PodmanArgs=--stop-timeout=60
 
 [Service]
 Restart=on-failure
+TimeoutStartSec=900
+TimeoutStopSec=90
 
 [Install]
 WantedBy=multi-user.target
@@ -246,11 +304,10 @@ After=unifi-db.service
 
 [Container]
 Image=${OMADA_IMAGE}
-AutoUpdate=registry
 Network=unifi.network
 Environment=TZ=${TZ_VAL}
 Environment=MONGO_EXTERNAL=true
-Environment=EAP_MONGOD_URI=mongodb://omada:${MONGO_OMADA_PASS}@unifi-db:27017/omada
+EnvironmentFile=${OMADA_DIR}/omada.env
 Environment=PORTAL_HTTPS_PORT=8844
 Environment=JAVA_MAX_HEAP_SIZE=${OMADA_HEAP_MAX}
 Environment=JAVA_MIN_HEAP_SIZE=${OMADA_HEAP_MIN}
@@ -285,7 +342,6 @@ After=unifi-db.service
 
 [Container]
 Image=${UNIFI_IMAGE}
-AutoUpdate=registry
 Network=unifi.network
 Environment=PUID=1000
 Environment=PGID=1000
@@ -293,7 +349,7 @@ Environment=TZ=${TZ_VAL}
 Environment=MONGO_HOST=unifi-db
 Environment=MONGO_PORT=27017
 Environment=MONGO_USER=unifi
-Environment=MONGO_PASS=${MONGO_UNIFI_PASS}
+EnvironmentFile=${UNIFI_DIR}/unifi.env
 Environment=MONGO_DBNAME=unifi
 Environment=MONGO_AUTHSOURCE=admin
 Environment=MEM_LIMIT=${UNIFI_MEM_LIMIT}
@@ -335,7 +391,6 @@ Description=shadowsocks-rust server
 [Container]
 Image=${SS_IMAGE}
 ContainerName=shadowsocks
-AutoUpdate=registry
 Volume=${SS_DIR}/config.json:/etc/shadowsocks-rust/config.json:ro,Z
 PublishPort=${SS_PORT}:${SS_PORT}
 PublishPort=${SS_PORT}:${SS_PORT}/udp
@@ -359,10 +414,14 @@ else
   warn "firewalld not active - skipping firewall rules"
 fi
 
-#--- Pre-pull images --------------------------------------------------------
+#--- Pull images (once - images are pinned, re-runs never re-pull) ----------
 for img in "${OMADA_IMAGE}" "docker.io/mongo:${MONGO_TAG}" "${UNIFI_IMAGE}" "${SS_IMAGE}"; do
-  log "Pulling ${img}"
-  podman pull -q "${img}" >/dev/null
+  if podman image exists "${img}"; then
+    log "Image present (pinned): ${img}"
+  else
+    log "Pulling ${img}"
+    podman pull -q "${img}" >/dev/null
+  fi
 done
 
 #--- Generate units and start -----------------------------------------------
@@ -375,22 +434,55 @@ done
 
 # Stop-then-start (rather than plain start) so re-runs apply config changes
 systemctl stop unifi.service omada.service shadowsocks.service unifi-db.service 2>/dev/null || true
+# Notify=healthy in the quadlet: start blocks until mongod answers ping
 systemctl start unifi-db.service
 
-log "Waiting for MongoDB to answer"
+# The healthcheck can also be satisfied by the entrypoint's temporary
+# first-init instance. Require real auth + both app users before starting
+# the apps, so a half-initialized db fails HERE with a clear remedy instead
+# of as an app-side auth crash-loop.
+log "Verifying MongoDB auth and app users"
+mongo_user_count() {
+  podman exec -i unifi-db sh -c \
+    'command -v mongosh >/dev/null 2>&1 && exec mongosh --quiet || exec mongo --quiet' 2>/dev/null <<EOF
+try {
+  db.getSiblingDB("admin").auth("root", "${MONGO_ROOT_PASS}")
+  // all users live in admin.system.users; the db field is their authSource
+  print("USERS=" + (db.getSiblingDB("admin").system.users.countDocuments({user:"unifi", db:"admin"}) +
+                    db.getSiblingDB("admin").system.users.countDocuments({user:"omada", db:"omada"})))
+} catch (e) { print("USERS=ERR") }
+EOF
+}
 t=0
-until podman exec unifi-db sh -c \
-  'command -v mongosh >/dev/null 2>&1 && exec mongosh --quiet --eval "db.adminCommand({ping:1}).ok" || exec mongo --quiet --eval "db.adminCommand({ping:1}).ok"' \
-  >/dev/null 2>&1; do
+until mongo_user_count | grep '^USERS=2$' >/dev/null; do
   sleep 2; t=$(( t + 2 ))
-  (( t >= 120 )) && die "MongoDB not answering after 120s. See: podman logs unifi-db"
+  (( t >= 180 )) && die "MongoDB app users not present after 180s. If the very first init was interrupted, the db is half-initialized: systemctl stop unifi-db, wipe ${UNIFI_DIR}/db, and re-run."
 done
+log "MongoDB ready (unifi + omada users present)"
 
-log "Starting omada, unifi, and shadowsocks services"
-systemctl start omada.service unifi.service shadowsocks.service
+wait_for() {
+  local name=$1 url=$2 timeout=${3:-420} t=0
+  until curl -skf -o /dev/null --max-time 5 "${url}"; do
+    t=$(( t + 5 ))
+    if (( t >= timeout )); then
+      warn "${name} not answering at ${url} after ${timeout}s (may still be initializing; check journalctl -eu)"
+      return 0
+    fi
+    sleep 5
+  done
+  log "${name} is up: ${url}"
+}
 
-log "Enabling podman-auto-update.timer"
-systemctl enable --now podman-auto-update.timer >/dev/null 2>&1
+# Start the JVM apps one at a time - concurrent first-runs of two JVMs
+# overcommit 2GB hard (first boot on this hardware can take several minutes)
+log "Starting unifi"
+systemctl start unifi.service
+wait_for "UniFi" https://localhost:8443
+log "Starting omada"
+systemctl start omada.service
+wait_for "Omada" https://localhost:8043
+log "Starting shadowsocks"
+systemctl start shadowsocks.service
 
 #--- Verify boot enablement -------------------------------------------------
 # Quadlet units are enabled via their [Install] WantedBy at generation time;
@@ -410,31 +502,24 @@ for u in omada unifi-db unifi shadowsocks; do
 done
 log "All services active"
 
-wait_for() {
-  local name=$1 url=$2 timeout=${3:-420} t=0
-  until curl -skf -o /dev/null --max-time 5 "${url}"; do
-    t=$(( t + 5 ))
-    if (( t >= timeout )); then
-      warn "${name} not answering at ${url} after ${timeout}s (may still be initializing; check journalctl -eu)"
-      return 0
-    fi
-    sleep 5
-  done
-  log "${name} is up: ${url}"
-}
-
-log "Waiting for web UIs (first boot on this hardware can take several minutes)..."
-wait_for "UniFi" https://localhost:8443
-wait_for "Omada" https://localhost:8043
+# Retire superseded omada images (e.g. after the 6.2 -> 6.2-openj9 swap):
+# still-tagged old images survive `podman image prune`, and 8GB can't
+# spare the ~700MB. Data is unaffected - it lives in ${OMADA_DIR} volumes
+# and the external MongoDB, not in the image.
+podman images --format '{{.Repository}}:{{.Tag}}' docker.io/mbentley/omada-controller 2>/dev/null \
+  | grep -vxF "${OMADA_IMAGE}" | xargs -r podman rmi >/dev/null 2>&1 \
+  || true
 
 #--- Summary ----------------------------------------------------------------
-HOST_IP=$(hostname -I | awk '{print $1}')
+# hostname -I can lead with the podman bridge IP; prefer the route source
+HOST_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.*src \([0-9.]*\).*/\1/p' || true)
+[[ -n ${HOST_IP} ]] || HOST_IP=$(hostname -I | awk '{print $1}')
 cat <<EOF
 
 ============================================================
  Done.
 
- Omada 6.2        : https://${HOST_IP}:8043   (portal on 8844)
+ Omada 6.2 OpenJ9 : https://${HOST_IP}:8043   (portal on 8844)
  UniFi Network    : https://${HOST_IP}:8443   (inform on 8080)
  Shared MongoDB   : mongo:${MONGO_TAG} in 'unifi-db' (dbs: unifi, omada)
  Shadowsocks      : ${HOST_IP}:${SS_PORT} tcp+udp, 2022-blake3-aes-256-gcm
@@ -443,13 +528,23 @@ cat <<EOF
  Credentials      : ${CRED_FILE} (mode 600)
  Quadlet units    : ${QUADLET_DIR}/{omada,unifi,unifi-db,shadowsocks}.container
  Data             : ${OMADA_DIR}, ${UNIFI_DIR}, ${SS_DIR}
- Auto-updates     : podman-auto-update.timer (omada 6.2.x + unifi + ss; mongo pinned)
- Disk hygiene     : image prune after auto-updates, installonly_limit=2,
-                    journal capped at 100M, zram swap (no disk swap),
+ Images           : PINNED - nothing auto-updates or re-pulls. To update:
+                    podman pull <image> && systemctl restart <svc>, then
+                    podman image prune -f. Before updating unifi, confirm
+                    the new version still supports MongoDB 4.4.
+ Disk hygiene     : superseded-image cleanup, installonly_limit=2,
+                    journal capped at 100M, zram swap = RAM (no disk swap),
                     ext4 reserve at 1%, fstrim.timer on
  OS updates       : dnf-automatic daily (apply_updates=yes, reboot=when-needed)
 
- Both UIs run a first-time setup wizard. L3 adoption:
+ Post-setup checklist (in the UIs):
+   - UniFi: Settings > System > set statistics retention to minimum
+     (the stat db is the main disk-growth risk on 8GB)
+   - Both UIs: enable auto-backup; rsync the backups off-box
+   - Keep an eye on df -h / before manual image updates (~1.5GB headroom)
+
+ Both UIs run a first-time setup wizard. Adoption is L3-only (discovery
+ broadcasts do not cross the podman bridge):
    UniFi devices : set-inform http://${HOST_IP}:8080/inform (or DHCP opt 43)
    Omada devices : controller IP ${HOST_IP} (or DHCP opt 138)
 ============================================================
