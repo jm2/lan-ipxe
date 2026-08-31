@@ -443,7 +443,7 @@ ZRAM_PROFILE_STATE=${STATE_DIR}/zram-profile.state
 ZRAM_CONFIG_BACKUP=${STATE_DIR}/zram-generator.conf.original
 zram_config_is_script_owned() {
   local config=/etc/systemd/zram-generator.conf content
-  [[ -f ${config} ]] || return 1
+  [[ -f ${config} && ! -L ${config} ]] || return 1
   content=$(<"${config}")
   [[ ${content} == $'[zram0]\nzram-size = ram\ncompression-algorithm = zstd' \
     || ${content} == $'# Written by setup-fedora-controllers.sh for LOW_RAM_MODE.\n[zram0]\nzram-size = ram\ncompression-algorithm = zstd' \
@@ -454,7 +454,7 @@ zram_config_is_script_owned() {
 }
 zram_sysctl_is_script_owned() {
   local config=/etc/sysctl.d/99-controller-low-ram.conf content
-  [[ -f ${config} ]] || return 1
+  [[ -f ${config} && ! -L ${config} ]] || return 1
   content=$(<"${config}")
   [[ ${content} == $'# Written by setup-fedora-controllers.sh for LOW_RAM_MODE.\n# zram-friendly paging: push cold anon pages to compressed RAM early\nvm.swappiness = 180\nvm.page-cluster = 0' \
     || ${content} == $'# Written by setup-fedora-controllers.sh for ZRAM_MODE.\n# Prefer compressed swap over evicting useful filesystem cache.\nvm.swappiness = 180\nvm.page-cluster = 0' ]]
@@ -473,38 +473,41 @@ if (( ZRAM_ACTIVE )); then
   ZRAM_CONFIG_CAN_WRITE=1
   ZRAM_STATE_CREATED_THIS_RUN=0
   if [[ ! -f ${ZRAM_PROFILE_STATE} ]]; then
-    ZRAM_PACKAGE_PREEXISTING=0
-    ZRAM_HAD_ETC_CONFIG=0
-    if rpm -q zram-generator-defaults >/dev/null 2>&1; then
-      ZRAM_PACKAGE_PREEXISTING=1
-    fi
-    if [[ -f /etc/systemd/zram-generator.conf ]]; then
-      if zram_config_is_script_owned; then
-        # Exact older-script configuration: do not preserve it as a user rule.
-        ZRAM_PACKAGE_PREEXISTING=0
-      else
-        ZRAM_HAD_ETC_CONFIG=1
-        atomic_copy_file /etc/systemd/zram-generator.conf "${ZRAM_CONFIG_BACKUP}" 644
+    if [[ -e /etc/systemd/zram-generator.conf \
+          || -L /etc/systemd/zram-generator.conf ]] \
+        && ! zram_config_is_script_owned; then
+      warn "/etc/systemd/zram-generator.conf predates this script's ownership record; preserving the administrator's zram policy"
+      ZRAM_CONFIG_CAN_WRITE=0
+    else
+      ZRAM_PACKAGE_PREEXISTING=0
+      ZRAM_HAD_ETC_CONFIG=0
+      if rpm -q zram-generator-defaults >/dev/null 2>&1; then
+        ZRAM_PACKAGE_PREEXISTING=1
       fi
+      if zram_config_is_script_owned; then
+        # Exact older-script configuration: adopt it instead of preserving it
+        # as an administrator rule.
+        ZRAM_PACKAGE_PREEXISTING=0
+      fi
+      {
+        printf 'package_preexisting=%s\n' "${ZRAM_PACKAGE_PREEXISTING}"
+        printf 'had_etc_config=%s\n' "${ZRAM_HAD_ETC_CONFIG}"
+      } | atomic_write_file "${ZRAM_PROFILE_STATE}" 600
+      ZRAM_STATE_CREATED_THIS_RUN=1
     fi
-    {
-      printf 'package_preexisting=%s\n' "${ZRAM_PACKAGE_PREEXISTING}"
-      printf 'had_etc_config=%s\n' "${ZRAM_HAD_ETC_CONFIG}"
-    } | atomic_write_file "${ZRAM_PROFILE_STATE}" 600
-    ZRAM_STATE_CREATED_THIS_RUN=1
   elif ! zram_config_is_script_owned; then
     warn "/etc/systemd/zram-generator.conf changed outside this script; preserving it instead of overwriting the administrator's zram policy"
     ZRAM_CONFIG_CAN_WRITE=0
   fi
-  if ! dnf -y install zram-generator-defaults >/dev/null 2>&1; then
-    if (( ZRAM_STATE_CREATED_THIS_RUN )); then
-      rm -f "${ZRAM_PROFILE_STATE}" "${ZRAM_CONFIG_BACKUP}"
-    else
-      warn "Preserving the existing zram profile ownership record for a later retry"
-    fi
-    die "Could not install zram-generator-defaults required by the selected zram policy"
-  fi
   if (( ZRAM_CONFIG_CAN_WRITE )); then
+    if ! dnf -y install zram-generator-defaults >/dev/null 2>&1; then
+      if (( ZRAM_STATE_CREATED_THIS_RUN )); then
+        rm -f "${ZRAM_PROFILE_STATE}" "${ZRAM_CONFIG_BACKUP}"
+      else
+        warn "Preserving the existing zram profile ownership record for a later retry"
+      fi
+      die "Could not install zram-generator-defaults required by the selected zram policy"
+    fi
     atomic_write_file /etc/systemd/zram-generator.conf 644 <<EOF
 # Written by setup-fedora-controllers.sh for ZRAM_MODE.
 [zram0]
@@ -513,9 +516,7 @@ compression-algorithm = zstd
 swap-priority = 100
 EOF
     ZRAM_CONFIG_MANAGED=1
-  fi
-  systemctl daemon-reload
-  if (( ZRAM_CONFIG_MANAGED )); then
+    systemctl daemon-reload
     if zram_swap_is_active; then
       log "zram0 is already active; configured size changes apply after reboot"
     else
@@ -532,7 +533,8 @@ EOF
 
   ZRAM_SYSCTL_CAN_WRITE=1
   if [[ ! -f ${ZRAM_SYSCTL_STATE} ]]; then
-    if [[ -f /etc/sysctl.d/99-controller-low-ram.conf ]] \
+    if [[ -e /etc/sysctl.d/99-controller-low-ram.conf \
+          || -L /etc/sysctl.d/99-controller-low-ram.conf ]] \
         && ! zram_sysctl_is_script_owned; then
       warn "/etc/sysctl.d/99-controller-low-ram.conf already contains administrator policy; preserving it instead of adopting the path"
       ZRAM_SYSCTL_CAN_WRITE=0
@@ -601,7 +603,8 @@ EOF
   fi
 
   ZRAM_SYSCTL_CAN_RESTORE=1
-  if [[ -f /etc/sysctl.d/99-controller-low-ram.conf ]]; then
+  if [[ -e /etc/sysctl.d/99-controller-low-ram.conf \
+        || -L /etc/sysctl.d/99-controller-low-ram.conf ]]; then
     if zram_sysctl_is_script_owned; then
       rm -f /etc/sysctl.d/99-controller-low-ram.conf
     else
