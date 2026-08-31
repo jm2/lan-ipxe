@@ -16,6 +16,12 @@ if [[ -f /var/lib/pacman/db.lck ]]; then
 fi
 
 log "Updating $(hostname) on $(date)..."
+running_kver="$(uname -r)"
+running_pkgbase=""
+if [[ -r "/usr/lib/modules/${running_kver}/pkgbase" ]]; then
+    read -r running_pkgbase < "/usr/lib/modules/${running_kver}/pkgbase"
+fi
+
 pacman -Syu --noconfirm
 
 # paccache retains the last 3 versions if available.
@@ -28,27 +34,51 @@ fi
 # Reboot handling: only schedule a reboot when the running kernel was actually
 # replaced AND a usable new kernel is fully in place (built modules + a generated
 # initramfs). This avoids rebooting into a half-installed kernel.
-running_kver="$(uname -r)"
-if [[ -d "/usr/lib/modules/${running_kver}" ]]; then
+running_pkg_owner=$(pacman -Qoq "/usr/lib/modules/${running_kver}/pkgbase" 2>/dev/null || true)
+if [[ -n "${running_pkgbase}" && ${running_pkg_owner} == "${running_pkgbase}" ]]; then
     log "Running kernel ${running_kver} unchanged; no reboot needed."
     exit 0
 fi
 
-# Newest installed kernel = the upgrade target.
-new_kver="$(ls -1d /usr/lib/modules/*/ 2>/dev/null | sed 's#/usr/lib/modules/##; s#/##' | sort -V | tail -n1)"
+if [[ -z "${running_pkgbase}" ]]; then
+    log "Running kernel ${running_kver} was replaced, but its pkgbase was not recorded; NOT rebooting. Investigate manually."
+    exit 0
+fi
+
+# Select the newest installed kernel belonging to the same Arch package as the
+# running kernel (linux vs linux-lts), rather than the numerically newest module
+# directory across every installed kernel flavor.
+replacement_kvers=()
+for pkgbase_file in /usr/lib/modules/*/pkgbase; do
+    [[ -r "${pkgbase_file}" ]] || continue
+    read -r candidate_pkgbase < "${pkgbase_file}"
+    [[ "${candidate_pkgbase}" == "${running_pkgbase}" ]] || continue
+    candidate_kver="${pkgbase_file#/usr/lib/modules/}"
+    replacement_kvers+=("${candidate_kver%/pkgbase}")
+done
+
+if (( ! ${#replacement_kvers[@]} )); then
+    log "Kernel upgraded, but no replacement for package ${running_pkgbase} was found; NOT rebooting. Investigate manually."
+    exit 0
+fi
+
+sorted_kvers=$(printf '%s\n' "${replacement_kvers[@]}" | sort -V) \
+    || { log "Could not sort replacement kernel versions; NOT rebooting."; exit 0; }
+mapfile -t replacement_kvers <<<"${sorted_kvers}"
+new_kver="${replacement_kvers[${#replacement_kvers[@]} - 1]}"
 
 if [[ -z "${new_kver}" || ! -f "/usr/lib/modules/${new_kver}/modules.dep" ]]; then
     log "Kernel upgraded but new kernel modules are incomplete (no modules.dep for '${new_kver:-unknown}'); NOT rebooting. Investigate manually."
     exit 0
 fi
 
-# Require that an initramfs has actually been generated for the new kernel.
-# Cover the common mkinitcpio and dracut/kernel-install layouts.
-if ! compgen -G "/boot/initramfs-*.img" > /dev/null \
-   && ! compgen -G "/boot/*/${new_kver}/initrd" > /dev/null \
-   && ! compgen -G "/efi/*/${new_kver}/initrd" > /dev/null \
-   && [[ ! -f "/usr/lib/modules/${new_kver}/initramfs-${new_kver}.img" ]]; then
-    log "Kernel upgraded to ${new_kver} but no initramfs was found; NOT rebooting. Investigate manually."
+# This workstation setup uses Arch's dracut GRUB layout. Require the exact
+# image for the upgraded pkgbase and verify that it contains the new kernel's
+# modules; an unrelated linux/linux-lts image is not sufficient proof.
+initramfs="/boot/initramfs-${running_pkgbase}.img"
+if [[ ! -s "${initramfs}" ]] \
+   || ! lsinitrd "${initramfs}" 2>/dev/null | grep -F "modules/${new_kver}/" >/dev/null; then
+    log "Kernel upgraded to ${new_kver}, but ${initramfs} is missing or does not contain that kernel; NOT rebooting. Investigate manually."
     exit 0
 fi
 
