@@ -283,15 +283,31 @@ test_fedora_release_sources() (
      && ${SPEEDTEST_BINARY_SHA256_AARCH64} =~ ^[[:xdigit:]]{64}$ ]] \
     || fail 'the intentionally fixed low-churn Speedtest release lost its integrity pins'
 
-  local test_arch
+  local test_arch expected_desktop_manifest expected_desktop_suffix
+  local expected_cli_manifest expected_cli_suffix
   for test_arch in x86_64 aarch64; do
+    case ${test_arch} in
+      x86_64)
+        expected_desktop_manifest=latest-x64-linux.yml
+        expected_desktop_suffix=/linux-x64/Antigravity.AppImage
+        expected_cli_manifest=linux_amd64.json
+        expected_cli_suffix=/linux-x64/cli_linux_x64.tar.gz
+        ;;
+      aarch64)
+        expected_desktop_manifest=latest-arm64-linux-arm64.yml
+        expected_desktop_suffix=/linux-arm/Antigravity.AppImage
+        expected_cli_manifest=linux_arm64.json
+        expected_cli_suffix=/linux-arm/cli_linux_arm64.tar.gz
+        ;;
+    esac
     select_fedora_artifacts "${test_arch}"
-    [[ ${ANTIGRAVITY_DESKTOP_MANIFEST_URL} == "${ANTIGRAVITY_DESKTOP_MANIFEST_BASE}"/* \
-       && ${ANTIGRAVITY_CLI_MANIFEST_URL} == "${ANTIGRAVITY_CLI_MANIFEST_BASE}"/* ]] \
-      || fail "${test_arch} does not select vendor-hosted Antigravity manifests"
-    [[ ${ANTIGRAVITY_DESKTOP_URL_SUFFIX} == /linux-*/Antigravity.AppImage \
-       && ${ANTIGRAVITY_CLI_URL_SUFFIX} == /linux-*/cli_linux_*.tar.gz ]] \
-      || fail "${test_arch} Antigravity manifest URL constraints are unexpected"
+    [[ ${ANTIGRAVITY_DESKTOP_MANIFEST_URL} == \
+          "${ANTIGRAVITY_DESKTOP_MANIFEST_BASE}/${expected_desktop_manifest}" \
+       && ${ANTIGRAVITY_DESKTOP_URL_SUFFIX} == "${expected_desktop_suffix}" \
+       && ${ANTIGRAVITY_CLI_MANIFEST_URL} == \
+          "${ANTIGRAVITY_CLI_MANIFEST_BASE}/${expected_cli_manifest}" \
+       && ${ANTIGRAVITY_CLI_URL_SUFFIX} == "${expected_cli_suffix}" ]] \
+      || fail "${test_arch} Antigravity manifest/artifact mapping is incorrect"
   done
 )
 
