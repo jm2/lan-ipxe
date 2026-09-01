@@ -483,7 +483,7 @@ R8152_ARCH_REBOOT_REQUIRED=0
 # the optional path makes this small state check testable without touching
 # sysfs.
 r8152_loaded_out_of_tree() {
-  local taint_file=${1:-${R8152_MODULE_TAINT_FILE}} taint
+  local taint_file=${R8152_MODULE_TAINT_FILE} taint
   [[ -e ${taint_file} ]] || return 1
   [[ -r ${taint_file} ]] \
     || die "could not read loaded r8152 module taint state: ${taint_file}"

@@ -90,8 +90,8 @@ if (@($WingetPackages | Where-Object { $_ -like 'Python.Python.3.*' }).Count -ne
     throw 'ASSERT: desired package set retains a hard-coded Python 3 minor channel'
 }
 $scriptText = Get-Content -Raw -LiteralPath $ScriptPath
-if ($scriptText -notmatch '(?m)^\$latestPythonPackageId = Resolve-LatestPythonWingetPackageId$' -or
-    $scriptText -notmatch '(?m)^\$WingetPackages \+= \$latestPythonPackageId$') {
+if ($scriptText -notmatch '(?m)^\$latestPythonPackageId = Resolve-LatestPythonWingetPackageId\r?$' -or
+    $scriptText -notmatch '(?m)^\$WingetPackages \+= \$latestPythonPackageId\r?$') {
     throw 'ASSERT: dynamically resolved Python channel is not added to the desired WinGet set'
 }
 Assert-Equal ($WingetPresenceOnlyPackages -join ',') 'Ookla.Speedtest.CLI' 'Speedtest CLI is the only presence-only package'

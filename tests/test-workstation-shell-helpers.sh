@@ -1026,18 +1026,18 @@ test_arch_r8152_loaded_module_detection() (
   local case_dir=${TEST_ROOT}/arch-r8152-loaded-module
   local taint_file=${case_dir}/taint
   install -d "${case_dir}"
+  # Consumed by the dynamically sourced production helper.
+  # shellcheck disable=SC2034
+  R8152_MODULE_TAINT_FILE=${taint_file}
 
-  ! r8152_loaded_out_of_tree "${taint_file}"
+  ! r8152_loaded_out_of_tree
   printf 'P\n' >"${taint_file}"
-  ! r8152_loaded_out_of_tree "${taint_file}"
+  ! r8152_loaded_out_of_tree
   printf 'OE\n' >"${taint_file}"
-  r8152_loaded_out_of_tree "${taint_file}"
+  r8152_loaded_out_of_tree
 
   # Package, DKMS, and initramfs state can already be clean on a second run
   # while the module loaded before the first run remains active until reboot.
-  # The dynamically sourced helper consumes this override.
-  # shellcheck disable=SC2034
-  R8152_MODULE_TAINT_FILE=${taint_file}
   pacman() { return 72; }
   dkms() { [[ $1 == status ]]; }
   sudo() { return 73; }
