@@ -93,7 +93,7 @@ LEGACY_CRED_FILE=${LEGACY_UNIFI_DIR}/credentials.env
 OMADA_IMAGE=${OMADA_IMAGE:-}
 OMADA_STANDARD_IMAGE=${OMADA_STANDARD_IMAGE:-docker.io/mbentley/omada-controller:6}
 OMADA_LOW_RAM_IMAGE=${OMADA_LOW_RAM_IMAGE:-docker.io/mbentley/omada-controller:6-openj9}
-SS_IMAGE=ghcr.io/shadowsocks/ssserver-rust:latest
+SS_IMAGE=${SS_IMAGE:-ghcr.io/shadowsocks/ssserver-rust:latest}
 SS_PORT=8388
 MINIMUM_SAFE_UOS_VERSION=5.1.37
 UOS_RELEASE_API_URL='https://fw-update.ui.com/api/firmware-latest?filter=eq~~product~~unifi-os-server&filter=eq~~platform~~linux-x64&filter=eq~~channel~~release'
@@ -220,6 +220,26 @@ resolve_uos_bootstrap_release() { # [offline metadata fixture]
   log "Resolved official UniFi OS Server ${UOS_VERSION} with published SHA-256"
 }
 
+check_os_update_reboot_requirement() {
+  local status
+  OS_UPDATE_REBOOT_REQUIRED=0
+  OS_UPDATE_REBOOT_CHECK_FAILED=0
+  # dnf-plugins-core documents 0 as current and 1 as a reboot hint. Keep any
+  # other failure distinct so the final summary never reports a false clean state.
+  if dnf needs-restarting -r; then
+    log "Rocky package updates do not require a host reboot"
+  else
+    status=$?
+    if (( status == 1 )); then
+      OS_UPDATE_REBOOT_REQUIRED=1
+      warn "Rocky package updates require a host reboot after setup."
+    else
+      OS_UPDATE_REBOOT_CHECK_FAILED=1
+      warn "Could not determine whether Rocky package updates require a reboot (dnf needs-restarting exited ${status})."
+    fi
+  fi
+}
+
 image_identity() { # <mutable image reference>; emits stable ID/digest input
   local image=$1 inspect_json identity
   if ! inspect_json=$(podman image inspect "${image}"); then
@@ -306,6 +326,8 @@ LOW_RAM_MODE, SMALL_STORAGE_MODE, ZRAM_MODE (auto|on|off|0|1), LANCACHE_IP,
 and FIREWALL_ZONE. Arguments override the environment. MongoDB is provisioned
 only for Omada. Zram auto mode ignores already-active /dev/zram devices when
 deciding whether the host has another swap provider.
+OMADA_IMAGE and SS_IMAGE may override their default moving container channels
+temporarily during an upstream incident.
 Fresh UniFi OS installs resolve Ubiquiti's latest release by default. As an
 emergency-only pin, UOS_VERSION, UOS_INSTALLER_URL, and
 UOS_INSTALLER_SHA256 must all be explicitly set to a matching release.
@@ -531,13 +553,15 @@ fi
 #--- Packages ---------------------------------------------------------------
 # The minimal ISO determines only the initial package set. Install everything
 # needed below from Rocky's normal enabled BaseOS/AppStream repositories.
+OS_UPDATE_REBOOT_REQUIRED=0
+OS_UPDATE_REBOOT_CHECK_FAILED=0
 BASE_PACKAGES=(
-  bash-completion container-selinux curl dnf-automatic e2fsprogs firewalld
-  git iperf3 jq nano net-tools NetworkManager-wifi openssl passt pciutils podman
-  rsync slirp4netns udisks2 usbutils vim-enhanced wget
+  bash-completion container-selinux curl dnf-automatic dnf-plugins-core
+  e2fsprogs firewalld git iperf3 jq nano net-tools NetworkManager-wifi openssl
+  passt pciutils podman rsync slirp4netns udisks2 usbutils vim-enhanced wget
 )
 log "Applying available Rocky package updates"
-dnf -y upgrade --refresh >/dev/null
+dnf -y upgrade --refresh
 log "Installing Rocky/EL10 baseline and container prerequisites"
 dnf -y install "${BASE_PACKAGES[@]}" >/dev/null
 if (( ENABLE_DNS )); then
@@ -777,6 +801,8 @@ EOF
     sysctl -q --system >/dev/null
   fi
 fi
+
+check_os_update_reboot_requirement # all DNF transactions are complete
 
 if (( LOW_RAM_ACTIVE )); then
   log "Low-RAM application profile active (OpenJ9 and bounded JVM/MongoDB memory)"
@@ -2351,6 +2377,13 @@ else
   echo " Storage tuning   : inactive; normal kernel/journal/cache/image policy retained"
 fi
 echo " General host     : SELinux=$(getenforce 2>/dev/null || echo unknown), fstrim.timer on, dnf-automatic applies updates/reboots when needed"
+if (( OS_UPDATE_REBOOT_REQUIRED )); then
+  echo " OS update state  : reboot required/recommended after this setup run"
+elif (( OS_UPDATE_REBOOT_CHECK_FAILED )); then
+  echo " OS update state  : reboot requirement could not be determined; review the warning above"
+else
+  echo " OS update state  : current; no reboot required by this setup run"
+fi
 
 if (( ENABLE_UNIFI_OS )); then
   echo

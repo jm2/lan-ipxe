@@ -34,10 +34,31 @@ source <(sed -n '/^#--- Release-update helpers /,/^#--- End release-update helpe
   "${CONTROLLER}")
 
 for helper in validate_uos_release_values configure_uos_release_mode \
-  load_uos_release_metadata resolve_uos_bootstrap_release image_identity \
-  refresh_mutable_image prune_dangling_images; do
+  load_uos_release_metadata resolve_uos_bootstrap_release \
+  check_os_update_reboot_requirement image_identity refresh_mutable_image \
+  prune_dangling_images; do
   declare -F "${helper}" >/dev/null || fail "missing production helper ${helper}"
 done
+
+test_reboot_hint_statuses() (
+  local expected_required expected_failed
+  dnf() {
+    [[ $* == 'needs-restarting -r' ]] \
+      || fail "unexpected reboot-check command: dnf $*"
+    return "${MOCK_DNF_STATUS}"
+  }
+  for MOCK_DNF_STATUS in 0 1 2; do
+    case ${MOCK_DNF_STATUS} in
+      0) expected_required=0; expected_failed=0 ;;
+      1) expected_required=1; expected_failed=0 ;;
+      2) expected_required=0; expected_failed=1 ;;
+    esac
+    check_os_update_reboot_requirement
+    [[ ${OS_UPDATE_REBOOT_REQUIRED} == "${expected_required}" \
+       && ${OS_UPDATE_REBOOT_CHECK_FAILED} == "${expected_failed}" ]] \
+      || fail "reboot hint status ${MOCK_DNF_STATUS} was classified incorrectly"
+  done
+)
 
 VALID_VERSION=9.8.7
 VALID_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -370,6 +391,7 @@ line_of() {
 test_static_wiring() {
   local fresh_guard resolve_call pull_call quiesce_line
   local mongo_ready mongo_record omada_ready omada_record runtime_ready prune_call
+  local zram_package_install reboot_check
   grep -Fq "UOS_RELEASE_API_URL='${UOS_RELEASE_API_URL}'" "${CONTROLLER}" \
     || fail 'official UniFi OS latest-release API query changed unexpectedly'
   ! grep -Eq 'DEFAULT_UOS_(VERSION|INSTALLER_URL|INSTALLER_SHA256)=' "${CONTROLLER}" \
@@ -378,14 +400,19 @@ test_static_wiring() {
     || fail 'UOS override mode does not capture explicit variable presence'
   sed -n '/^BASE_PACKAGES=(/,/^)/p' "${CONTROLLER}" | grep -Eq '(^|[[:space:]])jq([[:space:]]|$)' \
     || fail 'jq is not a controller prerequisite'
-  grep -Fq 'dnf -y upgrade --refresh' "${CONTROLLER}" \
+  grep -Fxq 'dnf -y upgrade --refresh' "${CONTROLLER}" \
     || fail 'controller setup does not apply available Rocky package updates'
+  sed -n '/^BASE_PACKAGES=(/,/^)/p' "${CONTROLLER}" | grep -Eq '(^|[[:space:]])dnf-plugins-core([[:space:]]|$)' \
+    || fail 'controller cannot evaluate the post-update reboot requirement'
+  grep -Fq 'if dnf needs-restarting -r; then' "${CONTROLLER}" \
+    && grep -Fq 'OS update state  : reboot required/recommended after this setup run' "${CONTROLLER}" \
+    || fail 'controller does not report a post-update reboot requirement'
   grep -Fq 'OMADA_STANDARD_IMAGE=${OMADA_STANDARD_IMAGE:-docker.io/mbentley/omada-controller:6}' "${CONTROLLER}" \
     || fail 'standard Omada image does not track supported major 6'
   grep -Fq 'OMADA_LOW_RAM_IMAGE=${OMADA_LOW_RAM_IMAGE:-docker.io/mbentley/omada-controller:6-openj9}' "${CONTROLLER}" \
     || fail 'low-RAM Omada image does not track supported major 6-openj9'
-  grep -Fq 'SS_IMAGE=ghcr.io/shadowsocks/ssserver-rust:latest' "${CONTROLLER}" \
-    || fail 'Shadowsocks no longer tracks latest'
+  grep -Fq 'SS_IMAGE=${SS_IMAGE:-ghcr.io/shadowsocks/ssserver-rust:latest}' "${CONTROLLER}" \
+    || fail 'Shadowsocks no longer tracks latest with an incident override'
   grep -Fq 'MONGO_TAG=8.0' "${CONTROLLER}" \
     && grep -Fq 'MONGO_TAG=4.4' "${CONTROLLER}" \
     || fail 'Mongo compatibility-major channels are not retained'
@@ -410,12 +437,17 @@ test_static_wiring() {
   omada_record=$(line_of '    record_applied omada "${OMADA_FILES[@]}"')
   runtime_ready=$(line_of 'log "All enabled services passed runtime checks"')
   prune_call=$(line_of '  prune_dangling_images')
+  zram_package_install=$(line_of '    if ! dnf -y install zram-generator-defaults')
+  reboot_check=$(line_of 'check_os_update_reboot_requirement # all DNF transactions are complete')
   [[ ${fresh_guard} =~ ^[0-9]+$ && ${resolve_call} =~ ^[0-9]+$ \
      && ${pull_call} =~ ^[0-9]+$ && ${quiesce_line} =~ ^[0-9]+$ \
      && ${mongo_ready} =~ ^[0-9]+$ && ${mongo_record} =~ ^[0-9]+$ \
      && ${omada_ready} =~ ^[0-9]+$ && ${omada_record} =~ ^[0-9]+$ \
      && ${runtime_ready} =~ ^[0-9]+$ && ${prune_call} =~ ^[0-9]+$ ]] \
     || fail 'could not locate release, image-refresh, or readiness-commit wiring'
+  [[ ${zram_package_install} =~ ^[0-9]+$ && ${reboot_check} =~ ^[0-9]+$ ]] \
+    && (( zram_package_install < reboot_check )) \
+    || fail 'reboot detection does not follow the final possible DNF transaction'
   (( fresh_guard < resolve_call && pull_call < quiesce_line \
      && mongo_ready < mongo_record && omada_ready < omada_record \
      && runtime_ready < prune_call )) \
@@ -432,6 +464,8 @@ test_override_coherence
 printf 'PASS explicit all-or-none UniFi OS emergency overrides\n'
 test_default_api_resolution
 printf 'PASS default UniFi OS API resolution and cleanup\n'
+test_reboot_hint_statuses
+printf 'PASS Rocky post-transaction reboot-hint classification\n'
 test_mutable_image_refresh
 printf 'PASS mutable image refresh identity convergence\n'
 test_image_failure_no_mutation

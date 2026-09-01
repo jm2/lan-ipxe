@@ -445,8 +445,7 @@ test_fedora_dynamic_release_resolution() (
           'files:' \
           '  - url: https://storage.googleapis.com/antigravity-public/releases/3.90.1-123/linux-x64/Antigravity.AppImage' \
           "    sha512: ${desktop_checksum_base64}" \
-          '    size: 123456' \
-          'stagingPercentage: 100'
+          '    size: 123456'
         ;;
       "${ANTIGRAVITY_CLI_MANIFEST_URL}")
         printf '%s\n' \
@@ -454,7 +453,7 @@ test_fedora_dynamic_release_resolution() (
         ;;
       "${OPENCODE_RELEASE_API}")
         printf '%s\n' \
-          '{"draft":false,"prerelease":false,"immutable":true,"tag_name":"v9.8.7","assets":[{"name":"opencode-linux-x64.tar.gz","browser_download_url":"https://github.com/anomalyco/opencode/releases/download/v9.8.7/opencode-linux-x64.tar.gz","digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]}'
+          '{"draft":false,"prerelease":false,"immutable":false,"tag_name":"v9.8.7","assets":[{"name":"opencode-linux-x64.tar.gz","browser_download_url":"https://github.com/anomalyco/opencode/releases/download/v9.8.7/opencode-linux-x64.tar.gz","digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]}'
         ;;
       "${ZED_RELEASE_API}")
         printf '%s\n' \
@@ -476,11 +475,31 @@ test_fedora_dynamic_release_resolution() (
   [[ ${OPENCODE_VERSION} == 9.8.7 \
      && ${OPENCODE_URL} == https://github.com/anomalyco/opencode/releases/download/v9.8.7/opencode-linux-x64.tar.gz \
      && ${OPENCODE_ARCHIVE_SHA256} == $(printf 'c%.0s' {1..64}) ]] \
-    || fail 'Fedora did not bind OpenCode to one immutable release asset and digest'
+    || fail 'Fedora did not bind OpenCode to one stable release asset and digest'
   [[ ${ZED_VERSION} == 7.6.5 \
      && ${ZED_URL} == https://github.com/zed-industries/zed/releases/download/v7.6.5/zed-linux-x86_64.tar.gz \
      && ${ZED_ARCHIVE_SHA256} == $(printf 'd%.0s' {1..64}) ]] \
-    || fail 'Fedora did not bind Zed to one immutable release asset and digest'
+    || fail 'Fedora did not bind Zed to one stable release asset and digest'
+)
+
+test_fedora_antigravity_rollout_parsing() (
+  load_helpers setup-fedora-workstation.sh
+  local manifest parsed
+  manifest=$(printf '%s\n' \
+    'version: 2.3.4' \
+    'files:' \
+    '  - url: https://storage.googleapis.com/antigravity-public/releases/2.3.4-5/linux-x64/Antigravity.AppImage' \
+    '    sha512: YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYQ==' \
+    '    size: 42')
+  parsed=$(parse_antigravity_desktop_manifest "${manifest}") \
+    || fail 'Fedora rejected an Antigravity manifest with an omitted optional rollout'
+  [[ ${parsed##*$'\t'} == 100 ]] \
+    || fail 'Fedora did not default an omitted Antigravity rollout to 100'
+  parsed=$(parse_antigravity_desktop_manifest \
+    "${manifest}"$'\nstagingPercentage: 25') \
+    || fail 'Fedora rejected an Antigravity manifest with an explicit rollout'
+  [[ ${parsed##*$'\t'} == 25 ]] \
+    || fail 'Fedora did not preserve an explicit Antigravity rollout'
 )
 
 test_fedora_r8152_release_resolution() (
@@ -512,19 +531,20 @@ test_fedora_github_metadata_rejection() {
     select_fedora_artifacts x86_64
     unset -f grep
     fetch_release_document() {
-      local immutable=true digest url assets
+      local draft=false prerelease=false digest url assets
       digest=sha256:$(printf 'e%.0s' {1..64})
       url=https://github.com/anomalyco/opencode/releases/download/v1.2.3/opencode-linux-x64.tar.gz
       assets="{\"name\":\"opencode-linux-x64.tar.gz\",\"browser_download_url\":\"${url}\",\"digest\":\"${digest}\"}"
       case ${scenario} in
-        mutable) immutable=false ;;
+        draft) draft=true ;;
+        prerelease) prerelease=true ;;
         duplicate) assets="${assets},${assets}" ;;
         bad-digest) digest=sha512:$(printf 'e%.0s' {1..128}); assets="{\"name\":\"opencode-linux-x64.tar.gz\",\"browser_download_url\":\"${url}\",\"digest\":\"${digest}\"}" ;;
         off-origin) url=https://downloads.example.invalid/opencode-linux-x64.tar.gz; assets="{\"name\":\"opencode-linux-x64.tar.gz\",\"browser_download_url\":\"${url}\",\"digest\":\"${digest}\"}" ;;
         *) fail "unknown GitHub metadata scenario: ${scenario}" ;;
       esac
-      printf '{"draft":false,"prerelease":false,"immutable":%s,"tag_name":"v1.2.3","assets":[%s]}\n' \
-        "${immutable}" "${assets}"
+      printf '{"draft":%s,"prerelease":%s,"immutable":true,"tag_name":"v1.2.3","assets":[%s]}\n' \
+        "${draft}" "${prerelease}" "${assets}"
     }
     resolve_github_release_asset anomalyco/opencode "${OPENCODE_RELEASE_API}" \
       "${OPENCODE_ASSET}"
@@ -1062,9 +1082,11 @@ main() {
   printf 'PASS Fedora x86_64/aarch64 Zed artifact selection\n'
   test_fedora_dynamic_release_resolution
   printf 'PASS Fedora offline latest-release resolution and digest binding\n'
+  test_fedora_antigravity_rollout_parsing
+  printf 'PASS Fedora optional/explicit Antigravity rollout parsing\n'
   test_fedora_r8152_release_resolution
   printf 'PASS Fedora latest r8152 release-to-commit binding\n'
-  for scenario in mutable duplicate bad-digest off-origin; do
+  for scenario in draft prerelease duplicate bad-digest off-origin; do
     test_fedora_github_metadata_rejection "${scenario}"
   done
   for scenario in legacy-desktop-version wrong-desktop-arch \

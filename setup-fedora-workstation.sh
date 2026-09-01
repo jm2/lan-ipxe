@@ -613,26 +613,28 @@ fetch_release_document() {
   curl "${curl_args[@]}" "${url}"
 }
 
-# Sets RESOLVED_VERSION/URL/SHA256 from one immutable, non-prerelease GitHub
-# release asset. The digest comes from GitHub's release metadata and is bound
-# to the exact browser_download_url selected here.
+# Sets RESOLVED_VERSION/URL/SHA256 from one stable GitHub release asset. The
+# digest comes from GitHub's release metadata and is bound to the exact
+# browser_download_url selected here. Release immutability is reported but is
+# advisory because GitHub does not apply it retroactively to existing releases.
 RESOLVED_VERSION=
 RESOLVED_URL=
 RESOLVED_SHA256=
 resolve_github_release_asset() {
   local repo=$1 api=$2 asset=$3 metadata line tag digest expected_prefix
+  local release_immutable
   metadata=$(fetch_release_document "${api}") \
     || die "could not query the latest ${repo} release"
   line=$(jq -er --arg asset "${asset}" '
-      select(.draft == false and .prerelease == false and .immutable == true)
+      select(.draft == false and .prerelease == false)
       | . as $release
       | [.assets[] | select(.name == $asset)] as $matches
       | select(($matches | length) == 1)
       | [$release.tag_name, $matches[0].browser_download_url,
-         $matches[0].digest] | @tsv
+         $matches[0].digest, ($release.immutable == true)] | @tsv
     ' <<<"${metadata}") \
-    || die "latest ${repo} metadata is not one immutable stable release with asset ${asset}"
-  IFS=$'\t' read -r tag RESOLVED_URL digest <<<"${line}"
+    || die "latest ${repo} metadata is not one stable release with asset ${asset}"
+  IFS=$'\t' read -r tag RESOLVED_URL digest release_immutable <<<"${line}"
   [[ ${tag} =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]] \
     || die "latest ${repo} release has an unsupported tag '${tag}'"
   RESOLVED_VERSION=${BASH_REMATCH[1]}
@@ -642,11 +644,15 @@ resolve_github_release_asset() {
   [[ ${digest} =~ ^sha256:([[:xdigit:]]{64})$ ]] \
     || die "latest ${repo} asset has no valid published SHA-256 digest"
   RESOLVED_SHA256=${BASH_REMATCH[1],,}
+  if [[ ${release_immutable} != true ]]; then
+    warn "latest ${repo} release is not GitHub-immutable; continuing with its published asset digest"
+  fi
 }
 
 parse_antigravity_desktop_manifest() {
   local manifest=$1
   awk '
+    BEGIN { rollout = 100 }
     $1 == "version:" { version = $2 }
     $1 == "-" && $2 == "url:" {
       in_appimage = ($3 ~ /\/Antigravity[.]AppImage$/)
@@ -658,7 +664,7 @@ parse_antigravity_desktop_manifest() {
     $1 == "stagingPercentage:" { rollout = $2 }
     END {
       if (count != 1 || version == "" || url == "" || checksum == "" ||
-          size == "" || rollout == "") exit 1
+          size == "") exit 1
       printf "%s\t%s\t%s\t%s\t%s\n", version, url, checksum, size, rollout
     }
   ' <<<"${manifest}"
