@@ -71,6 +71,61 @@ test_arch_developer_catalog() (
     || fail 'Arch does not enforce all requested developer-command postconditions'
 )
 
+test_arch_openjdk_transition() (
+  load_helpers setup-arch-workstation.sh
+  local jre_installed=1 jdk_installed=0 remove_calls=0 install_calls=0
+  local transition_line reconciliation_line
+  array_contains jdk-openjdk "${PKGS_OFFICIAL[@]}" \
+    || fail 'Arch official package set omits jdk-openjdk'
+  pacman() {
+    case "$*" in
+      '-Q jre-openjdk') (( jre_installed == 1 )) ;;
+      '-Q jdk-openjdk') (( jdk_installed == 1 )) ;;
+      *) return 97 ;;
+    esac
+  }
+  sudo() {
+    [[ $1 == pacman ]] || fail 'OpenJDK transition did not invoke pacman through sudo'
+    shift
+    case "$*" in
+      '-Rdd --noconfirm jre-openjdk')
+        (( jre_installed == 1 )) || fail 'OpenJDK transition removed an absent JRE'
+        (( remove_calls += 1 ))
+        jre_installed=0
+        ;;
+      '-S --needed --noconfirm jdk-openjdk')
+        (( jre_installed == 0 )) || fail 'OpenJDK transition installed the JDK before removing the conflicting JRE'
+        (( install_calls += 1 ))
+        jdk_installed=1
+        ;;
+      *) fail "unexpected OpenJDK transition arguments: $*" ;;
+    esac
+  }
+  transition_openjdk_runtime_arch
+  (( remove_calls == 1 && install_calls == 1 )) \
+    || fail 'OpenJDK runtime-to-JDK migration did not perform one removal and one installation'
+  (( jre_installed == 0 && jdk_installed == 1 )) \
+    || fail 'OpenJDK runtime-to-JDK migration did not converge'
+  transition_line=$(awk '$0 == "transition_openjdk_runtime_arch" { print NR }' \
+    "${REPO_ROOT}/setup-arch-workstation.sh")
+  reconciliation_line=$(awk '$0 == "find_missing_pkgs \"${WANTED_PKGS[@]}\"" { print NR }' \
+    "${REPO_ROOT}/setup-arch-workstation.sh")
+  [[ ${transition_line} =~ ^[0-9]+$ && ${reconciliation_line} =~ ^[0-9]+$ ]] \
+    || fail 'Arch setup does not invoke the OpenJDK migration and package reconciliation exactly once'
+  (( transition_line < reconciliation_line )) \
+    || fail 'Arch setup invokes the OpenJDK migration after official-package reconciliation'
+)
+
+test_arch_openjdk_transition_noop() (
+  load_helpers setup-arch-workstation.sh
+  pacman() {
+    [[ $* == '-Q jre-openjdk' ]] || return 97
+    return 1
+  }
+  sudo() { fail 'OpenJDK transition mutated a host without the legacy JRE'; }
+  transition_openjdk_runtime_arch
+)
+
 test_arch_legacy_purge() (
   load_helpers setup-arch-workstation.sh
   local ide_installed=1 remove_calls=0
@@ -652,6 +707,9 @@ main() {
   printf 'PASS Arch Antigravity 2.x/CLI desired package set\n'
   test_arch_developer_catalog
   printf 'PASS Arch native developer-tool package/postcondition set\n'
+  test_arch_openjdk_transition
+  test_arch_openjdk_transition_noop
+  printf 'PASS Arch OpenJDK runtime-to-JDK migration convergence\n'
   test_arch_legacy_purge
   test_arch_legacy_version_purge
   test_arch_legacy_purge_noop

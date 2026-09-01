@@ -403,6 +403,30 @@ purge_replaced_editor_arch() {
   fi
 }
 
+# The retired comtrya manifest explicitly removed the standalone runtime before
+# requesting the full JDK. Preserve that one-time migration: jre-openjdk and
+# jdk-openjdk conflict, so leaving the old package installed makes the
+# non-interactive official-package transaction abort instead of converging.
+transition_openjdk_runtime_arch() {
+  if ! pacman -Q jre-openjdk &>/dev/null; then
+    note "standalone OpenJDK JRE: absent"
+    return 0
+  fi
+
+  sudo pacman -Rdd --noconfirm jre-openjdk \
+    || die "could not remove jre-openjdk before installing jdk-openjdk"
+  ! pacman -Q jre-openjdk &>/dev/null \
+    || die "jre-openjdk is still installed"
+
+  # Install the replacement immediately so the migration does not leave Java
+  # absent until the much larger workstation package transaction completes.
+  sudo pacman -S --needed --noconfirm jdk-openjdk \
+    || die "could not install jdk-openjdk after removing jre-openjdk"
+  pacman -Q jdk-openjdk &>/dev/null \
+    || die "jdk-openjdk was not installed after the JRE transition"
+  note "standalone OpenJDK JRE replaced by jdk-openjdk"
+}
+
 verify_antigravity_arch() {
   local package_line version comparison
   package_line=$(pacman -Q antigravity 2>/dev/null) \
@@ -499,6 +523,8 @@ BOOT_STATE_BEFORE=$(boot_package_state)
 #--- 2. Official packages ---------------------------------------------------
 log "Syncing databases and applying updates (pacman -Syu)"
 sudo pacman -Syu --noconfirm
+
+transition_openjdk_runtime_arch
 
 log "Official package set (${#PKGS_OFFICIAL[@]} entries)"
 group_output=$(pacman -Sg) || die "could not enumerate pacman groups"
