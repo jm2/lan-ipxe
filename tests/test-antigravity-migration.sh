@@ -38,6 +38,9 @@ select_fedora_artifacts() {
   ARCH=$1
   # Evaluate only the architecture-to-artifact mapping, not preflight or any
   # workstation mutation. This makes both supported branches testable on CI.
+  [[ $(command grep -Fxc 'case ${ARCH} in' \
+      "${REPO_ROOT}/setup-fedora-workstation.sh") == 1 ]] \
+    || fail 'Fedora architecture-to-artifact mapping marker is missing or ambiguous'
   # shellcheck disable=SC1090
   source <(sed -n '/^case ${ARCH} in$/,/^esac$/p' \
     "${REPO_ROOT}/setup-fedora-workstation.sh")
