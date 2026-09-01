@@ -134,8 +134,8 @@ the corresponding iPXE menu entry). Outputs the ISO plus extracted
 ### Workstation provisioning — `setup-*-workstation.*`
 
 One convergent script per platform, safe to re-run at any time. Package-manager
-refreshes and updates still run where the platform requires them (notably Arch's full
-`pacman -Syu` and AUR update). They replaced the earlier comtrya manifests; comtrya is
+refreshes and updates run on every pass (including Arch's full `pacman -Syu` and AUR
+update). They replaced the earlier comtrya manifests; comtrya is
 unmaintained upstream. Run from any directory: the Linux scripts resolve their config
 payloads (`files/`) relative to their own location.
 
@@ -146,33 +146,45 @@ payloads (`files/`) relative to their own location.
   zram policy from `files/`, explicitly generates and validates every dracut image
   before removing mkinitcpio, then enables services and GDM settings. AUR work is last:
   a self-bootstrapped `yay` interactively presents PKGBUILD diffs, updates installed
-  AUR packages, and installs the requested set. Arch's signed repositories provide
-  Code OSS, OpenCode, Codex CLI, and Zed; the AUR supplies Claude Code and the native
-  Antigravity 2.x desktop/CLI. The script removes VSCodium, Antigravity IDE, and an
-  installed Antigravity 1.x package before installing their replacements. The package
-  selection intentionally includes Intel/AMD graphics support and NVIDIA open modules
-  for both `linux` and `linux-lts`.
+  AUR packages (including VCS/devel packages), and installs the requested set. Arch's
+  signed repositories provide Code OSS, OpenCode, Codex CLI, and Zed; the AUR supplies
+  Claude Code and the native Antigravity 2.0+ desktop/CLI. The script removes VSCodium,
+  Antigravity IDE, and any installed Antigravity 1.x package before installing their
+  replacements. The package selection intentionally includes Intel/AMD graphics
+  support and NVIDIA open modules for both `linux` and `linux-lts`. It installs the
+  AUR `r8152-dkms` package only below kernel 7.2; on 7.2+ it purges that out-of-tree
+  driver, regenerates the initramfs, and reports when a loaded out-of-tree module
+  requires a reboot to activate the in-tree driver.
 - `setup-fedora-workstation.sh` — run as your normal user; Fedora 41+ (dnf5). Adds the
   signed third-party repos (`files/etc/yum.repos.d/`, the tributary copr, RPM Fusion,
   Microsoft VS Code/PowerShell, Claude Code, sing-box; Chrome/NVIDIA/Steam repos on
   x86_64), installs the dnf and flatpak sets (plus the x86_64-only 32-bit/Steam/Chrome
-  extras), and installs Zed plus native AI tools. Antigravity 2.x and its CLI,
-  OpenCode, and Zed use immutable checksum-pinned native artifacts; Codex uses OpenAI's
-  checksum-verifying standalone installer; Claude Code uses Anthropic's signed RPM
+  extras), applies available DNF/Flatpak updates, and installs Zed plus native AI tools.
+  Antigravity 2.0+ and its CLI, OpenCode, and Zed resolve the latest stable native
+  artifacts and their published checksums on each run; Codex uses OpenAI's
+  checksum-verifying current-release installer; Claude Code uses Anthropic's signed RPM
   repository. The abandoned unsigned Antigravity 1.x RPM/repository, its exact
   script-managed IDE settings, and VSCodium are removed, while customized settings or
   repo files are preserved (and retired repos disabled). The script also installs a
-  checksum-pinned Ookla speedtest CLI and the r8152 USB NIC driver from a pinned
-  upstream revision via DKMS, then applies dotfiles, zram policy, services, and GDM
-  settings. Secure Boot hosts are warned when the DKMS MOK still needs enrollment.
+  deliberately fixed, checksum-pinned Ookla speedtest CLI. Below kernel 7.2 it resolves
+  the latest stable r8152 USB NIC driver release to one upstream commit per run and
+  installs it via DKMS; on 7.2+ it purges the out-of-tree driver, reconciles every
+  installed-kernel initramfs, and reports when a loaded out-of-tree module requires a
+  reboot to activate the in-tree driver. The script then applies dotfiles, zram policy,
+  services, and GDM settings. Secure Boot hosts are warned when the DKMS MOK still
+  needs enrollment.
 - `setup-win11-workstation.ps1` — run from an elevated PowerShell (5.1 is enough):
   `powershell -ExecutionPolicy Bypass -File .\setup-win11-workstation.ps1`. Sets up
   OpenSSH Server via `enable-openssh-win11.ps1`, then installs the winget package set.
-  Antigravity 2.x/CLI, Claude Code, Codex, OpenCode, and Zed are checked for upgrades
-  on every run; Antigravity IDE and VSCodium are removed, with Microsoft VS Code kept
-  as the supported Windows editor. One `winget export` snapshot decides the remaining
-  state; "already installed" / "reboot required" results count as success, any other
-  failure is reported at the end (exit code 1) without stopping the run. `-HyperV`
+  Every managed package is checked for upgrades on every run unless explicitly marked
+  presence-only; the deliberately fixed Speedtest CLI is currently the only such
+  package. The highest stable Python 3 minor-package channel is resolved from WinGet
+  rather than hard-coded. Antigravity IDE and VSCodium are removed, with
+  Microsoft VS Code kept as the supported Windows editor. One `winget export` snapshot
+  decides the remaining state; `--include-unknown` keeps versionless registrations from
+  silently freezing, so those vendor installers may run again. "Already installed" /
+  "reboot required" results count as success, and any other failure is reported at the
+  end (exit code 1) without stopping the run. `-HyperV`
   additionally enables the supported Windows optional feature on Pro, Enterprise, or
   Education; Windows 11 Home is rejected.
 

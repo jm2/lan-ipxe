@@ -4,11 +4,12 @@
 # fresh or previously script-managed installation.
 #
 # Architecture:
-#   - UniFi OS Server is installed over TLS with an audited pinned checksum and
-#     managed by its native uosserver.service. It is deliberately NOT wrapped
-#     in a custom Quadlet: its installer owns the rootless Podman stack,
-#     discovery helper, data layout, and Control Plane updates.
-#   - Omada Controller 6.2 remains a rootful Podman Quadlet backed by its own
+#   - A fresh UniFi OS Server install resolves Ubiquiti's latest stable Linux
+#     release metadata, verifies its published SHA-256, and is then managed by
+#     native uosserver.service. It is deliberately NOT wrapped in a custom
+#     Quadlet: its installer owns the rootless Podman stack, discovery helper,
+#     data layout, and Control Plane updates.
+#   - Omada Controller 6 remains a rootful Podman Quadlet backed by its own
 #     private MongoDB Quadlet. AVX hosts use MongoDB 8; non-AVX hosts retain
 #     the legacy MongoDB 4.4 path for t240-class Omada-only deployments.
 #   - Shadowsocks remains a rootful Quadlet; dnsmasq remains a native service.
@@ -90,19 +91,21 @@ STATE_DIR=/var/lib/controller-setup
 CRED_FILE=${STATE_DIR}/credentials.env
 LEGACY_CRED_FILE=${LEGACY_UNIFI_DIR}/credentials.env
 OMADA_IMAGE=${OMADA_IMAGE:-}
-OMADA_STANDARD_IMAGE=${OMADA_STANDARD_IMAGE:-docker.io/mbentley/omada-controller:6.2}
-OMADA_LOW_RAM_IMAGE=${OMADA_LOW_RAM_IMAGE:-docker.io/mbentley/omada-controller:6.2-openj9}
-SS_IMAGE=ghcr.io/shadowsocks/ssserver-rust:latest
+OMADA_STANDARD_IMAGE=${OMADA_STANDARD_IMAGE:-docker.io/mbentley/omada-controller:6}
+OMADA_LOW_RAM_IMAGE=${OMADA_LOW_RAM_IMAGE:-docker.io/mbentley/omada-controller:6-openj9}
+SS_IMAGE=${SS_IMAGE:-ghcr.io/shadowsocks/ssserver-rust:latest}
 SS_PORT=8388
-DEFAULT_UOS_VERSION=5.1.37
 MINIMUM_SAFE_UOS_VERSION=5.1.37
-DEFAULT_UOS_INSTALLER_URL=https://fw-download.ubnt.com/data/unifi-os-server/9aee-linux-x64-5.1.37-a88d909c-2ac0-43f8-bb22-2bff3b673cbb.37-x64
-DEFAULT_UOS_INSTALLER_SHA256=4a5b1f7f29f25733cfc5f7497a63e3dbd4f4a616b352cbbd817a89eb1fa66b61
-UOS_VERSION=${UOS_VERSION:-${DEFAULT_UOS_VERSION}}
+UOS_RELEASE_API_URL='https://fw-update.ui.com/api/firmware-latest?filter=eq~~product~~unifi-os-server&filter=eq~~platform~~linux-x64&filter=eq~~channel~~release'
+UOS_DOWNLOAD_PREFIX=https://fw-download.ubnt.com/data/unifi-os-server/
+if [[ -v UOS_VERSION ]]; then UOS_VERSION_OVERRIDE_SET=1; else UOS_VERSION_OVERRIDE_SET=0; fi
+if [[ -v UOS_INSTALLER_URL ]]; then UOS_URL_OVERRIDE_SET=1; else UOS_URL_OVERRIDE_SET=0; fi
+if [[ -v UOS_INSTALLER_SHA256 ]]; then UOS_SHA256_OVERRIDE_SET=1; else UOS_SHA256_OVERRIDE_SET=0; fi
+UOS_VERSION=${UOS_VERSION:-}
 if [[ -v UOS_WEB_PORT ]]; then UOS_WEB_PORT_EXPLICIT=1; else UOS_WEB_PORT_EXPLICIT=0; fi
 UOS_WEB_PORT=${UOS_WEB_PORT:-11443}
-UOS_INSTALLER_URL=${UOS_INSTALLER_URL:-${DEFAULT_UOS_INSTALLER_URL}}
-UOS_INSTALLER_SHA256=${UOS_INSTALLER_SHA256:-${DEFAULT_UOS_INSTALLER_SHA256}}
+UOS_INSTALLER_URL=${UOS_INSTALLER_URL:-}
+UOS_INSTALLER_SHA256=${UOS_INSTALLER_SHA256:-}
 # dnsmasq LAN DNS (DNS only - no DHCP)
 HAGEZI_URL=https://gitlab.com/hagezi/mirror/-/raw/main/dns-blocklists/dnsmasq/pro.txt
 HAGEZI_CONF=/etc/dnsmasq.d/hagezi-pro.conf
@@ -116,6 +119,171 @@ MONGO_CACHE_GB=${MONGO_CACHE_GB:-}
 log()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m==> WARNING:\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m==> ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+
+#--- Release-update helpers (sourceable by focused tests) --------------------
+validate_uos_release_values() { # <source-label> <version> <url> <sha256>
+  local source_label=$1 version=$2 url=$3 sha256=$4
+  [[ ${version} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || die "${source_label} returned an invalid UniFi OS version '${version}'"
+  [[ ${url} == "${UOS_DOWNLOAD_PREFIX}"* \
+      && ${url#"${UOS_DOWNLOAD_PREFIX}"} =~ ^[A-Za-z0-9._-]+$ ]] \
+    || die "${source_label} returned an invalid UniFi OS download URL '${url}'"
+  [[ ${url#"${UOS_DOWNLOAD_PREFIX}"} == *"-${version}-"* ]] \
+    || die "${source_label} returned a UniFi OS URL that does not match version ${version}"
+  [[ ${sha256} =~ ^[[:xdigit:]]{64}$ ]] \
+    || die "${source_label} returned an invalid UniFi OS SHA-256 digest"
+  printf '%s\n%s\n' "${MINIMUM_SAFE_UOS_VERSION}" "${version}" | sort -V -C \
+    || die "UniFi OS Server ${version} is below the minimum safe version ${MINIMUM_SAFE_UOS_VERSION}"
+}
+
+configure_uos_release_mode() {
+  local override_count=$(( UOS_VERSION_OVERRIDE_SET + UOS_URL_OVERRIDE_SET \
+    + UOS_SHA256_OVERRIDE_SET ))
+  if (( override_count == 0 )); then
+    UOS_RELEASE_MODE=official-latest
+    return 0
+  fi
+  (( override_count == 3 )) \
+    || die "UOS_VERSION, UOS_INSTALLER_URL, and UOS_INSTALLER_SHA256 must be set together for an emergency pin"
+  validate_uos_release_values "Emergency UniFi OS override" \
+    "${UOS_VERSION}" "${UOS_INSTALLER_URL}" "${UOS_INSTALLER_SHA256}"
+  UOS_INSTALLER_SHA256=${UOS_INSTALLER_SHA256,,}
+  UOS_RELEASE_MODE=emergency-pin
+}
+
+load_uos_release_metadata() { # <JSON file>; sets version, URL, and checksum
+  local metadata_file=$1 release_fields raw_version
+  if ! release_fields=$(jq -er '
+    def uint: type == "number" and . >= 0 and floor == .;
+    if (type != "object"
+        or (._embedded | type) != "object"
+        or (._embedded.firmware | type) != "array"
+        or (._embedded.firmware | length) != 1) then
+      error("expected exactly one firmware result")
+    else
+      ._embedded.firmware[0]
+      | if (.product == "unifi-os-server"
+            and .platform == "linux-x64"
+            and .channel == "release"
+            and (.version_major | uint)
+            and (.version_minor | uint)
+            and (.version_patch | uint)
+            and (.version | type == "string")
+            and (.version == ("v" + (.version_major | tostring) + "."
+              + (.version_minor | tostring) + "." + (.version_patch | tostring)))
+            and (.sha256_checksum | type == "string")
+            and (.sha256_checksum | test("^[0-9A-Fa-f]{64}$"))
+            and (._links.data.href | type == "string")
+            and (._links.data.href
+              | test("^https://fw-download\\.ubnt\\.com/data/unifi-os-server/[A-Za-z0-9._-]+$"))
+            and (.file_size | uint)
+            and .file_size > 0) then
+          [.version, .sha256_checksum, ._links.data.href] | @tsv
+        else
+          error("firmware result failed schema validation")
+        end
+    end
+  ' "${metadata_file}"); then
+    die "Ubiquiti's release API returned invalid UniFi OS Server metadata"
+  fi
+  IFS=$'\t' read -r raw_version UOS_INSTALLER_SHA256 UOS_INSTALLER_URL \
+    <<<"${release_fields}"
+  UOS_VERSION=${raw_version#v}
+  UOS_INSTALLER_SHA256=${UOS_INSTALLER_SHA256,,}
+  validate_uos_release_values "Ubiquiti release API" \
+    "${UOS_VERSION}" "${UOS_INSTALLER_URL}" "${UOS_INSTALLER_SHA256}"
+}
+
+# Optional fixture path keeps release-metadata tests offline.
+# shellcheck disable=SC2120
+resolve_uos_bootstrap_release() { # [offline metadata fixture]
+  local metadata_file=${1:-}
+  if [[ ${UOS_RELEASE_MODE} == emergency-pin ]]; then
+    log "Using explicit emergency UniFi OS Server ${UOS_VERSION} bootstrap pin"
+    return 0
+  fi
+  [[ ${UOS_RELEASE_MODE} == official-latest ]] \
+    || die "Unknown UniFi OS release mode '${UOS_RELEASE_MODE}'"
+  if [[ -z ${metadata_file} ]]; then
+    UOS_RELEASE_METADATA_TMP=$(mktemp "${STATE_DIR}/uos-release.XXXXXX.json")
+    metadata_file=${UOS_RELEASE_METADATA_TMP}
+    log "Resolving the latest official UniFi OS Server release"
+    curl --proto '=https' --tlsv1.2 -fL --retry 3 --connect-timeout 30 \
+      --max-time 120 -o "${metadata_file}" "${UOS_RELEASE_API_URL}" \
+      || die "Could not query Ubiquiti's UniFi OS Server release API"
+  fi
+  load_uos_release_metadata "${metadata_file}"
+  if [[ -n ${UOS_RELEASE_METADATA_TMP:-} ]]; then
+    rm -f "${UOS_RELEASE_METADATA_TMP}"
+    UOS_RELEASE_METADATA_TMP=
+  fi
+  log "Resolved official UniFi OS Server ${UOS_VERSION} with published SHA-256"
+}
+
+check_os_update_reboot_requirement() {
+  local status
+  OS_UPDATE_REBOOT_REQUIRED=0
+  OS_UPDATE_REBOOT_CHECK_FAILED=0
+  # dnf-plugins-core documents 0 as current and 1 as a reboot hint. Keep any
+  # other failure distinct so the final summary never reports a false clean state.
+  if dnf needs-restarting -r; then
+    log "Rocky package updates do not require a host reboot"
+  else
+    status=$?
+    if (( status == 1 )); then
+      OS_UPDATE_REBOOT_REQUIRED=1
+      warn "Rocky package updates require a host reboot after setup."
+    else
+      OS_UPDATE_REBOOT_CHECK_FAILED=1
+      warn "Could not determine whether Rocky package updates require a reboot (dnf needs-restarting exited ${status})."
+    fi
+  fi
+}
+
+image_identity() { # <mutable image reference>; emits stable ID/digest input
+  local image=$1 inspect_json identity
+  if ! inspect_json=$(podman image inspect "${image}"); then
+    die "Could not inspect pulled image ${image}"
+  fi
+  if ! identity=$(jq -er --arg image "${image}" '
+    if type != "array" or length != 1 then
+      error("expected one inspected image")
+    else
+      .[0]
+      | (.Id // "") as $id
+      | (.Digest // "") as $digest
+      | if (($id | type) == "string"
+            and ($id | test("^(sha256:)?[0-9A-Fa-f]{64}$"))
+            and ($digest | type) == "string"
+            and ($digest | test("^sha256:[0-9A-Fa-f]{64}$"))) then
+          "reference=\($image)\nid=\($id)\ndigest=\($digest)"
+        else
+          error("image identity failed validation")
+        end
+    end
+  ' <<<"${inspect_json}"); then
+    die "Pulled image ${image} returned an invalid ID/digest"
+  fi
+  printf '%s\n' "${identity}"
+}
+
+refresh_mutable_image() { # <mutable image reference> <identity state file>
+  local image=$1 state_file=$2 identity
+  log "Refreshing mutable image channel ${image}"
+  podman pull -q "${image}" >/dev/null \
+    || die "Could not pull image ${image}"
+  if ! identity=$(image_identity "${image}"); then
+    die "Could not record identity for pulled image ${image}"
+  fi
+  printf '%s\n' "${identity}" | atomic_write_file "${state_file}" 600
+}
+
+prune_dangling_images() {
+  log "Pruning unused dangling container images for the small-storage profile"
+  podman image prune --force >/dev/null \
+    || die "Could not prune unused dangling container images"
+}
+#--- End release-update helpers ---------------------------------------------
 
 usage() {
   cat <<EOF
@@ -158,6 +326,11 @@ LOW_RAM_MODE, SMALL_STORAGE_MODE, ZRAM_MODE (auto|on|off|0|1), LANCACHE_IP,
 and FIREWALL_ZONE. Arguments override the environment. MongoDB is provisioned
 only for Omada. Zram auto mode ignores already-active /dev/zram devices when
 deciding whether the host has another swap provider.
+OMADA_IMAGE and SS_IMAGE may override their default moving container channels
+temporarily during an upstream incident.
+Fresh UniFi OS installs resolve Ubiquiti's latest release by default. As an
+emergency-only pin, UOS_VERSION, UOS_INSTALLER_URL, and
+UOS_INSTALLER_SHA256 must all be explicitly set to a matching release.
 Disabling a component on a re-run stops it and removes its quadlet/units;
 data directories and images are kept for manual cleanup.
 
@@ -259,17 +432,7 @@ SELINUX_MODE=$(getenforce 2>/dev/null || echo Disabled)
 [[ ${UOS_WEB_PORT} =~ ^[0-9]+$ ]] && (( UOS_WEB_PORT >= 1025 && UOS_WEB_PORT <= 65535 )) \
   || die "UOS_WEB_PORT must be an integer from 1025 through 65535"
 if (( ENABLE_UNIFI_OS )); then
-  [[ ${UOS_VERSION} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
-    || die "UOS_VERSION must be a three-part numeric version (got '${UOS_VERSION}')"
-  printf '%s\n%s\n' "${MINIMUM_SAFE_UOS_VERSION}" "${UOS_VERSION}" | sort -V -C \
-    || die "UniFi OS Server ${UOS_VERSION} is below the minimum safe version ${MINIMUM_SAFE_UOS_VERSION}"
-  if [[ ${UOS_VERSION} == "${DEFAULT_UOS_VERSION}" ]]; then
-    [[ ${UOS_INSTALLER_SHA256,,} == "${DEFAULT_UOS_INSTALLER_SHA256}" ]] \
-      || die "A custom UOS installer checksum also requires an explicit matching UOS_VERSION"
-  elif [[ ${UOS_INSTALLER_URL} == "${DEFAULT_UOS_INSTALLER_URL}" \
-       || ${UOS_INSTALLER_SHA256,,} == "${DEFAULT_UOS_INSTALLER_SHA256}" ]]; then
-    die "A non-default UOS_VERSION requires matching UOS_INSTALLER_URL and UOS_INSTALLER_SHA256 overrides"
-  fi
+  configure_uos_release_mode
 fi
 
 MEM_TOTAL_KB=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
@@ -359,7 +522,7 @@ HOME_SOURCE=$(findmnt -n -o SOURCE -T /home 2>/dev/null || true)
 if [[ -n ${HOME_SOURCE} && ${HOME_SOURCE} != "${ROOT_SOURCE}" ]]; then
   warn "/home is on ${HOME_SOURCE}, separate from ${ROOT_SOURCE}; UniFi OS stores primary data under /home, and exact per-filesystem checks follow"
 elif (( ENABLE_UNIFI_OS && ROOT_AVAIL_MB < 25600 )); then
-  warn "UniFi OS meets the pinned installer's path minimums but has less than 25GiB operational/update headroom"
+  warn "UniFi OS meets the installer path minimums but has less than 25GiB operational/update headroom"
 fi
 
 TZ_VAL=$(timedatectl show -p Timezone --value 2>/dev/null) || TZ_VAL=
@@ -390,11 +553,15 @@ fi
 #--- Packages ---------------------------------------------------------------
 # The minimal ISO determines only the initial package set. Install everything
 # needed below from Rocky's normal enabled BaseOS/AppStream repositories.
+OS_UPDATE_REBOOT_REQUIRED=0
+OS_UPDATE_REBOOT_CHECK_FAILED=0
 BASE_PACKAGES=(
-  bash-completion container-selinux curl dnf-automatic e2fsprogs firewalld
-  git iperf3 nano net-tools NetworkManager-wifi openssl passt pciutils podman
-  rsync slirp4netns udisks2 usbutils vim-enhanced wget
+  bash-completion container-selinux curl dnf-automatic dnf-plugins-core
+  e2fsprogs firewalld git iperf3 jq nano net-tools NetworkManager-wifi openssl
+  passt pciutils podman rsync slirp4netns udisks2 usbutils vim-enhanced wget
 )
+log "Applying available Rocky package updates"
+dnf -y upgrade --refresh
 log "Installing Rocky/EL10 baseline and container prerequisites"
 dnf -y install "${BASE_PACKAGES[@]}" >/dev/null
 if (( ENABLE_DNS )); then
@@ -635,6 +802,8 @@ EOF
   fi
 fi
 
+check_os_update_reboot_requirement # all DNF transactions are complete
+
 if (( LOW_RAM_ACTIVE )); then
   log "Low-RAM application profile active (OpenJ9 and bounded JVM/MongoDB memory)"
 else
@@ -771,8 +940,8 @@ else
   fi
 fi
 
-# General SSD/eMMC maintenance. Rootful images use pull-once tags and no
-# AutoUpdate= directive, so global Podman update policy is left untouched.
+# General SSD/eMMC maintenance. This script refreshes its enabled mutable
+# image channels explicitly, so global Podman auto-update policy stays untouched.
 systemctl enable --now fstrim.timer >/dev/null 2>&1 \
   || warn "could not enable fstrim.timer"
 
@@ -1074,16 +1243,24 @@ fi
 # a later run restarts the service only when the current files differ from
 # that record, or when it isn't running. This catches script changes,
 # manual edits under /etc, and a run interrupted between write and restart
-# - while a no-op re-run leaves every running service untouched. Images
-# are pinned (never re-pulled), so an image change always appears as a
-# quadlet Image= edit, i.e. file hashes cover images too.
+# - while a no-op re-run leaves every running service untouched. Mutable image
+# channels are always pulled; their resolved IDs/digests are service inputs so
+# only a newly published image changes the hash and triggers a restart.
+#--- Service input catalog (sourceable by focused tests) --------------------
+OMADA_DB_IMAGE_STATE=${STATE_DIR}/omada-db-image.identity
+OMADA_IMAGE_STATE=${STATE_DIR}/omada-image.identity
+SS_IMAGE_STATE=${STATE_DIR}/shadowsocks-image.identity
 OMADA_DB_FILES=("${QUADLET_DIR}/omada-db.container" "${QUADLET_DIR}/omada.network"
-                "${OMADA_DIR}/omada-db.env" "${OMADA_DIR}/init-mongo.sh")
-OMADA_FILES=("${QUADLET_DIR}/omada.container" "${OMADA_DIR}/omada.env")
-SS_FILES=("${QUADLET_DIR}/shadowsocks.container" "${SS_DIR}/config.json")
+                "${OMADA_DIR}/omada-db.env" "${OMADA_DIR}/init-mongo.sh"
+                "${OMADA_DB_IMAGE_STATE}")
+OMADA_FILES=("${QUADLET_DIR}/omada.container" "${OMADA_DIR}/omada.env"
+             "${OMADA_IMAGE_STATE}")
+SS_FILES=("${QUADLET_DIR}/shadowsocks.container" "${SS_DIR}/config.json"
+          "${SS_IMAGE_STATE}")
 # hagezi-pro.conf and lancache.conf are excluded on purpose: their own
 # updater/toggle already restart dnsmasq exactly when they change
 DNSMASQ_FILES=(/etc/dnsmasq.conf /etc/dnsmasq.d/lan-dns.conf)
+#--- End service input catalog ----------------------------------------------
 
 # The || true keeps a missing input file from tripping set -e/pipefail:
 # it still changes the hash (restart), it must never kill the script
@@ -1246,7 +1423,7 @@ WantedBy=multi-user.target
 EOF
 fi
 
-#--- Quadlet: Omada Controller 6.2 (external Mongo) -------------------------
+#--- Quadlet: Omada Controller 6 (external Mongo) ---------------------------
 if (( ENABLE_OMADA )); then
 log "Writing ${QUADLET_RENDER_DIR}/omada.container"
 atomic_write_file "${QUADLET_RENDER_DIR}/omada.container" 600 <<EOF
@@ -1543,11 +1720,13 @@ fi
 uos_unit_exists() { systemctl cat uosserver.service >/dev/null 2>&1; }
 uos_updater_unit_exists() { systemctl cat uosserver-updater.service >/dev/null 2>&1; }
 UOS_INSTALLER_TMP=
+UOS_RELEASE_METADATA_TMP=
 UOS_BOOTSTRAP_STATE=${STATE_DIR}/uos-bootstrap-version
 cleanup_controller_setup() {
   local status=$?
   trap - EXIT INT TERM
   [[ -z ${UOS_INSTALLER_TMP:-} ]] || rm -f "${UOS_INSTALLER_TMP}"
+  [[ -z ${UOS_RELEASE_METADATA_TMP:-} ]] || rm -f "${UOS_RELEASE_METADATA_TMP}"
   if (( status != 0 && LEGACY_CUTOVER_PENDING )); then
     set +e
     if declare -F restore_legacy_stack_after_uos_failure >/dev/null; then
@@ -1582,7 +1761,7 @@ check_uos_path_space() {
   local path=$1 required_mb=$2 available_mb
   available_mb=$(df --output=avail -BM "${path}" | awk 'NR==2 {gsub(/M/, ""); print $1}')
   (( available_mb >= required_mb )) \
-    || die "Only ${available_mb}MiB free on the filesystem containing ${path}; the pinned UniFi OS ${UOS_VERSION} installer requires ${required_mb}MiB there."
+    || die "Only ${available_mb}MiB free on the filesystem containing ${path}; the resolved UniFi OS ${UOS_VERSION} installer requires ${required_mb}MiB there."
 }
 
 if (( ENABLE_UNIFI_OS )) && command -v uosserver >/dev/null 2>&1 && ! uos_unit_exists; then
@@ -1615,8 +1794,9 @@ if (( ENABLE_UNIFI_OS )) && uos_unit_exists; then
   validate_uos_port_conflicts
 fi
 if (( ENABLE_UNIFI_OS )) && ! uos_unit_exists; then
-  # Version-coupled checks observed in the pinned installer. The vendor still
-  # performs its own authoritative checks; these fail before a 749MiB download.
+  resolve_uos_bootstrap_release
+  # Conservative checks observed across current vendor installers. The vendor
+  # still performs its own authoritative checks; these fail before download.
   check_uos_path_space /home 15360
   check_uos_path_space /var/lib 1024
   check_uos_path_space /usr/local/bin 128
@@ -1625,7 +1805,7 @@ if (( ENABLE_UNIFI_OS )) && ! uos_unit_exists; then
   [[ ${UOS_INSTALLER_SHA256} =~ ^[[:xdigit:]]{64}$ ]] \
     || die "UOS_INSTALLER_SHA256 must be a 64-character SHA-256 digest"
   UOS_INSTALLER_TMP=$(mktemp "${STATE_DIR}/uos-installer.XXXXXX")
-  log "Downloading audited UniFi OS Server ${UOS_VERSION} bootstrap installer"
+  log "Downloading checksum-published UniFi OS Server ${UOS_VERSION} bootstrap installer"
   curl --proto '=https' --tlsv1.2 -fL --retry 3 --connect-timeout 30 \
     --max-time 1800 -o "${UOS_INSTALLER_TMP}" "${UOS_INSTALLER_URL}" \
     || die "UniFi OS Server installer download failed"
@@ -1636,20 +1816,18 @@ if (( ENABLE_UNIFI_OS )) && ! uos_unit_exists; then
   log "UniFi OS Server installer checksum verified"
 fi
 
-# Rootful Quadlet images are pulled before stopping an old stack. Tags are
-# pull-once: reruns do not change a known-good image without operator action.
-IMAGES=()
-if (( ENABLE_MONGO ));       then IMAGES+=("docker.io/mongo:${MONGO_TAG}"); fi
-if (( ENABLE_OMADA ));       then IMAGES+=("${OMADA_IMAGE}"); fi
-if (( ENABLE_SHADOWSOCKS )); then IMAGES+=("${SS_IMAGE}"); fi
-for img in "${IMAGES[@]}"; do
-  if podman image exists "${img}"; then
-    log "Image present (pull-once): ${img}"
-  else
-    log "Pulling ${img}"
-    podman pull -q "${img}" >/dev/null
-  fi
-done
+# Refresh enabled mutable channels before stopping an old stack. The identity
+# files are hashed with each service's configuration later, so an unchanged
+# pull causes no restart while a newly published image is activated safely.
+if (( ENABLE_MONGO )); then
+  refresh_mutable_image "docker.io/mongo:${MONGO_TAG}" "${OMADA_DB_IMAGE_STATE}"
+fi
+if (( ENABLE_OMADA )); then
+  refresh_mutable_image "${OMADA_IMAGE}" "${OMADA_IMAGE_STATE}"
+fi
+if (( ENABLE_SHADOWSOCKS )); then
+  refresh_mutable_image "${SS_IMAGE}" "${SS_IMAGE_STATE}"
+fi
 
 #--- Quiesce legacy and disabled components; all data is retained -----------
 if (( LEGACY_UNIFI_QUADLETS )); then
@@ -1995,7 +2173,6 @@ if (( ENABLE_MONGO )); then
   fi
   start_unit_and_verify_active omada-db \
     || die "omada-db.service/container failed to start"
-  record_applied omada-db "${OMADA_DB_FILES[@]}"
 
   log "Verifying MongoDB authentication and the Omada user"
   mongo_user_count() {
@@ -2019,6 +2196,7 @@ EOF
     fi
   done
   log "Omada MongoDB ready"
+  record_applied omada-db "${OMADA_DB_FILES[@]}"
 fi
 
 if (( ENABLE_DNS )); then
@@ -2066,12 +2244,14 @@ if (( ENABLE_OMADA )); then
     log "Starting omada"
     start_unit_and_verify_active omada \
       || die "omada.service failed to start"
-    record_applied omada "${OMADA_FILES[@]}"
   else
     log "omada unchanged; leaving it running"
   fi
   wait_for_https "Omada" https://localhost:8043 900 \
     || die "Omada readiness failed; see journalctl -eu omada.service"
+  if (( RESTART_OMADA )); then
+    record_applied omada "${OMADA_FILES[@]}"
+  fi
 fi
 if (( LEGACY_CUTOVER_PENDING )); then
   rm -f "${LEGACY_CUTOVER_STATE}"
@@ -2120,11 +2300,11 @@ if (( ENABLE_DNS )); then
 fi
 log "All enabled services passed runtime checks"
 
-# Tagged-image deletion is exclusively a small-storage control.
-if (( SMALL_STORAGE_ACTIVE && ENABLE_OMADA )); then
-  podman images --format '{{.Repository}}:{{.Tag}}' docker.io/mbentley/omada-controller 2>/dev/null \
-    | grep -vxF "${OMADA_IMAGE}" | xargs -r podman rmi >/dev/null 2>&1 \
-    || true
+# Pulling a mutable tag leaves its previous image dangling once every service
+# has switched to the new identity. Reclaim those unused layers only for the
+# explicitly selected small-storage profile and only after all runtime checks.
+if (( SMALL_STORAGE_ACTIVE )); then
+  prune_dangling_images
 fi
 
 #--- Summary ----------------------------------------------------------------
@@ -2148,7 +2328,7 @@ if (( ENABLE_UNIFI_OS )); then
 fi
 if (( ENABLE_OMADA )); then
   if (( LOW_RAM_ACTIVE )); then OMADA_JVM_LABEL=OpenJ9; else OMADA_JVM_LABEL=OpenJDK; fi
-  echo " Omada 6.2        : https://${HOST_IP}:8043 (${OMADA_JVM_LABEL}; portal on 8844)"
+  echo " Omada 6 channel  : https://${HOST_IP}:8043 (${OMADA_JVM_LABEL}; portal on 8844)"
   echo " Omada MongoDB    : mongo:${MONGO_TAG} in omada-db; cache=${MONGO_CACHE_GB}GiB"
 fi
 if (( ENABLE_COCKPIT )); then
@@ -2170,7 +2350,7 @@ if (( NEED_CREDENTIALS )); then
   echo " Credentials      : ${CRED_FILE} (mode 600)"
 fi
 if (( ENABLE_OMADA || ENABLE_SHADOWSOCKS )); then
-  echo " Rootful Quadlets : ${QUADLET_DIR}; pull-once images update only by operator action"
+  echo " Rootful Quadlets : ${QUADLET_DIR}; mutable channels refreshed, restart only on new image identity"
 fi
 if (( ZRAM_ACTIVE )); then
   if (( ZRAM_CONFIG_MANAGED )); then
@@ -2197,6 +2377,13 @@ else
   echo " Storage tuning   : inactive; normal kernel/journal/cache/image policy retained"
 fi
 echo " General host     : SELinux=$(getenforce 2>/dev/null || echo unknown), fstrim.timer on, dnf-automatic applies updates/reboots when needed"
+if (( OS_UPDATE_REBOOT_REQUIRED )); then
+  echo " OS update state  : reboot required/recommended after this setup run"
+elif (( OS_UPDATE_REBOOT_CHECK_FAILED )); then
+  echo " OS update state  : reboot requirement could not be determined; review the warning above"
+else
+  echo " OS update state  : current; no reboot required by this setup run"
+fi
 
 if (( ENABLE_UNIFI_OS )); then
   echo

@@ -7,19 +7,19 @@ Replaces the former comtrya manifest win11_workstation.yaml (comtrya is
 unmaintained upstream). Run from an elevated PowerShell; Windows PowerShell
 5.1 is enough (PowerShell 7 is one of the packages it installs).
 
-Safe to re-run: every step reconciles state first. Ordinary converged packages
-are left alone; selected fast-moving developer tools still receive a WinGet
-upgrade check.
+Safe to re-run: every step reconciles state first. Installed desired packages
+receive an exact-ID WinGet upgrade check unless they are explicitly exempted
+as presence-only.
 
   1. OpenSSH Server via enable-openssh-win11.ps1. Every run reconciles the
      capability, sshd state/start type, firewall rule, and DefaultShell.
   2. Hyper-V via the supported Windows optional feature - only with -HyperV.
      Windows 11 Pro/Enterprise (not Home) and compatible hardware are required.
   3. The winget package set. One `winget export` snapshot of what is
-     installed decides what is missing. Ordinary installed packages are left
-     alone, while the actively developed AI CLIs/editors are checked for
-     updates every run. The legacy Antigravity IDE and VSCodium packages are
-     removed in favor of Antigravity 2.0 and Microsoft VS Code. "Already
+     installed decides what is missing. Installed desired packages are checked
+     for updates every run, except for the explicitly presence-only Speedtest
+     CLI. The legacy Antigravity IDE and VSCodium packages are removed in favor
+     of Antigravity 2.0 and Microsoft VS Code. "Already
      installed" and "reboot required" results count as success; any other
      failure is reported at the end (exit code 1) without stopping the run, so
      one broken installer never blocks the rest.
@@ -90,7 +90,6 @@ $WingetPackages = @(
     'OpenAI.Codex'
     'Plex.Plex'
     'PuTTY.PuTTY'
-    'Python.Python.3.14'
     'Rufus.Rufus'
     'Rustlang.Rustup'
     'Silicondust.HDHomeRun'
@@ -110,13 +109,9 @@ $WingetPackages = @(
     # x64-only candidate, never enabled in the manifest:
     # 'Intel.IntelDriverAndSupportAssistant'
 )
-$WingetAlwaysUpgradePackages = @(
-    'Anthropic.ClaudeCode'
-    'Google.Antigravity'
-    'Google.AntigravityCLI'
-    'OpenAI.Codex'
-    'SST.opencode'
-    'ZedIndustries.Zed'
+$WingetPresenceOnlyPackages = @(
+    # Preserve the deliberately fixed Speedtest CLI once it is installed.
+    'Ookla.Speedtest.CLI'
 )
 $WingetLegacyPackages = @(
     'Google.AntigravityIDE'
@@ -200,10 +195,49 @@ function Get-WingetInventory {
     }
 }
 
-# Reconcile the package set from a single inventory snapshot. Selected current
-# AI CLIs/editors move quickly, so installed copies are upgraded instead of
-# being treated as converged. Superseded packages are removed before their
-# supported replacements are installed/upgraded.
+# Python publishes a separate WinGet package ID for each 3.x minor release, so
+# upgrading one exact ID can never migrate to the next minor. Resolve the
+# highest numeric Python.Python.3.N ID exposed by the native WinGet source.
+function Resolve-LatestPythonWingetPackageId {
+    $prefix = 'Python.Python.3.'
+    $output = @(
+        & winget search --id $prefix --source winget --count 1000 `
+            --accept-source-agreements --disable-interactivity 2>&1
+    )
+    $code = $LASTEXITCODE
+    if ($code -ne 0) {
+        throw ("winget could not resolve the latest Python 3 package ID (0x{0:X8} / {0})" -f $code)
+    }
+
+    $text = ([string[]]$output) -join [Environment]::NewLine
+    $idMatches = [regex]::Matches(
+        $text,
+        '(?<![A-Za-z0-9.])Python\.Python\.3\.(?<Minor>[0-9]+)(?=[\t ]|$)'
+    )
+    $ids = @($idMatches | ForEach-Object { $_.Value } | Sort-Object -Unique)
+    if ($ids.Count -eq 0) {
+        throw 'winget returned no stable Python.Python.3.N package IDs'
+    }
+
+    $ranked = @($ids | ForEach-Object {
+        $minor = 0
+        if (-not [int]::TryParse($_.Substring($prefix.Length), [ref]$minor)) {
+            throw "winget returned an unsupported Python package ID: $_"
+        }
+        [pscustomobject]@{ Id = $_; Minor = $minor }
+    })
+    $highestMinor = ($ranked | Measure-Object -Property Minor -Maximum).Maximum
+    $latest = @($ranked | Where-Object { $_.Minor -eq $highestMinor })
+    if ($latest.Count -ne 1) {
+        throw "winget returned ambiguous Python 3 package IDs for minor $highestMinor"
+    }
+    return [string]$latest[0].Id
+}
+
+# Reconcile the package set from a single inventory snapshot. Installed desired
+# packages are checked for updates unless explicitly declared presence-only.
+# Superseded packages are removed before their supported replacements are
+# installed/upgraded.
 function Invoke-WingetPackageSet {
     [CmdletBinding()]
     param(
@@ -213,21 +247,27 @@ function Invoke-WingetPackageSet {
         [Parameter(Mandatory = $true)]
         [string[]]$DesiredIds,
 
-        [string[]]$AlwaysUpgradeIds = @(),
+        [string[]]$PresenceOnlyIds = @(),
 
         [string[]]$LegacyIds = @()
     )
+
+    foreach ($id in $PresenceOnlyIds) {
+        if ($DesiredIds -notcontains $id) {
+            throw "Presence-only WinGet package is not in the desired set: $id"
+        }
+    }
 
     $present = @()
     $missing = @()
     $upgrade = @()
     foreach ($id in $DesiredIds) {
         if ($InstalledIds -contains $id) {
-            if ($AlwaysUpgradeIds -contains $id) {
-                $upgrade += $id
+            if ($PresenceOnlyIds -contains $id) {
+                $present += $id
             }
             else {
-                $present += $id
+                $upgrade += $id
             }
         }
         else {
@@ -235,7 +275,7 @@ function Invoke-WingetPackageSet {
         }
     }
 
-    Write-Note "$($present.Count) ordinary present, $($missing.Count) missing, $($upgrade.Count) checking for updates"
+    Write-Note "$($present.Count) presence-only, $($missing.Count) missing, $($upgrade.Count) checking for updates"
 
     $removedLegacy = @()
     $installedNow = @()
@@ -285,7 +325,10 @@ function Invoke-WingetPackageSet {
 
     foreach ($id in $upgrade) {
         Write-Note "updating $id"
-        & winget upgrade --id $id --exact --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Host
+        # include-unknown prevents packages whose installed version is not
+        # registered from silently freezing forever. Such a vendor installer
+        # may be invoked again on a later setup run; Speedtest is exempt above.
+        & winget upgrade --id $id --exact --source winget --include-unknown --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Host
         $code = $LASTEXITCODE
         if ($WingetRebootCodes -contains $code) { $script:RebootNeeded = $true }
         if ($WingetOkCodes.ContainsKey($code)) {
@@ -358,17 +401,22 @@ if ($HyperV) {
 }
 
 #--- 3. winget packages -----------------------------------------------------
+Write-Step 'Resolving dynamic WinGet package channels'
+$latestPythonPackageId = Resolve-LatestPythonWingetPackageId
+$WingetPackages += $latestPythonPackageId
+Write-Note "Python 3: selected current WinGet channel $latestPythonPackageId"
+
 Write-Step "winget package set ($($WingetPackages.Count) entries)"
 $installedIds = Get-WingetInventory
 $wingetResult = Invoke-WingetPackageSet `
     -InstalledIds $installedIds `
     -DesiredIds $WingetPackages `
-    -AlwaysUpgradeIds $WingetAlwaysUpgradePackages `
+    -PresenceOnlyIds $WingetPresenceOnlyPackages `
     -LegacyIds $WingetLegacyPackages
 
 #--- Summary ----------------------------------------------------------------
 Write-Step 'Summary'
-Write-Note "winget: $($wingetResult.Installed.Count) installed now, $($wingetResult.UpdatedOrCurrent.Count) updated/current, $($wingetResult.Present.Count) ordinary present, $($wingetResult.RemovedLegacy.Count) legacy removed, $($wingetResult.Deferred.Count) deferred, $($wingetResult.Failed.Count) failed"
+Write-Note "winget: $($wingetResult.Installed.Count) installed now, $($wingetResult.UpdatedOrCurrent.Count) updated/current, $($wingetResult.Present.Count) presence-only, $($wingetResult.RemovedLegacy.Count) legacy removed, $($wingetResult.Deferred.Count) deferred, $($wingetResult.Failed.Count) failed"
 if ($wingetResult.Deferred.Count) { Write-Note "deferred (re-run after a reboot): $($wingetResult.Deferred -join ', ')" }
 if ($wingetResult.Failed.Count)   { Write-Note "failed: $($wingetResult.Failed -join ', ')" }
 if ($script:RebootNeeded) {
