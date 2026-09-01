@@ -153,7 +153,8 @@ payloads (`files/`) relative to their own location.
   replacements. The package selection intentionally includes Intel/AMD graphics
   support and NVIDIA open modules for both `linux` and `linux-lts`. It installs the
   AUR `r8152-dkms` package only below kernel 7.2; on 7.2+ it purges that out-of-tree
-  driver and regenerates the initramfs.
+  driver, regenerates the initramfs, and reports when a loaded external module
+  requires a reboot to activate the in-tree driver.
 - `setup-fedora-workstation.sh` — run as your normal user; Fedora 41+ (dnf5). Adds the
   signed third-party repos (`files/etc/yum.repos.d/`, the tributary copr, RPM Fusion,
   Microsoft VS Code/PowerShell, Claude Code, sing-box; Chrome/NVIDIA/Steam repos on
@@ -167,16 +168,18 @@ payloads (`files/`) relative to their own location.
   repo files are preserved (and retired repos disabled). The script also installs a
   deliberately fixed, checksum-pinned Ookla speedtest CLI. Below kernel 7.2 it resolves
   the latest stable r8152 USB NIC driver release to one upstream commit per run and
-  installs it via DKMS; on 7.2+ it purges the out-of-tree driver and reconciles every
-  installed-kernel initramfs. The script then applies dotfiles, zram policy, services,
-  and GDM settings. Secure Boot hosts are warned when the DKMS MOK still needs
-  enrollment.
+  installs it via DKMS; on 7.2+ it purges the out-of-tree driver, reconciles every
+  installed-kernel initramfs, and reports when a loaded external module requires a
+  reboot to activate the in-tree driver. The script then applies dotfiles, zram policy,
+  services, and GDM settings. Secure Boot hosts are warned when the DKMS MOK still
+  needs enrollment.
 - `setup-win11-workstation.ps1` — run from an elevated PowerShell (5.1 is enough):
   `powershell -ExecutionPolicy Bypass -File .\setup-win11-workstation.ps1`. Sets up
   OpenSSH Server via `enable-openssh-win11.ps1`, then installs the winget package set.
-  Every managed package is checked for upgrades on every run except the deliberately
-  fixed Speedtest CLI; the highest stable Python 3 minor-package channel is resolved
-  from WinGet rather than hard-coded. Antigravity IDE and VSCodium are removed, with
+  Every upgrade-capable managed package is checked for upgrades on every run;
+  presence-only packages and the deliberately fixed Speedtest CLI are excluded. The
+  highest stable Python 3 minor-package channel is resolved from WinGet rather than
+  hard-coded. Antigravity IDE and VSCodium are removed, with
   Microsoft VS Code kept as the supported Windows editor. One `winget export` snapshot
   decides the remaining state; `--include-unknown` keeps versionless registrations from
   silently freezing, so those vendor installers may run again. "Already installed" /
