@@ -1005,7 +1005,7 @@ test_arch_r8152_purge() (
 
 test_arch_r8152_initramfs_detection() (
   load_helpers setup-arch-workstation.sh
-  local mode=external
+  local mode=external image=${TEST_ROOT}/arch-r8152-mock.img
   sudo() {
     [[ $1 == lsinitrd ]]
     if [[ ${mode} == external ]]; then
@@ -1014,9 +1014,9 @@ test_arch_r8152_initramfs_detection() (
       printf 'usr/lib/modules/7.2.1-arch1-1/kernel/drivers/net/usb/r8152.ko.zst\n'
     fi
   }
-  initramfs_has_out_of_tree_r8152 /tmp/mock.img 7.2.1-arch1-1
+  initramfs_has_out_of_tree_r8152 "${image}" 7.2.1-arch1-1
   mode=in-tree
-  ! initramfs_has_out_of_tree_r8152 /tmp/mock.img 7.2.1-arch1-1
+  ! initramfs_has_out_of_tree_r8152 "${image}" 7.2.1-arch1-1
   grep -Fq 'DRACUT_REBUILD=${R8152_ARCH_PURGE_CHANGED}' \
     "${REPO_ROOT}/setup-arch-workstation.sh"
 )
