@@ -7,18 +7,22 @@ Replaces the former comtrya manifest win11_workstation.yaml (comtrya is
 unmaintained upstream). Run from an elevated PowerShell; Windows PowerShell
 5.1 is enough (PowerShell 7 is one of the packages it installs).
 
-Safe to re-run: every step reconciles state first, so a converged machine is a
-fast no-op apart from the WinGet inventory refresh.
+Safe to re-run: every step reconciles state first. Ordinary converged packages
+are left alone; selected fast-moving developer tools still receive a WinGet
+upgrade check.
 
   1. OpenSSH Server via enable-openssh-win11.ps1. Every run reconciles the
      capability, sshd state/start type, firewall rule, and DefaultShell.
   2. Hyper-V via the supported Windows optional feature - only with -HyperV.
      Windows 11 Pro/Enterprise (not Home) and compatible hardware are required.
   3. The winget package set. One `winget export` snapshot of what is
-     installed decides what is missing; each missing package is then
-     installed silently. "Already installed" and "reboot required" results
-     count as success; any other failure is reported at the end (exit code 1)
-     without stopping the run, so one broken installer never blocks the rest.
+     installed decides what is missing. Ordinary installed packages are left
+     alone, while the actively developed AI CLIs/editors are checked for
+     updates every run. The legacy Antigravity IDE and VSCodium packages are
+     removed in favor of Antigravity 2.0 and Microsoft VS Code. "Already
+     installed" and "reboot required" results count as success; any other
+     failure is reported at the end (exit code 1) without stopping the run, so
+     one broken installer never blocks the rest.
 
 .PARAMETER HyperV
 Also enable the supported Hyper-V optional feature. Windows 11 Home is rejected;
@@ -59,7 +63,6 @@ $WingetPackages = @(
     'Google.AndroidStudio'
     'Google.Antigravity'
     'Google.AntigravityCLI'
-    'Google.AntigravityIDE'
     'Google.Chrome'
     'Google.GoogleDrive'
     'Google.PlatformTools'
@@ -91,6 +94,7 @@ $WingetPackages = @(
     'Rufus.Rufus'
     'Rustlang.Rustup'
     'Silicondust.HDHomeRun'
+    'SST.opencode'
     'SuperTux.SuperTux'
     'SuperTuxKart.SuperTuxKart'
     'Tailscale.Tailscale'
@@ -98,13 +102,25 @@ $WingetPackages = @(
     'Valve.Steam'
     'Ventoy.Ventoy'
     'VideoLAN.VLC'
-    'VSCodium.VSCodium'
     'WinDirStat.WinDirStat'
     'WinSCP.WinSCP'
     'WiresharkFoundation.Wireshark'
     'Xming.Xming'
+    'ZedIndustries.Zed'
     # x64-only candidate, never enabled in the manifest:
     # 'Intel.IntelDriverAndSupportAssistant'
+)
+$WingetAlwaysUpgradePackages = @(
+    'Anthropic.ClaudeCode'
+    'Google.Antigravity'
+    'Google.AntigravityCLI'
+    'OpenAI.Codex'
+    'SST.opencode'
+    'ZedIndustries.Zed'
+)
+$WingetLegacyPackages = @(
+    'Google.AntigravityIDE'
+    'VSCodium.VSCodium'
 )
 
 # winget exit codes (AppInstallerErrors.h). PowerShell parses these hex
@@ -121,6 +137,12 @@ $WingetRebootCodes = @(0x8A150109, 0x8A15010A, 0x8A15010B)
 # Not installed yet, but only a reboot stands in the way: re-run afterwards
 $WingetDeferredCodes = @{
     0x8A15010A = 'a reboot is required before this can be installed'  # INSTALL_REBOOT_REQUIRED_FOR_INSTALL
+}
+$WingetRemoveOkCodes = @{
+    0          = 'removed'
+    0x8A150014 = 'already absent'                            # NO_APPLICATIONS_FOUND
+    0x8A150109 = 'removed - reboot required to finish'      # INSTALL_REBOOT_REQUIRED_TO_FINISH
+    0x8A15010B = 'removed - the uninstaller initiated a reboot' # INSTALL_REBOOT_INITIATED
 }
 $WingetExportOkCodes = @(0, 0x8A150035) # success, or NOT_ALL_PACKAGES_FOUND
 
@@ -178,6 +200,118 @@ function Get-WingetInventory {
     }
 }
 
+# Reconcile the package set from a single inventory snapshot. Selected current
+# AI CLIs/editors move quickly, so installed copies are upgraded instead of
+# being treated as converged. Superseded packages are removed before their
+# supported replacements are installed/upgraded.
+function Invoke-WingetPackageSet {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$InstalledIds,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$DesiredIds,
+
+        [string[]]$AlwaysUpgradeIds = @(),
+
+        [string[]]$LegacyIds = @()
+    )
+
+    $present = @()
+    $missing = @()
+    $upgrade = @()
+    foreach ($id in $DesiredIds) {
+        if ($InstalledIds -contains $id) {
+            if ($AlwaysUpgradeIds -contains $id) {
+                $upgrade += $id
+            }
+            else {
+                $present += $id
+            }
+        }
+        else {
+            $missing += $id
+        }
+    }
+
+    Write-Note "$($present.Count) ordinary present, $($missing.Count) missing, $($upgrade.Count) checking for updates"
+
+    $removedLegacy = @()
+    $installedNow = @()
+    $updatedOrCurrent = @()
+    $deferred = @()
+    $failed = @()
+
+    foreach ($id in $LegacyIds) {
+        if ($InstalledIds -notcontains $id) { continue }
+
+        Write-Note "removing legacy $id"
+        & winget uninstall --id $id --exact --source winget --silent --accept-source-agreements --disable-interactivity | Out-Host
+        $code = $LASTEXITCODE
+        if ($WingetRebootCodes -contains $code) { $script:RebootNeeded = $true }
+        if ($WingetRemoveOkCodes.ContainsKey($code)) {
+            $removedLegacy += $id
+            Write-Note "$id`: $($WingetRemoveOkCodes[$code])"
+        }
+        elseif ($WingetDeferredCodes.ContainsKey($code)) {
+            $deferred += "uninstall $id"
+            Write-Warning "$id`: $($WingetDeferredCodes[$code])"
+        }
+        else {
+            $failed += "uninstall $id"
+            Write-Warning ("{0}: winget uninstall exited with 0x{1:X8} ({1})" -f $id, $code)
+        }
+    }
+
+    foreach ($id in $missing) {
+        Write-Note "installing $id"
+        & winget install --id $id --exact --source winget --no-upgrade --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Host
+        $code = $LASTEXITCODE
+        if ($WingetRebootCodes -contains $code) { $script:RebootNeeded = $true }
+        if ($WingetOkCodes.ContainsKey($code)) {
+            $installedNow += $id
+            Write-Note "$id`: $($WingetOkCodes[$code])"
+        }
+        elseif ($WingetDeferredCodes.ContainsKey($code)) {
+            $deferred += "install $id"
+            Write-Warning "$id`: $($WingetDeferredCodes[$code])"
+        }
+        else {
+            $failed += "install $id"
+            Write-Warning ("{0}: winget install exited with 0x{1:X8} ({1})" -f $id, $code)
+        }
+    }
+
+    foreach ($id in $upgrade) {
+        Write-Note "updating $id"
+        & winget upgrade --id $id --exact --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Host
+        $code = $LASTEXITCODE
+        if ($WingetRebootCodes -contains $code) { $script:RebootNeeded = $true }
+        if ($WingetOkCodes.ContainsKey($code)) {
+            $updatedOrCurrent += $id
+            Write-Note "$id`: $($WingetOkCodes[$code])"
+        }
+        elseif ($WingetDeferredCodes.ContainsKey($code)) {
+            $deferred += "upgrade $id"
+            Write-Warning "$id`: $($WingetDeferredCodes[$code])"
+        }
+        else {
+            $failed += "upgrade $id"
+            Write-Warning ("{0}: winget upgrade exited with 0x{1:X8} ({1})" -f $id, $code)
+        }
+    }
+
+    return [pscustomobject]@{
+        Present = @($present)
+        Installed = @($installedNow)
+        UpdatedOrCurrent = @($updatedOrCurrent)
+        RemovedLegacy = @($removedLegacy)
+        Deferred = @($deferred)
+        Failed = @($failed)
+    }
+}
+
 #--- Preflight --------------------------------------------------------------
 $script:RebootNeeded = $false
 if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
@@ -226,41 +360,18 @@ if ($HyperV) {
 #--- 3. winget packages -----------------------------------------------------
 Write-Step "winget package set ($($WingetPackages.Count) entries)"
 $installedIds = Get-WingetInventory
-$present = @()
-$missing = @()
-foreach ($id in $WingetPackages) {
-    if ($installedIds -contains $id) { $present += $id } else { $missing += $id }
-}
-Write-Note "$($present.Count) present, $($missing.Count) missing"
-
-$installedNow = @()
-$deferred = @()
-$failed = @()
-foreach ($id in $missing) {
-    Write-Note "installing $id"
-    & winget install --id $id --exact --source winget --no-upgrade --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
-    $code = $LASTEXITCODE
-    if ($WingetRebootCodes -contains $code) { $script:RebootNeeded = $true }
-    if ($WingetOkCodes.ContainsKey($code)) {
-        $installedNow += $id
-        Write-Note "$id`: $($WingetOkCodes[$code])"
-    }
-    elseif ($WingetDeferredCodes.ContainsKey($code)) {
-        $deferred += $id
-        Write-Warning "$id`: $($WingetDeferredCodes[$code])"
-    }
-    else {
-        $failed += $id
-        Write-Warning ("{0}: winget exited with 0x{1:X8} ({1})" -f $id, $code)
-    }
-}
+$wingetResult = Invoke-WingetPackageSet `
+    -InstalledIds $installedIds `
+    -DesiredIds $WingetPackages `
+    -AlwaysUpgradeIds $WingetAlwaysUpgradePackages `
+    -LegacyIds $WingetLegacyPackages
 
 #--- Summary ----------------------------------------------------------------
 Write-Step 'Summary'
-Write-Note "winget: $($installedNow.Count) installed now, $($present.Count) already present, $($deferred.Count) deferred, $($failed.Count) failed"
-if ($deferred.Count) { Write-Note "deferred (re-run after a reboot): $($deferred -join ', ')" }
-if ($failed.Count)   { Write-Note "failed: $($failed -join ', ')" }
+Write-Note "winget: $($wingetResult.Installed.Count) installed now, $($wingetResult.UpdatedOrCurrent.Count) updated/current, $($wingetResult.Present.Count) ordinary present, $($wingetResult.RemovedLegacy.Count) legacy removed, $($wingetResult.Deferred.Count) deferred, $($wingetResult.Failed.Count) failed"
+if ($wingetResult.Deferred.Count) { Write-Note "deferred (re-run after a reboot): $($wingetResult.Deferred -join ', ')" }
+if ($wingetResult.Failed.Count)   { Write-Note "failed: $($wingetResult.Failed -join ', ')" }
 if ($script:RebootNeeded) {
     Write-Warning 'A reboot is required to finish; re-run this script afterwards to pick up anything deferred.'
 }
-if ($failed.Count) { exit 1 }
+if ($wingetResult.Failed.Count) { exit 1 }

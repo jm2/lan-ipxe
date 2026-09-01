@@ -55,11 +55,13 @@ PKGS_OFFICIAL=(
   chrony
   clang
   chromium
+  code
   cmake
   colordiff
   cronie
   cups
   cups-pk-helper
+  curl
   dos2unix
   dracut
   efibootmgr
@@ -128,9 +130,13 @@ PKGS_OFFICIAL=(
   nvidia-open
   nvidia-open-lts
   nvidia-utils
+  # These are co-installable split backend libraries with disjoint files; both
+  # depend on the base ollama package (verified in current Arch metadata).
   ollama-cuda
   ollama-vulkan
   opencl-mesa
+  opencode
+  openai-codex
   openssh
   pacman-contrib
   pipewire
@@ -163,6 +169,7 @@ PKGS_OFFICIAL=(
   wireplumber
   wpa_supplicant
   yt-dlp
+  zed
   zram-generator
 )
 
@@ -175,6 +182,7 @@ PKGS_AUR=(
   android-sdk-platform-tools
   android-studio
   antigravity
+  antigravity-cli
   bugdom
   bugdom2
   claude-code
@@ -208,7 +216,6 @@ PKGS_AUR=(
   tuxracer
   unigine-heaven
   ventoy-bin
-  vscodium-bin
 )
 
 SERVICES=(
@@ -336,16 +343,86 @@ expand_groups() {
 # operational error and must stop the run.
 MISSING_PKGS=()
 find_missing_pkgs() {
-  local output rc=0
+  local output error_output error_file rc=0
   MISSING_PKGS=()
   (( $# )) || return 0
-  output=$(pacman -T "$@" 2>&1) || rc=$?
+  error_file=$(mktemp "${WORK_DIR:-/tmp}/pacman-T.XXXXXX") \
+    || die "could not create temporary pacman error file"
+  output=$(pacman -T "$@" 2>"${error_file}") || rc=$?
+  error_output=$(<"${error_file}")
+  rm -f -- "${error_file}" || die "could not remove temporary pacman error file"
   if (( rc != 0 && rc != 127 )); then
-    die "pacman dependency check failed (exit ${rc}): ${output}"
+    die "pacman dependency check failed (exit ${rc}): ${error_output:-${output}}"
+  fi
+  if [[ -n ${error_output} ]]; then
+    warn "pacman dependency check reported: ${error_output}"
   fi
   if [[ -n ${output} ]]; then
     mapfile -t MISSING_PKGS <<<"${output}"
   fi
+}
+
+# Remove products that have explicit successors in this package set. The old
+# Antigravity IDE can coexist with Antigravity 2.x, so installing the new app
+# alone would not retire it. Code OSS replaces the less-native VSCodium AUR
+# package on Arch.
+purge_legacy_antigravity_arch() {
+  local package_line version comparison
+  local legacy_packages=()
+  if pacman -Q antigravity-ide &>/dev/null; then
+    legacy_packages+=(antigravity-ide)
+  fi
+  if package_line=$(pacman -Q antigravity 2>/dev/null); then
+    version=${package_line#* }
+    comparison=$(vercmp "${version}" 2.0.0) \
+      || die "could not compare the installed Antigravity version"
+    (( comparison >= 0 )) || legacy_packages+=(antigravity)
+  fi
+  if (( ${#legacy_packages[@]} )); then
+    sudo pacman -Rns --noconfirm "${legacy_packages[@]}" \
+      || die "could not remove legacy Antigravity package(s): ${legacy_packages[*]}"
+    for package_name in "${legacy_packages[@]}"; do
+      pacman -Q "${package_name}" &>/dev/null \
+        && die "legacy Antigravity package is still installed: ${package_name}"
+    done
+    note "legacy Antigravity package(s) removed: ${legacy_packages[*]}"
+  else
+    note "legacy Antigravity 1.x / IDE packages: absent"
+  fi
+}
+
+purge_replaced_editor_arch() {
+  if pacman -Q vscodium-bin &>/dev/null; then
+    sudo pacman -Rns --noconfirm vscodium-bin \
+      || die "could not remove VSCodium before switching to Code OSS"
+    pacman -Q vscodium-bin &>/dev/null \
+      && die "VSCodium is still installed"
+    note "VSCodium: removed (replaced by the official Arch code package)"
+  else
+    note "VSCodium: absent"
+  fi
+}
+
+verify_antigravity_arch() {
+  local package_line version comparison
+  package_line=$(pacman -Q antigravity 2>/dev/null) \
+    || die "Antigravity 2.x was not installed"
+  version=${package_line#* }
+  comparison=$(vercmp "${version}" 2.0.0) \
+    || die "could not compare the installed Antigravity version"
+  (( comparison >= 0 )) \
+    || die "legacy Antigravity ${version} is installed; version 2.0 or newer is required"
+  pacman -Q antigravity-cli &>/dev/null \
+    || die "the Antigravity CLI package was not installed"
+  command -v antigravity >/dev/null \
+    || die "the Antigravity package did not provide antigravity"
+  command -v agy >/dev/null \
+    || die "the Antigravity CLI package did not provide agy"
+  agy --version >/dev/null 2>&1 \
+    || die "the installed Antigravity CLI is not runnable"
+  ! pacman -Q antigravity-ide &>/dev/null \
+    || die "legacy Antigravity IDE is still installed"
+  note "Antigravity ${version} + CLI: verified; legacy IDE absent"
 }
 
 #--- Preflight --------------------------------------------------------------
@@ -373,6 +450,10 @@ trap cleanup EXIT
 
 log "Authenticating sudo"
 sudo -v || die "sudo authentication failed"
+
+log "Retired workstation packages"
+purge_legacy_antigravity_arch
+purge_replaced_editor_arch
 
 #--- 1. [multilib] ----------------------------------------------------------
 # Must be enabled before any lib32-* / steam package can be installed
@@ -599,5 +680,12 @@ if (( ${#MISSING_PKGS[@]} )); then
 else
   note "all ${#PKGS_AUR[@]} packages present"
 fi
+
+verify_antigravity_arch
+for command_name in claude code codex opencode zed; do
+  command -v "${command_name}" >/dev/null \
+    || die "expected workstation command is unavailable: ${command_name}"
+done
+! pacman -Q vscodium-bin &>/dev/null || die "VSCodium is still installed"
 
 log "Done. Kernel/initramfs/GRUB changes and newly enabled services take effect on the next boot."

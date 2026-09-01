@@ -146,25 +146,35 @@ payloads (`files/`) relative to their own location.
   zram policy from `files/`, explicitly generates and validates every dracut image
   before removing mkinitcpio, then enables services and GDM settings. AUR work is last:
   a self-bootstrapped `yay` interactively presents PKGBUILD diffs, updates installed
-  AUR packages, and installs the requested set. The package selection intentionally
-  includes Intel/AMD graphics support and NVIDIA open modules for both `linux` and
-  `linux-lts`.
+  AUR packages, and installs the requested set. Arch's signed repositories provide
+  Code OSS, OpenCode, Codex CLI, and Zed; the AUR supplies Claude Code and the native
+  Antigravity 2.x desktop/CLI. The script removes VSCodium, Antigravity IDE, and an
+  installed Antigravity 1.x package before installing their replacements. The package
+  selection intentionally includes Intel/AMD graphics support and NVIDIA open modules
+  for both `linux` and `linux-lts`.
 - `setup-fedora-workstation.sh` — run as your normal user; Fedora 41+ (dnf5). Adds the
-  third-party repos (`files/etc/yum.repos.d/`, the tributary copr, RPM Fusion,
-  Microsoft, sing-box; Chrome/NVIDIA/Steam repos on x86_64), installs the dnf and
-  flatpak sets (plus the x86_64-only 32-bit/Steam/Chrome extras), a checksum-pinned
-  Ookla speedtest CLI, and the r8152 USB NIC driver from a pinned upstream revision
-  via DKMS; then applies dotfiles, zram policy, services, and GDM settings. Secure Boot
-  hosts are warned when the DKMS MOK still needs enrollment. The Antigravity vendor
-  publishes no RPM signing key, so its checked-in repo definition explicitly uses
-  `gpgcheck=0`; the script warns before accepting that risk.
+  signed third-party repos (`files/etc/yum.repos.d/`, the tributary copr, RPM Fusion,
+  Microsoft VS Code/PowerShell, Claude Code, sing-box; Chrome/NVIDIA/Steam repos on
+  x86_64), installs the dnf and flatpak sets (plus the x86_64-only 32-bit/Steam/Chrome
+  extras), and installs Zed plus native AI tools. Antigravity 2.x and its CLI,
+  OpenCode, and Zed use immutable checksum-pinned native artifacts; Codex uses OpenAI's
+  checksum-verifying standalone installer; Claude Code uses Anthropic's signed RPM
+  repository. The abandoned unsigned Antigravity 1.x RPM/repository, its exact
+  script-managed IDE settings, and VSCodium are removed, while customized settings or
+  repo files are preserved (and retired repos disabled). The script also installs a
+  checksum-pinned Ookla speedtest CLI and the r8152 USB NIC driver from a pinned
+  upstream revision via DKMS, then applies dotfiles, zram policy, services, and GDM
+  settings. Secure Boot hosts are warned when the DKMS MOK still needs enrollment.
 - `setup-win11-workstation.ps1` — run from an elevated PowerShell (5.1 is enough):
   `powershell -ExecutionPolicy Bypass -File .\setup-win11-workstation.ps1`. Sets up
-  OpenSSH Server via `enable-openssh-win11.ps1`, then installs the winget package set:
-  one `winget export` snapshot decides what is missing; "already installed" / "reboot
-  required" results count as success, any other failure is reported at the end (exit
-  code 1) without stopping the run. `-HyperV` additionally enables the supported
-  Windows optional feature on Pro, Enterprise, or Education; Windows 11 Home is rejected.
+  OpenSSH Server via `enable-openssh-win11.ps1`, then installs the winget package set.
+  Antigravity 2.x/CLI, Claude Code, Codex, OpenCode, and Zed are checked for upgrades
+  on every run; Antigravity IDE and VSCodium are removed, with Microsoft VS Code kept
+  as the supported Windows editor. One `winget export` snapshot decides the remaining
+  state; "already installed" / "reboot required" results count as success, any other
+  failure is reported at the end (exit code 1) without stopping the run. `-HyperV`
+  additionally enables the supported Windows optional feature on Pro, Enterprise, or
+  Education; Windows 11 Home is rejected.
 
 Missing package-set entries are installed and existing Arch/AUR packages are updated.
 Config files are rewritten only when their content, type, mode, or ownership differs;
@@ -189,8 +199,9 @@ Dotfiles and system config consumed by the workstation setup scripts: `bashrc`,
 `etc/systemd/zram-generator.conf`,
 `etc/cron.daily/pacman-update` (unattended Arch updates + reboot scheduling),
 `etc/dconf/db/gdm.d/10-font-settings`, Fedora repo definitions under
-`etc/yum.repos.d/`, and `config/Antigravity/User/settings.json`. `etc/pacman.conf` is
-kept for reference only — the Arch script deliberately does not install it.
+`etc/yum.repos.d/`, and the Fedora Antigravity desktop entry under
+`usr/share/applications/`. `etc/pacman.conf` is kept for reference only — the Arch
+script deliberately does not install it.
 
 ### Mellanox firmware tool — `mlnx-fw-flash-update.sh`
 

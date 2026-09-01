@@ -49,8 +49,30 @@ try {
     # warning debt. These upper bounds let that debt shrink while making any
     # new warning class, affected file, or count increase fail CI.
     $warningAllowances = @{
-        '*|PSAvoidUsingWriteHost' = [int]::MaxValue
-        '*|PSUseBOMForUnicodeEncodedFile' = [int]::MaxValue
+        'setup-win11-workstation.ps1|PSAvoidUsingWriteHost' = 2
+        'Get-Win11CumulativeUpdates.ps1|PSAvoidUsingWriteHost' = 23
+        'build_win11pxe.ps1|PSAvoidUsingWriteHost' = 68
+        'CatalogScrape.psm1|PSAvoidUsingWriteHost' = 20
+        'Start-WreckfestLan.ps1|PSAvoidUsingWriteHost' = 2
+        'Get-AmdGraphicsDrivers.ps1|PSUseBOMForUnicodeEncodedFile' = 1
+        'Get-IntelGraphicsDrivers.ps1|PSUseBOMForUnicodeEncodedFile' = 1
+        'Get-IntelWiFiDrivers.ps1|PSUseBOMForUnicodeEncodedFile' = 1
+        'Get-MediatekWiFiDrivers.ps1|PSUseBOMForUnicodeEncodedFile' = 1
+        'Get-NvidiaGraphicsDrivers.ps1|PSUseBOMForUnicodeEncodedFile' = 1
+        'Get-QualcommWiFiDrivers.ps1|PSUseBOMForUnicodeEncodedFile' = 1
+        'Get-Win11CumulativeUpdates.ps1|PSUseBOMForUnicodeEncodedFile' = 1
+        'build_win11pxe.ps1|PSUseBOMForUnicodeEncodedFile' = 1
+        'CatalogScrape.psm1|PSUseBOMForUnicodeEncodedFile' = 1
+        'Test-CatalogScrape.ps1|PSUseBOMForUnicodeEncodedFile' = 1
+        'amd-gfx.psd1|PSUseBOMForUnicodeEncodedFile' = 1
+        'broadcom.psd1|PSUseBOMForUnicodeEncodedFile' = 1
+        'intel-eth.psd1|PSUseBOMForUnicodeEncodedFile' = 1
+        'intel-gfx.psd1|PSUseBOMForUnicodeEncodedFile' = 1
+        'intel-wifi.psd1|PSUseBOMForUnicodeEncodedFile' = 1
+        'marvell.psd1|PSUseBOMForUnicodeEncodedFile' = 1
+        'mediatek.psd1|PSUseBOMForUnicodeEncodedFile' = 1
+        'nvidia-gfx.psd1|PSUseBOMForUnicodeEncodedFile' = 1
+        'Start-WreckfestLan.ps1|PSUseBOMForUnicodeEncodedFile' = 1
         'build_win11pxe.ps1|PSUseUsingScopeModifierInNewRunspaces' = 6
         'CatalogScrape.psm1|PSReviewUnusedParameter' = 1
         'CatalogScrape.psm1|PSUseSingularNouns' = 1
@@ -63,12 +85,8 @@ try {
     $unexpectedWarnings = @()
     foreach ($group in @($analyzerWarnings | Group-Object { "$($_.ScriptName)|$($_.RuleName)" })) {
         $exactKey = [string]$group.Name
-        $ruleKey = "*|$($group.Group[0].RuleName)"
         if ($warningAllowances.ContainsKey($exactKey)) {
             $limit = $warningAllowances[$exactKey]
-        }
-        elseif ($warningAllowances.ContainsKey($ruleKey)) {
-            $limit = $warningAllowances[$ruleKey]
         }
         else {
             $limit = 0

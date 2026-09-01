@@ -76,6 +76,7 @@ test_pacman_statuses() (
   pacman() {
     [[ $1 == -T ]]
     printf 'missing-one\nmissing-two\n'
+    printf 'warning that must not become a package name\n' >&2
     return 127
   }
   find_missing_pkgs one two

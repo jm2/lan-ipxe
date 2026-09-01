@@ -49,6 +49,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends systemd-zram-generator
       - name: Run mocked workstation behavior tests
         run: |
+          tests/test-antigravity-migration.sh
           tests/test-workstation-shell-helpers.sh
           tests/test-pacman-update.sh
           tests/test-zram-generator.sh
@@ -69,6 +70,7 @@ jobs:
         run: |
           ./catalogscrape/Test-CatalogScrape.ps1
           ./tests/Test-HyperV.ps1
+          ./tests/Test-WingetAntigravity.ps1
           ./tests/Test-WingetInventory.ps1
 
   windows-powershell-51:
@@ -101,4 +103,5 @@ jobs:
         shell: powershell
         run: |
           ./tests/Test-HyperV.ps1
+          ./tests/Test-WingetAntigravity.ps1
           ./tests/Test-WingetInventory.ps1
