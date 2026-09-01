@@ -45,10 +45,11 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Install zram config validator
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends systemd-zram-generator
-      - name: Run mocked workstation behavior tests
+      - name: Install shell test dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends jq systemd-zram-generator
+      - name: Run mocked Linux setup behavior tests
         run: |
+          tests/test-controller-release-updates.sh
           tests/test-antigravity-migration.sh
           tests/test-workstation-shell-helpers.sh
           tests/test-pacman-update.sh

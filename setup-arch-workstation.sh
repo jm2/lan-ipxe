@@ -29,14 +29,20 @@
 #   5. enables the service set (bluetooth, chrony, cronie, cups, gdm, ...)
 #   6. publishes ~/.config/monitors.xml to GDM and applies the GDM font setting
 #   7. bootstraps yay (yay-bin from the AUR), interactively reviews/updates
-#      installed AUR packages, and installs the requested AUR set
+#      installed AUR packages (including VCS/devel packages), and installs the
+#      requested AUR set; r8152-dkms is included only below kernel 7.2 and is
+#      purged on 7.2+ in favor of the in-tree driver
 
 set -euo pipefail
 
 #--- Config -----------------------------------------------------------------
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 FILES=${SCRIPT_DIR}/files
+KERNEL=$(uname -r)
+R8152_IN_TREE_KERNEL_MIN=7.2
+R8152_MODULE_TAINT_FILE=/sys/module/r8152/taint
 YAY_AUR_URL=https://aur.archlinux.org/yay-bin.git
+YAY_VCS_DB=${XDG_CACHE_HOME:-${HOME}/.cache}/yay/vcs.json
 
 # Official repositories (groups are fine: gnome, gnome-circle, gnome-extra,
 # vulkan-devel are expanded before the installed-check)
@@ -449,6 +455,129 @@ verify_antigravity_arch() {
   note "Antigravity ${version} + CLI: verified; legacy IDE absent"
 }
 
+# Compare the numeric major/minor components and deliberately ignore Arch's
+# patch, release, and flavour suffixes (for example 7.2.1-arch1-1 or
+# 7.2.1-1-lts), which do not change the 7.2 cutoff.
+kernel_version_at_least() {
+  local running=$1 minimum=$2
+  local running_major running_minor minimum_major minimum_minor
+  [[ ${running} =~ ^([0-9]+)\.([0-9]+)([.-]|$) ]] \
+    || die "could not parse running kernel version: ${running}"
+  running_major=${BASH_REMATCH[1]}
+  running_minor=${BASH_REMATCH[2]}
+  [[ ${minimum} =~ ^([0-9]+)\.([0-9]+)$ ]] \
+    || die "invalid kernel-version cutoff: ${minimum}"
+  minimum_major=${BASH_REMATCH[1]}
+  minimum_minor=${BASH_REMATCH[2]}
+  (( 10#${running_major} > 10#${minimum_major} \
+     || (10#${running_major} == 10#${minimum_major} \
+         && 10#${running_minor} >= 10#${minimum_minor}) ))
+}
+
+R8152_ARCH_PURGE_CHANGED=0
+R8152_USE_IN_TREE=0
+R8152_ARCH_REBOOT_REQUIRED=0
+
+# A loaded external module survives removal from pacman, DKMS, and the
+# initramfs until reboot. Linux exposes the out-of-tree taint as a literal O;
+# the optional path makes this small state check testable without touching
+# sysfs.
+r8152_loaded_out_of_tree() {
+  local taint_file=${1:-${R8152_MODULE_TAINT_FILE}} taint
+  [[ -e ${taint_file} ]] || return 1
+  [[ -r ${taint_file} ]] \
+    || die "could not read loaded r8152 module taint state: ${taint_file}"
+  taint=$(<"${taint_file}")
+  [[ ${taint} == *O* ]]
+}
+
+purge_r8152_arch() {
+  local status remaining line module version entry
+  local -a registrations=()
+  local -A seen=()
+  R8152_ARCH_PURGE_CHANGED=0
+
+  # Capture and remove exact registrations while dkms and the package source
+  # are still present. Pacman's removal hook should make this redundant during
+  # an ordinary uninstall, but explicit reconciliation also handles interrupted
+  # or manually altered installations.
+  if command -v dkms >/dev/null; then
+    status=$(dkms status 2>/dev/null) \
+      || die "could not query DKMS registrations before purging r8152"
+    while IFS= read -r line; do
+      if [[ ${line} =~ ^(r8152|realtek-r8152)/([^,:[:space:]]+) ]]; then
+        module=${BASH_REMATCH[1]}
+        version=${BASH_REMATCH[2]}
+        [[ ${version} =~ ^[0-9][0-9A-Za-z._+~-]*$ ]] \
+          || die "refusing unsafe r8152 DKMS version from status: ${version}"
+        entry=${module}/${version}
+        [[ -n ${seen[${entry}]:-} ]] && continue
+        seen[${entry}]=1
+        registrations+=("${entry}")
+      fi
+    done <<<"${status}"
+    for entry in "${registrations[@]}"; do
+      module=${entry%%/*}
+      version=${entry#*/}
+      sudo dkms remove -m "${module}" -v "${version}" --all \
+        || die "could not remove stale DKMS registration ${entry}"
+      R8152_ARCH_PURGE_CHANGED=1
+      note "removed stale DKMS registration ${entry}"
+    done
+    remaining=$(dkms status 2>/dev/null) \
+      || die "could not query DKMS registrations after purging r8152"
+    while IFS= read -r line; do
+      [[ ${line} =~ ^(r8152|realtek-r8152)/ ]] \
+        && die "an r8152 DKMS registration remains after removal: ${line}"
+    done <<<"${remaining}"
+  fi
+
+  if pacman -Q r8152-dkms &>/dev/null; then
+    sudo pacman -Rns --noconfirm r8152-dkms \
+      || die "could not remove r8152-dkms on a kernel with in-tree support"
+    ! pacman -Q r8152-dkms &>/dev/null \
+      || die "r8152-dkms is still installed"
+    R8152_ARCH_PURGE_CHANGED=1
+    note "r8152-dkms: removed (kernel ${R8152_IN_TREE_KERNEL_MIN}+ provides the driver)"
+  else
+    note "r8152-dkms package: absent"
+  fi
+  (( ! R8152_ARCH_PURGE_CHANGED )) || R8152_ARCH_REBOOT_REQUIRED=1
+}
+
+# Rebuild the desired AUR catalog from a neutral state so repeated calls in
+# tests or sourced use cannot retain an r8152 decision made for another kernel.
+configure_r8152_arch() {
+  local running_kernel=$1 package
+  local -a filtered=()
+  for package in "${PKGS_AUR[@]}"; do
+    [[ ${package} == r8152-dkms ]] || filtered+=("${package}")
+  done
+  PKGS_AUR=("${filtered[@]}")
+  R8152_USE_IN_TREE=0
+
+  if kernel_version_at_least "${running_kernel}" "${R8152_IN_TREE_KERNEL_MIN}"; then
+    R8152_USE_IN_TREE=1
+    note "kernel ${running_kernel} is ${R8152_IN_TREE_KERNEL_MIN}+; using its in-tree r8152 driver"
+    purge_r8152_arch
+    if r8152_loaded_out_of_tree; then
+      R8152_ARCH_REBOOT_REQUIRED=1
+      note "an out-of-tree r8152 module is still loaded; reboot required to activate the in-tree driver"
+    fi
+  else
+    PKGS_AUR+=(r8152-dkms)
+    note "kernel ${running_kernel} predates ${R8152_IN_TREE_KERNEL_MIN}; r8152-dkms added to the AUR set"
+  fi
+}
+
+initramfs_has_out_of_tree_r8152() {
+  local image=$1 _kernel=$2 contents
+  contents=$(sudo lsinitrd "${image}" 2>/dev/null) \
+    || die "could not inspect ${image} while reconciling r8152"
+  grep -E 'modules/[^/[:space:]]+/(extra|updates|weak-updates)(/[^[:space:]]*)*/(realtek-)?r8152[.]ko([.]|$)' \
+    <<<"${contents}" >/dev/null
+}
+
 #--- Preflight --------------------------------------------------------------
 [[ ${EUID} -ne 0 ]] || die "Run as your normal user, not root (AUR builds refuse to run as root; sudo is used where needed)."
 [[ -f /etc/arch-release ]] || die "This script is for Arch Linux."
@@ -474,6 +603,9 @@ trap cleanup EXIT
 
 log "Authenticating sudo"
 sudo -v || die "sudo authentication failed"
+
+log "Realtek r8152 kernel/DKMS selection"
+configure_r8152_arch "${KERNEL}"
 
 log "Retired workstation packages"
 purge_legacy_antigravity_arch
@@ -593,7 +725,7 @@ command -v dracut >/dev/null || die "dracut was not installed"
 command -v lsinitrd >/dev/null || die "lsinitrd was not installed"
 
 BOOT_STATE_AFTER=$(boot_package_state)
-DRACUT_REBUILD=0
+DRACUT_REBUILD=${R8152_ARCH_PURGE_CHANGED}
 [[ ${BOOT_STATE_BEFORE} == "${BOOT_STATE_AFTER}" ]] || DRACUT_REBUILD=1
 pacman -Q mkinitcpio &>/dev/null && DRACUT_REBUILD=1
 
@@ -608,6 +740,10 @@ for pkgbase_file in /usr/lib/modules/*/pkgbase; do
   if ! sudo test -s "${image}" \
      || ! sudo lsinitrd "${image}" 2>/dev/null | grep -F "modules/${kver}/" >/dev/null; then
     DRACUT_REBUILD=1
+  elif (( R8152_USE_IN_TREE )) \
+     && initramfs_has_out_of_tree_r8152 "${image}" "${kver}"; then
+    DRACUT_REBUILD=1
+    R8152_ARCH_REBOOT_REQUIRED=1
   fi
 done
 (( kernel_count )) || die "no installed kernels with /usr/lib/modules/*/pkgbase were found"
@@ -629,6 +765,10 @@ for pkgbase_file in /usr/lib/modules/*/pkgbase; do
   sudo test -s "${image}" || die "dracut did not produce ${image}"
   sudo lsinitrd "${image}" 2>/dev/null | grep -F "modules/${kver}/" >/dev/null \
     || die "${image} does not contain modules for ${kver}"
+  if (( R8152_USE_IN_TREE )) \
+     && initramfs_has_out_of_tree_r8152 "${image}" "${kver}"; then
+    die "${image} still contains an out-of-tree r8152 module after regeneration"
+  fi
 done
 
 log "mkinitcpio"
@@ -695,8 +835,16 @@ else
   note "installed yay-bin"
 fi
 
-log "Updating installed AUR packages"
-yay -Sua
+# Yay records VCS source commits as it installs packages. Generate that database
+# only when it is absent, which also covers packages migrated from another AUR
+# helper without resetting known commit baselines on every setup run.
+if [[ ! -f ${YAY_VCS_DB} ]]; then
+  log "Initializing yay development-package database"
+  yay -Y --gendb
+fi
+
+log "Updating installed AUR packages (including VCS/devel packages)"
+yay -Sua --devel
 
 log "AUR package set (${#PKGS_AUR[@]} entries)"
 find_missing_pkgs "${PKGS_AUR[@]}"
@@ -715,3 +863,6 @@ done
 ! pacman -Q vscodium-bin &>/dev/null || die "VSCodium is still installed"
 
 log "Done. Kernel/initramfs/GRUB changes and newly enabled services take effect on the next boot."
+if (( R8152_ARCH_REBOOT_REQUIRED )); then
+  warn "Reboot to finish switching from the removed out-of-tree r8152 module to the kernel ${KERNEL} in-tree driver."
+fi
