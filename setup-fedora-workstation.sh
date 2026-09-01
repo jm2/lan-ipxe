@@ -447,6 +447,8 @@ dnf_repo_enabled() {
 
 # Retire only the exact repository file previously deployed by this project.
 # A customized administrator-owned definition is disabled and preserved.
+# The optional path is a test seam exercised from the migration test script.
+# shellcheck disable=SC2120
 remove_legacy_antigravity_repo() {
   local path=${1:-${LEGACY_ANTIGRAVITY_REPO}} sha=
   if [[ -f ${path} && ! -L ${path} ]]; then
@@ -485,6 +487,8 @@ remove_legacy_antigravity_rpm() {
   fi
 }
 
+# Optional path is used by migration tests for safe temporary fixtures.
+# shellcheck disable=SC2120
 remove_legacy_antigravity_settings() {
   local path=${1:-${LEGACY_ANTIGRAVITY_SETTINGS}} sha=
   if [[ ! -e ${path} && ! -L ${path} ]]; then
@@ -503,6 +507,8 @@ remove_legacy_antigravity_settings() {
   fi
 }
 
+# Optional path is used by migration tests for safe temporary fixtures.
+# shellcheck disable=SC2120
 remove_replaced_vscodium_fedora() {
   local path=${1:-${LEGACY_VSCODIUM_REPO}} sha=
   if rpm -q --quiet codium; then
@@ -533,6 +539,8 @@ remove_replaced_vscodium_fedora() {
   fi
 }
 
+# Optional install root keeps artifact/convergence tests unprivileged.
+# shellcheck disable=SC2120
 install_antigravity_desktop() {
   local install_dir=${1:-${ANTIGRAVITY_INSTALL_DIR}}
   local marker=${install_dir}/.lan-ipxe-release
@@ -629,6 +637,8 @@ install_antigravity_desktop() {
   note "Antigravity ${ANTIGRAVITY_VERSION}: installed from verified native archive"
 }
 
+# Optional bin directory keeps artifact/convergence tests isolated.
+# shellcheck disable=SC2120
 install_antigravity_cli() {
   local bin_dir=${1:-${HOME}/.local/bin}
   local dest=${bin_dir}/agy archive=${WORK_DIR}/antigravity-cli.tar.gz
@@ -668,6 +678,8 @@ install_antigravity_cli() {
   note "Antigravity CLI ${version}: installed as ~/.local/bin/agy"
 }
 
+# Optional bin directory keeps artifact/convergence tests isolated.
+# shellcheck disable=SC2120
 install_opencode_cli() {
   local bin_dir=${1:-${HOME}/.local/bin}
   local dest=${bin_dir}/opencode archive=${WORK_DIR}/opencode.tar.gz
@@ -733,6 +745,8 @@ reconcile_zed_entrypoints() {
   put_file "${desktop_source}" "${desktop_dest}" 0644
 }
 
+# Optional install root keeps artifact/convergence tests isolated.
+# shellcheck disable=SC2120
 install_zed() {
   local install_dir=${1:-${HOME}/.local/zed.app}
   local marker=${install_dir}/.lan-ipxe-release
