@@ -1,8 +1,0 @@
-[antigravity-rpm]
-name=Antigravity RPM Repository
-baseurl=https://us-central1-yum.pkg.dev/projects/antigravity-auto-updater-dev/antigravity-rpm
-enabled=1
-# NOTE: gpgcheck is disabled because no published GPG signing-key URL is available
-# for this Google Artifact Registry repo. Accepted risk: package signatures are not
-# verified. Set gpgcheck=1 and add a gpgkey= line if/when a key URL is published.
-gpgcheck=0

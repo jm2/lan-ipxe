@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # /etc/bash.bashrc
 #
 # https://wiki.archlinux.org/index.php/Color_Bash_Prompt
@@ -28,6 +29,8 @@ _append_prompt_command() {
     if [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" =~ "declare -a" ]]; then
         PROMPT_COMMAND+=("$1")
     else
+        # PROMPT_COMMAND is intentionally a scalar on older Bash versions.
+        # shellcheck disable=SC2128,SC2178
         PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND; }$1"
     fi
 }
@@ -77,9 +80,9 @@ if $use_color ; then
 	# Enable colors for ls, etc. Prefer ~/.dir_colors
 	if type -P dircolors >/dev/null ; then
 		if [[ -f ~/.dir_colors ]] ; then
-			eval $(dircolors -b ~/.dir_colors)
+			eval "$(dircolors -b ~/.dir_colors)"
 		elif [[ -f /etc/DIR_COLORS ]] ; then
-			eval $(dircolors -b /etc/DIR_COLORS)
+			eval "$(dircolors -b /etc/DIR_COLORS)"
 		fi
 	fi
 
