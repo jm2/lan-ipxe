@@ -1353,7 +1353,7 @@ fi
 #--- Mongo first-run init script (runs only against an empty /data/db) ------
 # UniFi OS owns its internal database; this private instance serves Omada only.
 if (( ENABLE_MONGO )); then
-atomic_write_file "${OMADA_CONFIG_RENDER_DIR}/init-mongo.sh" 700 <<'EOS'
+atomic_write_file "${OMADA_CONFIG_RENDER_DIR}/init-mongo.sh" 755 <<'EOS'
 #!/bin/bash
 if which mongosh > /dev/null 2>&1; then
   mongo_init_bin='mongosh'
@@ -1411,10 +1411,11 @@ Notify=healthy
 HealthCmd=sh -c 'mongosh --quiet --eval "db.adminCommand({ping:1})" || mongo --quiet --eval "db.adminCommand({ping:1})"'
 HealthStartPeriod=120s
 # mongod gets podman's 10s SIGKILL by default - let it flush cleanly
-PodmanArgs=--stop-timeout=60
+StopTimeout=60
 
 [Service]
 Restart=on-failure
+RestartSec=10s
 TimeoutStartSec=900
 TimeoutStopSec=90
 
@@ -1450,27 +1451,18 @@ PublishPort=19810:19810/udp
 PublishPort=27001:27001/udp
 PublishPort=29810:29810/udp
 PublishPort=29811-29817:29811-29817
-PodmanArgs=--stop-timeout=60 --ulimit nofile=4096:8192
+StopTimeout=60
+PodmanArgs=--ulimit nofile=4096:8192
 
 [Service]
 Restart=on-failure
+RestartSec=10s
 TimeoutStartSec=900
 TimeoutStopSec=90
 
 [Install]
 WantedBy=multi-user.target
 EOF
-fi
-
-if (( LEGACY_UNIFI_QUADLETS && ENABLE_MONGO )); then
-  QUADLET_GENERATOR=/usr/lib/systemd/system-generators/podman-system-generator
-  [[ -x ${QUADLET_GENERATOR} ]] || die "Podman Quadlet generator is missing"
-  if ! STAGED_QUADLET_DIAGNOSTICS=$(QUADLET_UNIT_DIRS="${QUADLET_STAGE_DIR}" \
-      "${QUADLET_GENERATOR}" --dryrun 2>&1); then
-    warn "${STAGED_QUADLET_DIAGNOSTICS}"
-    die "Staged Omada Quadlets failed validation; legacy services remain untouched"
-  fi
-  log "Staged replacement Quadlets passed generator validation"
 fi
 
 #--- shadowsocks-rust: config + quadlet -------------------------------------
@@ -1497,13 +1489,36 @@ ContainerName=shadowsocks
 Volume=${SS_DIR}/config.json:/etc/shadowsocks-rust/config.json:ro,Z
 PublishPort=${SS_PORT}:${SS_PORT}
 PublishPort=${SS_PORT}:${SS_PORT}/udp
+StopTimeout=30
 
 [Service]
 Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target
 EOF
+fi
+
+if (( ENABLE_MONGO || ENABLE_OMADA || ENABLE_SHADOWSOCKS )); then
+  QUADLET_GENERATOR=/usr/lib/systemd/system-generators/podman-system-generator
+  [[ -x ${QUADLET_GENERATOR} ]] || die "Podman Quadlet generator is missing"
+  if (( LEGACY_UNIFI_QUADLETS )); then
+    if ! STAGED_QUADLET_DIAGNOSTICS=$(QUADLET_UNIT_DIRS="${QUADLET_STAGE_DIR}:${QUADLET_DIR}" \
+        "${QUADLET_GENERATOR}" --dryrun 2>&1); then
+      warn "${STAGED_QUADLET_DIAGNOSTICS}"
+      die "Staged Quadlets failed generator validation; legacy services remain untouched"
+    fi
+    log "Staged replacement Quadlets passed generator validation"
+  else
+    if ! QUADLET_DIAGNOSTICS=$(QUADLET_UNIT_DIRS="${QUADLET_DIR}" \
+        "${QUADLET_GENERATOR}" --dryrun 2>&1); then
+      warn "${QUADLET_DIAGNOSTICS}"
+      die "Configured Quadlets in ${QUADLET_DIR} failed generator validation"
+    fi
+    log "Configured Quadlets passed generator validation"
+  fi
 fi
 
 #--- dnsmasq: LAN DNS (no DHCP) + hagezi pro blocklist ----------------------
@@ -1887,8 +1902,12 @@ port_is_listening() {
   ss -H -ltn | awk '{print $4}' | grep -Eq ":${1}$"
 }
 wait_for_https() {
-  local name=$1 url=$2 timeout=${3:-420} elapsed=0
+  local name=$1 url=$2 timeout=${3:-420} unit=${4:-} elapsed=0
   until curl -skf -o /dev/null --connect-timeout 3 --max-time 5 "${url}"; do
+    if [[ -n ${unit} ]] && ! systemctl is-active --quiet "${unit}"; then
+      warn "${unit} stopped being active while waiting for ${name} readiness"
+      return 1
+    fi
     elapsed=$(( elapsed + 5 ))
     if (( elapsed >= timeout )); then
       warn "${name} did not answer at ${url} within ${timeout}s"
@@ -1903,6 +1922,36 @@ restore_legacy_stack_after_uos_failure() {
   warn "Restoring backed-up legacy Quadlets after UniFi OS failure"
   restore_legacy_files_from_backup
   LEGACY_CUTOVER_PENDING=0
+}
+dump_uos_diagnostics() {
+  warn "=== Dumping UniFi OS Diagnostics ==="
+  if command -v journalctl >/dev/null 2>&1; then
+    warn "--- journalctl -u uosserver.service -n 50 --no-pager ---"
+    journalctl -u uosserver.service -n 50 --no-pager 2>/dev/null || true
+    warn "--- journalctl -u uosserver-updater.service -n 50 --no-pager ---"
+    journalctl -u uosserver-updater.service -n 50 --no-pager 2>/dev/null || true
+  fi
+  warn "=== End UniFi OS Diagnostics ==="
+}
+dump_omada_diagnostics() {
+  warn "=== Dumping Omada Diagnostics ==="
+  if command -v journalctl >/dev/null 2>&1; then
+    warn "--- journalctl -u omada.service -n 50 --no-pager ---"
+    journalctl -u omada.service -n 50 --no-pager 2>/dev/null || true
+    warn "--- journalctl -u omada-db.service -n 50 --no-pager ---"
+    journalctl -u omada-db.service -n 50 --no-pager 2>/dev/null || true
+  fi
+  if command -v podman >/dev/null 2>&1; then
+    if podman container exists omada 2>/dev/null; then
+      warn "--- podman logs --tail 50 omada ---"
+      podman logs --tail 50 omada 2>&1 || true
+    fi
+    if podman container exists omada-db 2>/dev/null; then
+      warn "--- podman logs --tail 50 omada-db ---"
+      podman logs --tail 50 omada-db 2>&1 || true
+    fi
+  fi
+  warn "=== End Omada Diagnostics ==="
 }
 if (( ENABLE_UNIFI_OS )); then
   if [[ -n ${UOS_INSTALLER_TMP} ]]; then
@@ -1945,7 +1994,8 @@ if (( ENABLE_UNIFI_OS )); then
   fi
   if ! systemctl is-active --quiet uosserver.service \
       || ! systemctl is-active --quiet uosserver-updater.service \
-      || ! wait_for_https "UniFi OS Server" "https://localhost:${UOS_WEB_PORT}" 900; then
+      || ! wait_for_https "UniFi OS Server" "https://localhost:${UOS_WEB_PORT}" 900 uosserver.service; then
+    dump_uos_diagnostics
     restore_legacy_stack_after_uos_failure
     die "UniFi OS Server readiness failed; see journalctl -eu uosserver.service. A partial installation may require an explicit vendor --force-install repair."
   fi
@@ -1975,7 +2025,7 @@ if (( LEGACY_UNIFI_QUADLETS )); then
   sync -f "${QUADLET_DIR}" 2>/dev/null || true
   if (( ENABLE_MONGO )); then
     atomic_copy_file "${QUADLET_STAGE_DIR}/omada-db.env" "${OMADA_DIR}/omada-db.env" 600
-    atomic_copy_file "${QUADLET_STAGE_DIR}/init-mongo.sh" "${OMADA_DIR}/init-mongo.sh" 700
+    atomic_copy_file "${QUADLET_STAGE_DIR}/init-mongo.sh" "${OMADA_DIR}/init-mongo.sh" 755
     atomic_copy_file "${QUADLET_STAGE_DIR}/omada.network" "${QUADLET_DIR}/omada.network" 600
     atomic_copy_file "${QUADLET_STAGE_DIR}/omada-db.container" "${QUADLET_DIR}/omada-db.container" 600
   fi
@@ -1991,8 +2041,9 @@ if (( LEGACY_UNIFI_QUADLETS )); then
         "${QUADLET_STAGE_DIR}/init-mongo.sh" \
         "${STATE_DIR}/unifi.applied" "${STATE_DIR}/unifi-db.applied"
   sync -f "${QUADLET_DIR}" 2>/dev/null || true
+  systemctl daemon-reload \
+    || die "systemctl daemon-reload failed during legacy UniFi Quadlet cutover"
 fi
-systemctl daemon-reload
 
 #--- Cockpit lifecycle ------------------------------------------------------
 if (( ENABLE_COCKPIT )); then
@@ -2086,11 +2137,16 @@ fi
 for svc in "${MANAGED_FIREWALL_SERVICES[@]}"; do
   firewall-cmd -q --permanent --zone="${MANAGEMENT_ZONE}" --remove-service="${svc}" 2>/dev/null || true
 done
-(( ENABLE_OMADA ))       && firewall-cmd -q --permanent --zone="${MANAGEMENT_ZONE}" --add-service=controller-omada
-(( ENABLE_UNIFI_OS ))    && firewall-cmd -q --permanent --zone="${MANAGEMENT_ZONE}" --add-service=controller-unifi-os
-(( ENABLE_SHADOWSOCKS )) && firewall-cmd -q --permanent --zone="${MANAGEMENT_ZONE}" --add-service=controller-shadowsocks
-(( ENABLE_DNS ))         && firewall-cmd -q --permanent --zone="${MANAGEMENT_ZONE}" --add-service=controller-dns
-(( ENABLE_COCKPIT ))     && firewall-cmd -q --permanent --zone="${MANAGEMENT_ZONE}" --add-service=cockpit
+(( ! ENABLE_OMADA ))       || firewall-cmd -q --permanent --zone="${MANAGEMENT_ZONE}" --add-service=controller-omada \
+  || die "Could not add controller-omada to firewalld zone ${MANAGEMENT_ZONE}"
+(( ! ENABLE_UNIFI_OS ))    || firewall-cmd -q --permanent --zone="${MANAGEMENT_ZONE}" --add-service=controller-unifi-os \
+  || die "Could not add controller-unifi-os to firewalld zone ${MANAGEMENT_ZONE}"
+(( ! ENABLE_SHADOWSOCKS )) || firewall-cmd -q --permanent --zone="${MANAGEMENT_ZONE}" --add-service=controller-shadowsocks \
+  || die "Could not add controller-shadowsocks to firewalld zone ${MANAGEMENT_ZONE}"
+(( ! ENABLE_DNS ))         || firewall-cmd -q --permanent --zone="${MANAGEMENT_ZONE}" --add-service=controller-dns \
+  || die "Could not add controller-dns to firewalld zone ${MANAGEMENT_ZONE}"
+(( ! ENABLE_COCKPIT ))     || firewall-cmd -q --permanent --zone="${MANAGEMENT_ZONE}" --add-service=cockpit \
+  || die "Could not add cockpit to firewalld zone ${MANAGEMENT_ZONE}"
 
 # Retire raw rules written by older revisions exactly once, and only when
 # legacy script state supplies ownership evidence. During a controller
@@ -2140,8 +2196,10 @@ if (( ENABLE_OMADA ));       then SERVICES+=(omada); fi
 if (( ENABLE_SHADOWSOCKS )); then SERVICES+=(shadowsocks); fi
 
 log "Reloading systemd (Quadlet generation)"
-systemctl daemon-reload
+systemctl daemon-reload || die "systemctl daemon-reload failed during Quadlet generation"
 for unit in "${SERVICES[@]}"; do
+  [[ -f /run/systemd/generator/${unit}.service ]] \
+    || die "Quadlet generation failed: /run/systemd/generator/${unit}.service was not created. Debug with: /usr/lib/systemd/system-generators/podman-system-generator --dryrun"
   systemctl cat "${unit}.service" >/dev/null 2>&1 \
     || die "Quadlet generation failed for ${unit}.service. Debug with: /usr/lib/systemd/system-generators/podman-system-generator --dryrun"
 done
@@ -2172,27 +2230,36 @@ if (( ENABLE_MONGO )); then
     log "omada-db unchanged; leaving it running"
   fi
   start_unit_and_verify_active omada-db \
-    || die "omada-db.service/container failed to start"
+    || { dump_omada_diagnostics; die "omada-db.service/container failed to start"; }
 
   log "Verifying MongoDB authentication and the Omada user"
   mongo_user_count() {
-    podman exec -i omada-db sh -c \
-      'command -v mongosh >/dev/null 2>&1 && exec mongosh --quiet || exec mongo --quiet' 2>/dev/null <<EOF
-try {
-  db.getSiblingDB("admin").auth("root", "${MONGO_ROOT_PASS}")
-  print("USERS=" + db.getSiblingDB("admin").system.users.countDocuments({user:"omada", db:"omada"}))
-} catch (e) { print("USERS=ERR") }
-EOF
+    timeout 15 podman exec -i omada-db sh -c \
+      'if command -v mongosh >/dev/null 2>&1; then
+         exec mongosh --quiet --eval "try { db.getSiblingDB(\"admin\").auth(\"root\", \"${MONGO_ROOT_PASS}\"); var c = await db.getSiblingDB(\"admin\").system.users.countDocuments({user:\"omada\", db:\"omada\"}); print(\"USERS=\" + c); } catch (e) { print(\"USERS=ERR\"); }"
+       else
+         exec mongo --quiet --eval "try { db.getSiblingDB(\"admin\").auth(\"root\", \"${MONGO_ROOT_PASS}\"); print(\"USERS=\" + db.getSiblingDB(\"admin\").system.users.countDocuments({user:\"omada\", db:\"omada\"})); } catch (e) { print(\"USERS=ERR\"); }"
+       fi' 2>/dev/null
   }
+
   mongo_wait=0
   until mongo_user_count | grep '^USERS=1$' >/dev/null; do
     sleep 2
     mongo_wait=$(( mongo_wait + 2 ))
     if (( mongo_wait >= 180 )); then
+      dump_omada_diagnostics
       if (( LEGACY_OMADA_DB )); then
         die "Omada MongoDB authentication failed for retained ${OMADA_DB_DIR}; verify ${LEGACY_CRED_FILE} was preserved. The database was not modified or deleted."
       fi
-      die "Omada MongoDB user missing after 180s. If first initialization was interrupted: systemctl stop omada-db, remove the incomplete ${OMADA_DB_DIR}, and rerun."
+      warn "============================================================"
+      warn " Omada MongoDB user missing after 180s in ${OMADA_DB_DIR}."
+      warn " If initial database creation was interrupted before completion,"
+      warn " you can clean up the incomplete database and rerun:"
+      warn "   1. sudo systemctl stop omada omada-db"
+      warn "   2. sudo rm -rf ${OMADA_DB_DIR}/*"
+      warn "   3. sudo ./setup-fedora-controllers.sh --omada"
+      warn "============================================================"
+      die "Omada MongoDB user missing after 180s. Follow the manual recovery steps above to clean up and retry."
     fi
   done
   log "Omada MongoDB ready"
@@ -2243,12 +2310,18 @@ if (( ENABLE_OMADA )); then
   if (( RESTART_OMADA )); then
     log "Starting omada"
     start_unit_and_verify_active omada \
-      || die "omada.service failed to start"
+      || { dump_omada_diagnostics; die "omada.service failed to start"; }
   else
-    log "omada unchanged; leaving it running"
+    if systemctl is-active --quiet omada.service; then
+      log "omada unchanged; leaving it running"
+    else
+      log "omada was not active; starting it"
+      start_unit_and_verify_active omada \
+        || { dump_omada_diagnostics; die "omada.service failed to start"; }
+    fi
   fi
-  wait_for_https "Omada" https://localhost:8043 900 \
-    || die "Omada readiness failed; see journalctl -eu omada.service"
+  wait_for_https "Omada" https://localhost:8043 900 omada.service \
+    || { dump_omada_diagnostics; die "Omada readiness failed; see journalctl -eu omada.service"; }
   if (( RESTART_OMADA )); then
     record_applied omada "${OMADA_FILES[@]}"
   fi
@@ -2291,8 +2364,12 @@ for unit in "${SERVICES[@]}"; do
   else
     warn "${unit}.service is not linked into multi-user.target.wants"
   fi
-  systemctl is-active --quiet "${unit}.service" \
-    || die "${unit}.service is not active. See: journalctl -eu ${unit}.service"
+  if ! systemctl is-active --quiet "${unit}.service"; then
+    if [[ ${unit} == omada || ${unit} == omada-db ]]; then
+      dump_omada_diagnostics
+    fi
+    die "${unit}.service is not active. See: journalctl -eu ${unit}.service"
+  fi
 done
 if (( ENABLE_DNS )); then
   systemctl is-active --quiet dnsmasq.service \

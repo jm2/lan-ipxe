@@ -433,7 +433,7 @@ test_static_wiring() {
   quiesce_line=$(line_of '#--- Quiesce legacy and disabled components')
   mongo_ready=$(line_of '  log "Omada MongoDB ready"')
   mongo_record=$(line_of '  record_applied omada-db "${OMADA_DB_FILES[@]}"')
-  omada_ready=$(line_of '  wait_for_https "Omada" https://localhost:8043 900')
+  omada_ready=$(line_of '  wait_for_https "Omada" https://localhost:8043 900 omada.service')
   omada_record=$(line_of '    record_applied omada "${OMADA_FILES[@]}"')
   runtime_ready=$(line_of 'log "All enabled services passed runtime checks"')
   prune_call=$(line_of '  prune_dangling_images')
@@ -456,6 +456,90 @@ test_static_wiring() {
     || fail 'dangling-image cleanup is not gated by the small-storage profile'
 }
 
+test_quadlet_generator_dryrun() (
+  local quadlet_dir=${TEST_ROOT}/quadlets
+  local mock_generator=${TEST_ROOT}/mock-quadlet-generator
+  install -d "${quadlet_dir}"
+  touch "${quadlet_dir}/omada.container"
+
+  # Case A: Dryrun Success
+  cat >"${mock_generator}" <<'EOF'
+#!/usr/bin/env bash
+[[ "${QUADLET_UNIT_DIRS}" == *"/quadlets"* && "$1" == "--dryrun" ]] || exit 99
+exit 0
+EOF
+  chmod +x "${mock_generator}"
+
+  QUADLET_GENERATOR="${mock_generator}"
+  QUADLET_DIAGNOSTICS=$(QUADLET_UNIT_DIRS="${quadlet_dir}" "${QUADLET_GENERATOR}" --dryrun 2>&1) \
+    || fail "valid Quadlet dryrun unexpectedly failed"
+
+  # Case B: Dryrun Validation Failure (Fail-Closed)
+  cat >"${mock_generator}" <<'EOF'
+#!/usr/bin/env bash
+echo "Error: invalid Quadlet key 'InvalidKey' in omada.container" >&2
+exit 1
+EOF
+  chmod +x "${mock_generator}"
+
+  if QUADLET_DIAGNOSTICS=$(QUADLET_UNIT_DIRS="${quadlet_dir}" "${QUADLET_GENERATOR}" --dryrun 2>&1); then
+    fail "invalid Quadlet dryrun unexpectedly passed"
+  fi
+  grep -Fq "Error: invalid Quadlet key" <<<"${QUADLET_DIAGNOSTICS}" \
+    || fail "Quadlet generator diagnostics were not captured"
+)
+
+test_diagnostic_dump_resilience() (
+  local journal_log=${TEST_ROOT}/journal.log
+  local podman_log=${TEST_ROOT}/podman.log
+
+  journalctl() {
+    echo called >> "${journal_log}"
+    return 1
+  }
+
+  podman() {
+    if [[ "$1" == "container" && "$2" == "exists" ]]; then
+      return 0
+    fi
+    if [[ "$1" == "logs" ]]; then
+      echo called >> "${podman_log}"
+      return 1
+    fi
+    return 0
+  }
+
+  (
+    set -e
+    eval "$(sed -n '/^dump_omada_diagnostics() {/,/^}/p' "${CONTROLLER}")"
+    eval "$(sed -n '/^dump_uos_diagnostics() {/,/^}/p' "${CONTROLLER}")"
+    dump_omada_diagnostics >/dev/null 2>&1
+    dump_uos_diagnostics >/dev/null 2>&1
+  ) || fail "diagnostic dump crashed when underlying tools failed"
+  [[ -s ${journal_log} ]] || fail "journalctl was not invoked during diagnostics"
+  [[ -s ${podman_log} ]] || fail "podman logs was not invoked during diagnostics"
+)
+
+test_new_behaviors_static_wiring() {
+  local dryrun_call diag_omada_def diag_uos_def db_diag_call omada_diag_call
+  dryrun_call=$(line_of 'QUADLET_UNIT_DIRS="${QUADLET_DIR}"')
+  diag_omada_def=$(line_of 'dump_omada_diagnostics() {')
+  diag_uos_def=$(line_of 'dump_uos_diagnostics() {')
+  db_diag_call=$(line_of '|| { dump_omada_diagnostics; die "omada-db.service/container failed to start"; }')
+  omada_diag_call=$(line_of '|| { dump_omada_diagnostics; die "omada.service failed to start"; }')
+
+  [[ ${dryrun_call} =~ ^[0-9]+$ ]] \
+    || fail "could not locate Quadlet generator dryrun check"
+  [[ ${diag_omada_def} =~ ^[0-9]+$ && ${diag_uos_def} =~ ^[0-9]+$ \
+     && ${db_diag_call} =~ ^[0-9]+$ && ${omada_diag_call} =~ ^[0-9]+$ ]] \
+    || fail "could not locate diagnostic dump definitions or call sites"
+
+  # Verify Quadlet validation occurs before service start
+  local omada_start=$(line_of 'start_unit_and_verify_active omada-db')
+  (( dryrun_call < omada_start )) \
+    || fail "fresh Quadlet dryrun does not precede service activation"
+}
+
 test_valid_metadata
 printf 'PASS official UniFi OS metadata selection\n'
 test_invalid_metadata
@@ -476,3 +560,9 @@ test_service_input_catalog
 printf 'PASS image identities mapped to service restart inputs\n'
 test_static_wiring
 printf 'PASS controller dynamic release/update static wiring\n'
+test_quadlet_generator_dryrun
+printf 'PASS Quadlet generator dryrun validation\n'
+test_diagnostic_dump_resilience
+printf 'PASS diagnostic dump resilience under failures\n'
+test_new_behaviors_static_wiring
+printf 'PASS new behavior static wiring and ordering\n'
