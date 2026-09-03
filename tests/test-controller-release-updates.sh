@@ -557,6 +557,14 @@ test_error_handling_and_pipeline_safety() {
   if grep -E 'ip -4 route show default.*awk.*exit' "${REPO_ROOT}/setup-fedora-controllers.sh" >/dev/null; then
     fail "found hazardous awk exit in default route resolution"
   fi
+
+  # Ensure mongo_user_count avoids -i, uses timeout -k, and avoids eval await syntax error
+  if grep -E 'podman exec -i omada-db' "${REPO_ROOT}/setup-fedora-controllers.sh" >/dev/null; then
+    fail "found interactive podman exec (-i) in pipeline that can trigger SIGTTIN"
+  fi
+  if grep -E 'var c = await' "${REPO_ROOT}/setup-fedora-controllers.sh" >/dev/null; then
+    fail "found invalid top-level await in mongosh eval"
+  fi
 }
 
 test_valid_metadata

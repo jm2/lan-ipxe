@@ -2246,12 +2246,12 @@ if (( ENABLE_MONGO )); then
 
   log "Verifying MongoDB authentication and the Omada user"
   mongo_user_count() {
-    timeout 15 podman exec -i omada-db sh -c \
+    timeout -k 5 15 podman exec omada-db sh -c \
       'if command -v mongosh >/dev/null 2>&1; then
-         exec mongosh --quiet --eval "try { db.getSiblingDB(\"admin\").auth(\"root\", \"${MONGO_ROOT_PASS}\"); var c = await db.getSiblingDB(\"admin\").system.users.countDocuments({user:\"omada\", db:\"omada\"}); print(\"USERS=\" + c); } catch (e) { print(\"USERS=ERR\"); }"
+         exec mongosh --quiet -u root -p "${MONGO_INITDB_ROOT_PASSWORD:-$1}" --authenticationDatabase admin --eval "print(\"USERS=\" + db.getSiblingDB(\"admin\").system.users.countDocuments({user:\"omada\", db:\"omada\"}))"
        else
-         exec mongo --quiet --eval "try { db.getSiblingDB(\"admin\").auth(\"root\", \"${MONGO_ROOT_PASS}\"); print(\"USERS=\" + db.getSiblingDB(\"admin\").system.users.countDocuments({user:\"omada\", db:\"omada\"})); } catch (e) { print(\"USERS=ERR\"); }"
-       fi' 2>/dev/null
+         exec mongo --quiet -u root -p "${MONGO_INITDB_ROOT_PASSWORD:-$1}" --authenticationDatabase admin --eval "print(\"USERS=\" + db.getSiblingDB(\"admin\").system.users.countDocuments({user:\"omada\", db:\"omada\"}))"
+       fi' sh "${MONGO_ROOT_PASS}" 2>/dev/null
   }
 
   mongo_wait=0
