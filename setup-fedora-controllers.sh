@@ -119,6 +119,12 @@ MONGO_CACHE_GB=${MONGO_CACHE_GB:-}
 log()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m==> WARNING:\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m==> ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+report_script_error() {
+  local status=$? line=$1 cmd=$2
+  printf '\033[1;31m==> ERROR:\033[0m Command \x27%s\x27 exited with status %d at line %d\n' \
+    "${cmd}" "${status}" "${line}" >&2
+}
+trap 'report_script_error "$LINENO" "$BASH_COMMAND"' ERR
 
 #--- Release-update helpers (sourceable by focused tests) --------------------
 validate_uos_release_values() { # <source-label> <version> <url> <sha256>
@@ -1739,20 +1745,23 @@ UOS_RELEASE_METADATA_TMP=
 UOS_BOOTSTRAP_STATE=${STATE_DIR}/uos-bootstrap-version
 cleanup_controller_setup() {
   local status=$?
-  trap - EXIT INT TERM
+  trap - EXIT INT TERM ERR
   [[ -z ${UOS_INSTALLER_TMP:-} ]] || rm -f "${UOS_INSTALLER_TMP}"
   [[ -z ${UOS_RELEASE_METADATA_TMP:-} ]] || rm -f "${UOS_RELEASE_METADATA_TMP}"
-  if (( status != 0 && LEGACY_CUTOVER_PENDING )); then
-    set +e
-    if declare -F restore_legacy_stack_after_uos_failure >/dev/null; then
-      restore_legacy_stack_after_uos_failure
-    elif declare -F restore_legacy_files_from_backup >/dev/null; then
-      warn "Restoring backed-up legacy Quadlets after an interrupted early cutover"
-      restore_legacy_files_from_backup
-      LEGACY_CUTOVER_PENDING=0
-    else
-      warn "legacy cutover was interrupted before rollback became available; backups remain under ${STATE_DIR}/legacy-quadlets"
+  if (( status != 0 )); then
+    if (( LEGACY_CUTOVER_PENDING )); then
+      set +e
+      if declare -F restore_legacy_stack_after_uos_failure >/dev/null; then
+        restore_legacy_stack_after_uos_failure
+      elif declare -F restore_legacy_files_from_backup >/dev/null; then
+        warn "Restoring backed-up legacy Quadlets after an interrupted early cutover"
+        restore_legacy_files_from_backup
+        LEGACY_CUTOVER_PENDING=0
+      else
+        warn "legacy cutover was interrupted before rollback became available; backups remain under ${STATE_DIR}/legacy-quadlets"
+      fi
     fi
+    warn "setup-fedora-controllers.sh did not complete successfully (exit status ${status})"
   fi
   exit "${status}"
 }
@@ -1999,6 +2008,7 @@ if (( ENABLE_UNIFI_OS )); then
     restore_legacy_stack_after_uos_failure
     die "UniFi OS Server readiness failed; see journalctl -eu uosserver.service. A partial installation may require an explicit vendor --force-install repair."
   fi
+  log "UniFi OS Server ready; configuring management and firewall services"
 else
   if uos_unit_exists || uos_updater_unit_exists; then
     log "Disabling UniFi OS Server while preserving all vendor-managed data"
@@ -2114,16 +2124,18 @@ firewall-cmd -q --reload || die "could not load script-managed firewalld service
 if [[ -n ${FIREWALL_ZONE} ]]; then
   MANAGEMENT_ZONE=${FIREWALL_ZONE}
 else
-  LAN_IFACE=$(ip -4 route show default 2>/dev/null | awk 'NR==1 {for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}')
+  LAN_IFACE=$(ip -4 route show default 2>/dev/null | awk 'NR==1 {for (i=1;i<=NF;i++) if ($i=="dev") print $(i+1)}' || true)
   MANAGEMENT_ZONE=
   if [[ -n ${LAN_IFACE} ]]; then
     MANAGEMENT_ZONE=$(firewall-cmd --get-zone-of-interface="${LAN_IFACE}" 2>/dev/null || true)
     [[ ${MANAGEMENT_ZONE} != 'no zone' ]] || MANAGEMENT_ZONE=
   fi
-  [[ -n ${MANAGEMENT_ZONE} ]] || MANAGEMENT_ZONE=$(firewall-cmd --get-default-zone)
+  [[ -n ${MANAGEMENT_ZONE} ]] || MANAGEMENT_ZONE=$(firewall-cmd --get-default-zone 2>/dev/null || true)
 fi
-firewall-cmd --get-zones | tr ' ' '\n' | grep -qxF "${MANAGEMENT_ZONE}" \
-  || die "Unknown firewalld zone '${MANAGEMENT_ZONE}'"
+ALL_ZONES=$(firewall-cmd --get-zones 2>/dev/null || true)
+if [[ -z ${MANAGEMENT_ZONE} ]] || ! printf '%s\n' "${ALL_ZONES}" | grep -qwF "${MANAGEMENT_ZONE}"; then
+  die "Unknown firewalld zone '${MANAGEMENT_ZONE}'"
+fi
 log "Managing controller firewall services in zone ${MANAGEMENT_ZONE}"
 
 FIREWALL_ZONE_STATE=${STATE_DIR}/firewall-zone
@@ -2166,7 +2178,7 @@ retire_legacy_raw_firewall_rules() {
     || LEGACY_FIREWALL_PORTS+=("${SS_PORT}/tcp" "${SS_PORT}/udp")
   (( LEGACY_DNS_FIREWALL_RULES == 0 )) \
     || LEGACY_FIREWALL_PORTS+=(53/tcp 53/udp)
-  DEFAULT_ZONE=$(firewall-cmd --get-default-zone)
+  DEFAULT_ZONE=$(firewall-cmd --get-default-zone 2>/dev/null || true)
   declare -A LEGACY_FIREWALL_ZONES_SEEN=()
   for zone in "${DEFAULT_ZONE}" "${PREVIOUS_ZONE}" "${MANAGEMENT_ZONE}"; do
     [[ -n ${zone} ]] || continue
@@ -2386,7 +2398,7 @@ fi
 
 #--- Summary ----------------------------------------------------------------
 HOST_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.*src \([0-9.]*\).*/\1/p' || true)
-[[ -n ${HOST_IP} ]] || HOST_IP=$(hostname -I | awk '{print $1}')
+[[ -n ${HOST_IP} ]] || HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
 [[ -n ${HOST_IP} ]] || HOST_IP='<host-ip>'
 
 cat <<EOF

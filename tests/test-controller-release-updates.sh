@@ -540,6 +540,25 @@ test_new_behaviors_static_wiring() {
     || fail "fresh Quadlet dryrun does not precede service activation"
 }
 
+test_error_handling_and_pipeline_safety() {
+  local err_trap_line cleanup_err_line lan_iface_line
+  err_trap_line=$(line_of "trap 'report_script_error \"\$LINENO\" \"\$BASH_COMMAND\"' ERR")
+  cleanup_err_line=$(line_of 'trap - EXIT INT TERM ERR')
+  lan_iface_line=$(line_of 'LAN_IFACE=$(ip -4 route show default 2>/dev/null | awk '\''NR==1 {for (i=1;i<=NF;i++) if ($i=="dev") print $(i+1)}'\'' || true)')
+
+  [[ ${err_trap_line} =~ ^[0-9]+$ ]] \
+    || fail "could not locate ERR trap registration"
+  [[ ${cleanup_err_line} =~ ^[0-9]+$ ]] \
+    || fail "could not locate ERR trap deregistration in cleanup_controller_setup"
+  [[ ${lan_iface_line} =~ ^[0-9]+$ ]] \
+    || fail "could not locate SIGPIPE-safe LAN_IFACE resolution"
+
+  # Ensure no awk exit in route resolution that could trigger SIGPIPE
+  if grep -E 'ip -4 route show default.*awk.*exit' "${REPO_ROOT}/setup-fedora-controllers.sh" >/dev/null; then
+    fail "found hazardous awk exit in default route resolution"
+  fi
+}
+
 test_valid_metadata
 printf 'PASS official UniFi OS metadata selection\n'
 test_invalid_metadata
@@ -566,3 +585,6 @@ test_diagnostic_dump_resilience
 printf 'PASS diagnostic dump resilience under failures\n'
 test_new_behaviors_static_wiring
 printf 'PASS new behavior static wiring and ordering\n'
+test_error_handling_and_pipeline_safety
+printf 'PASS error reporting trap and pipeline safety\n'
+
