@@ -20,6 +20,8 @@ HOME="$TEST_HOME" CARGO_HOME="$TEST_HOME/custom cargo" GOPATH="$TEST_HOME/custom
     ANDROID_HOME="$TEST_HOME/sdk with spaces" JAVA_HOME="$TEST_HOME/jdk" \
     MAKEFLAGS='--jobserver-auth=3,4 -j' EDITOR=nano /bin/bash --noprofile --norc -c '
 set -eu
+# Check automatic defaults without inheriting runner/user overrides.
+unset ANDROID_SDK_ROOT USE_CCACHE
 . "$ROOT/files/macos/environment.sh"
 first=$PATH
 . "$ROOT/files/macos/environment.sh"
