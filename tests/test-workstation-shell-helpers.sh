@@ -105,20 +105,12 @@ test_repo_matching() (
   ! dnf_repo_enabled sing
 )
 
-test_fedora_inventory_failures() {
-  local kind=$1 rc=0
+test_fedora_flatpak_inventory_failure() {
+  local rc=0
   (
     load_helpers setup-fedora-workstation.sh
-    case ${kind} in
-      dnf)
-        dnf() { return 42; }
-        if dnf_install @development-tools; then exit 90; fi
-        ;;
-      flatpak)
-        flatpak() { return 42; }
-        if flatpak_install org.example.App; then exit 90; fi
-        ;;
-    esac
+    flatpak() { return 42; }
+    if flatpak_install org.example.App; then exit 90; fi
     exit 91
   ) >/dev/null 2>&1 || rc=$?
   [[ ${rc} == 1 ]]
@@ -139,6 +131,12 @@ test_dkms_kernel_selection() (
   [[ ${DKMS_KERNEL} == 6.17.1 ]]
   select_dkms_kernel 6.16.0 "${case_dir}/modules" "${case_dir}/boot"
   [[ ${DKMS_KERNEL} == 6.18.2 ]]
+  # A newer generic kernel cannot replace the Asahi 16K boot target.
+  install -d "${case_dir}/modules/6.17.2.aarch64+16k/build"
+  printf 'mock\n' >"${case_dir}/modules/6.17.2.aarch64+16k/build/Makefile"
+  printf 'mock\n' >"${case_dir}/boot/vmlinuz-6.17.2.aarch64+16k"
+  select_dkms_kernel 6.16.0.aarch64+16k "${case_dir}/modules" "${case_dir}/boot"
+  [[ ${DKMS_KERNEL} == 6.17.2.aarch64+16k ]]
 )
 
 test_dkms_kernel_selection_failure() {
@@ -1066,9 +1064,7 @@ test_pacman_operational_failure
 printf 'PASS pacman operational-error propagation\n'
 test_repo_matching
 printf 'PASS exact DNF repository matching\n'
-test_fedora_inventory_failures dnf
-printf 'PASS DNF group-query failure propagation\n'
-test_fedora_inventory_failures flatpak
+test_fedora_flatpak_inventory_failure
 printf 'PASS Flatpak inventory failure propagation\n'
 test_dkms_kernel_selection
 printf 'PASS Fedora DKMS running/newest kernel selection\n'

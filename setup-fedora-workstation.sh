@@ -19,12 +19,13 @@
 #
 # What it does, in order:
 #   1. signed third-party repos: VS Code, Claude Code, the jmsqrd/tributary
-#      copr, RPM Fusion free+nonfree, Microsoft (PowerShell), sing-box; on
-#      x86_64 also Google Chrome and the RPM Fusion nvidia-driver + steam
+#      copr, RPM Fusion free+nonfree, Chrome, sing-box; on x86_64 also
+#      Microsoft (PowerShell) and the RPM Fusion nvidia-driver + steam
 #      repos. The abandoned Antigravity 1.x RPM repo/package and VSCodium are
 #      retired in favor of native Antigravity 2.0+ and VS Code.
 #   2. CA-bundle symlinks at the Debian-style paths some tools hard-code
-#   3. the dnf package set (plus the x86_64-only set: i686 libs, Chrome, Steam)
+#   3. the dnf package set, including native Chrome on both architectures
+#      (plus the x86_64-only set: i686 libs, PowerShell RPM, Steam)
 #   4. Antigravity desktop 2.0+, Antigravity CLI, OpenCode, Codex CLI, and Zed
 #      using the latest native vendor artifacts/installers (checksummed from
 #      live upstream release metadata where upstream publishes digests)
@@ -148,6 +149,7 @@ PKGS=(
   gcc
   gdb
   genisoimage
+  gh
   git
   git-lfs
   glibc-langpack-en
@@ -163,6 +165,7 @@ PKGS=(
   kernel-headers
   gnutls-devel
   golang
+  google-chrome-stable
   google-noto-cjk-fonts
   google-noto-emoji-color-fonts
   google-noto-sans-fonts
@@ -177,6 +180,7 @@ PKGS=(
   jq
   less
   libadwaita-devel
+  libicu
   libmpc-devel
   libva
   libva-utils
@@ -198,12 +202,12 @@ PKGS=(
   NetworkManager
   openssh-server
   openssl-devel
+  openssl-libs
   pigz
   pipewire
   pipewire-alsa
   pipewire-pulseaudio
   pngcrush
-  powershell
   protobuf-compiler
   python3-protobuf
   rhythmbox
@@ -246,11 +250,11 @@ PKGS=(
 # only for that architecture
 PKGS_X86_64=(
   glibc-devel.i686
-  google-chrome-stable
   libva-intel-media-driver
   libstdc++-devel.i686
   libva.i686
   mesa-vulkan-drivers.i686
+  powershell
   readline-devel.i686
   steam
   vulkan-loader.i686
@@ -370,40 +374,6 @@ enable_unit() {
   fi
   sudo systemctl --quiet enable "$1"
   note "$1: enabled now"
-}
-
-# is_installed <pkg>: true for a package name, name.arch, name-version, or a
-# provided capability (vim -> vim-enhanced)
-is_installed() {
-  rpm -q --quiet -- "$1" || rpm -q --quiet --whatprovides -- "$1"
-}
-
-# dnf_install <pkg|@group>...: installs only the entries not present yet
-DNF_GROUPS_LOADED=0
-INSTALLED_GROUPS=
-dnf_install() {
-  local p missing=()
-  for p in "$@"; do
-    if [[ ${p} == @* ]]; then
-      if (( ! DNF_GROUPS_LOADED )); then
-        # Hidden groups (including gnome-desktop) require --hidden.
-        local group_output
-        group_output=$(dnf -q group list --installed --hidden 2>/dev/null) \
-          || die "could not query installed DNF groups"
-        INSTALLED_GROUPS=$(awk 'NR > 1 {print $1}' <<<"${group_output}")
-        DNF_GROUPS_LOADED=1
-      fi
-      grep -qx -- "${p#@}" <<<"${INSTALLED_GROUPS}" || missing+=("${p}")
-    else
-      is_installed "${p}" || missing+=("${p}")
-    fi
-  done
-  if (( ${#missing[@]} )); then
-    note "installing ${#missing[@]} missing: ${missing[*]}"
-    sudo dnf -y install "${missing[@]}"
-  else
-    note "all $# packages present"
-  fi
 }
 
 # flatpak_install <app-id>...: system-wide from flathub, only what is missing
@@ -628,6 +598,7 @@ resolve_github_release_asset() {
   line=$(jq -er --arg asset "${asset}" '
       select(.draft == false and .prerelease == false)
       | . as $release
+      | ($asset | split("{version}") | join($release.tag_name | ltrimstr("v"))) as $asset
       | [.assets[] | select(.name == $asset)] as $matches
       | select(($matches | length) == 1)
       | [$release.tag_name, $matches[0].browser_download_url,
@@ -638,6 +609,7 @@ resolve_github_release_asset() {
   [[ ${tag} =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]] \
     || die "latest ${repo} release has an unsupported tag '${tag}'"
   RESOLVED_VERSION=${BASH_REMATCH[1]}
+  asset=${asset//\{version\}/${RESOLVED_VERSION}}
   expected_prefix="https://github.com/${repo}/releases/download/${tag}/"
   [[ ${RESOLVED_URL} == "${expected_prefix}${asset}" ]] \
     || die "latest ${repo} asset URL is outside the expected GitHub release path"
@@ -995,6 +967,47 @@ install_codex_cli() {
   "${HOME}/.local/bin/codex" --version >/dev/null \
     || die "the installed Codex CLI is not runnable"
   note "Codex CLI: current official standalone release installed"
+}
+
+# Microsoft's RHEL repo carries x86_64 PowerShell. ARM uses the official
+# binary archive, with each verified release kept in its own directory.
+install_powershell_arm64() {
+  resolve_github_release_asset PowerShell/PowerShell \
+    https://api.github.com/repos/PowerShell/PowerShell/releases/latest \
+    'powershell-{version}-linux-arm64.tar.gz'
+  local archive=${WORK_DIR}/powershell.tar.gz
+  local install_dir=${HOME}/.local/share/powershell/${RESOLVED_VERSION}-arm64
+  local command_link=${HOME}/.local/bin/pwsh
+  local version=
+  [[ ! -e ${command_link} || -L ${command_link} ]] \
+    || die "refusing to replace unmanaged path: ${command_link}"
+  if [[ -x ${install_dir}/pwsh ]]; then
+    version=$("${install_dir}/pwsh" -NoLogo -NoProfile -Command \
+      '$PSVersionTable.PSVersion.ToString()') \
+      || die "the installed ARM64 PowerShell is not runnable"
+  fi
+  if [[ ${version} != "${RESOLVED_VERSION}" ]]; then
+    [[ ! -e ${install_dir} && ! -L ${install_dir} ]] \
+      || die "unexpected PowerShell installation at ${install_dir}"
+    curl --proto '=https' --tlsv1.2 -fL --retry 3 \
+      -o "${archive}" "${RESOLVED_URL}" \
+      || die "could not download ARM64 PowerShell"
+    printf '%s  %s\n' "${RESOLVED_SHA256}" "${archive}" | sha256sum -c - \
+      || die "PowerShell archive checksum mismatch"
+    mkdir -p "${WORK_DIR}/powershell"
+    tar -xzf "${archive}" -C "${WORK_DIR}/powershell"
+    chmod 0755 "${WORK_DIR}/powershell/pwsh"
+    version=$("${WORK_DIR}/powershell/pwsh" -NoLogo -NoProfile -Command \
+      '$PSVersionTable.PSVersion.ToString()') \
+      || die "the downloaded ARM64 PowerShell is not runnable"
+    [[ ${version} == "${RESOLVED_VERSION}" ]] \
+      || die "PowerShell reported unexpected version ${version}"
+    mkdir -p "$(dirname "${install_dir}")"
+    mv -- "${WORK_DIR}/powershell" "${install_dir}"
+  fi
+  mkdir -p "${HOME}/.local/bin"
+  ensure_symlink "${install_dir}/pwsh" "${command_link}"
+  note "PowerShell ${RESOLVED_VERSION}: native ARM64 release installed"
 }
 
 reconcile_zed_entrypoints() {
@@ -1952,13 +1965,15 @@ ensure_r8152_source_registration() {
 
 # select_dkms_kernel <running-kernel> <modules-root> <boot-root>: prefer the
 # running kernel when it has usable headers and a boot image; otherwise choose
-# the newest installed kernel that has both. Sets DKMS_KERNEL.
+# the newest installed kernel of the same flavour that has both. Sets DKMS_KERNEL.
 DKMS_KERNEL=
 select_dkms_kernel() {
   local running_kernel=$1 modules_root=$2 boot_root=$3
   local kernel_tree candidate_kernel sorted_kernels
+  local running_flavour='' candidate_flavour=''
   local kernel_candidates=()
   DKMS_KERNEL=${running_kernel}
+  [[ ${running_kernel} != *+* ]] || running_flavour=${running_kernel#*+}
   if [[ -f ${modules_root}/${DKMS_KERNEL}/build/Makefile \
         && -s ${boot_root}/vmlinuz-${DKMS_KERNEL} ]]; then
     return 0
@@ -1966,6 +1981,9 @@ select_dkms_kernel() {
   for kernel_tree in "${modules_root}"/*; do
     [[ -d ${kernel_tree} ]] || continue
     candidate_kernel=${kernel_tree#"${modules_root}"/}
+    candidate_flavour=
+    [[ ${candidate_kernel} != *+* ]] || candidate_flavour=${candidate_kernel#*+}
+    [[ ${candidate_flavour} == "${running_flavour}" ]] || continue
     [[ -f ${kernel_tree}/build/Makefile \
        && -s ${boot_root}/vmlinuz-${candidate_kernel} ]] || continue
     kernel_candidates+=("${candidate_kernel}")
@@ -1985,7 +2003,7 @@ R8152_LOADED_OUT_OF_TREE=0
 install_r8152_dkms() {
   local running_kernel=$1
   local actual_r8152_commit repo_ver repo_module source_stage source_digest target_kernel
-  local kernel_tree
+  local kernel_tree kernel_package
   local rule_sha udev_marker_source r8152_changed=0 udev_rule_changed=0
   local -a target_kernels=()
   local -A seen_target_kernels=()
@@ -1993,11 +2011,16 @@ install_r8152_dkms() {
   if [[ ! -f /usr/lib/modules/${running_kernel}/build/Makefile \
         || ! -s /boot/vmlinuz-${running_kernel} ]]; then
     note "installing headers for running kernel ${running_kernel}"
-    if ! sudo dnf -y install "kernel-devel-${running_kernel}" \
+    if ! sudo dnf -y install "kernel-devel-uname-r = ${running_kernel}" \
        || [[ ! -f /usr/lib/modules/${running_kernel}/build/Makefile \
              || ! -s /boot/vmlinuz-${running_kernel} ]]; then
-      warn "Headers for running kernel ${running_kernel} are no longer available; installing the newest kernel and headers instead."
-      sudo dnf -y --refresh install kernel kernel-devel
+      kernel_package=$(rpm -qf --qf '%{NAME}\n' "/boot/vmlinuz-${running_kernel}") \
+        || die "could not identify the running kernel's RPM"
+      [[ ${kernel_package} == kernel*-core && ${kernel_package} != *$'\n'* ]] \
+        || die "unexpected running-kernel package: ${kernel_package}"
+      kernel_package=${kernel_package%-core}
+      warn "Headers for ${running_kernel} are no longer available; installing the newest ${kernel_package} and its headers instead."
+      sudo dnf -y --refresh install "${kernel_package}" "${kernel_package}-devel"
     fi
   fi
   select_dkms_kernel "${running_kernel}" /usr/lib/modules /boot
@@ -2308,16 +2331,15 @@ ensure_symlink -s "${CA_BUNDLE}" /etc/pki/tls/certs/ca-bundle.crt
 
 #--- 1b. Repositories, continued (x86_64 repo files overwrite the disabled
 #        ones RPM Fusion ships, so they come after that install) ------------
-log "Repositories (x86_64, keys, Microsoft, sing-box)"
+log "Repositories (Chrome, x86_64 extras, Microsoft, sing-box)"
+put_file -s "${FILES}/etc/yum.repos.d/google-chrome.repo" /etc/yum.repos.d/google-chrome.repo
+import_rpm_key "${GOOGLE_KEY_URL}" linux-packages-keymaster@google.com
 if (( IS_X86_64 )); then
-  for repo in google-chrome rpmfusion-nonfree-nvidia-driver rpmfusion-nonfree-steam; do
+  for repo in rpmfusion-nonfree-nvidia-driver rpmfusion-nonfree-steam; do
     put_file -s "${FILES}/etc/yum.repos.d/${repo}.repo" "/etc/yum.repos.d/${repo}.repo"
   done
+  put_file -s "${FILES}/etc/yum.repos.d/microsoft-prod.repo" /etc/yum.repos.d/microsoft-prod.repo
 fi
-if (( IS_X86_64 )); then
-  import_rpm_key "${GOOGLE_KEY_URL}" linux-packages-keymaster@google.com
-fi
-put_file -s "${FILES}/etc/yum.repos.d/microsoft-prod.repo" /etc/yum.repos.d/microsoft-prod.repo
 # sing-box: modern multi-protocol proxy (shadowsocks incl. 2022 ciphers).
 # Reconcile enabled state rather than treating any file as sufficient.
 if dnf_repo_enabled sing-box; then
@@ -2336,12 +2358,14 @@ fi
 log "Applying all available DNF package updates"
 sudo dnf -y upgrade --refresh
 
-log "Package set (${#PKGS[@]} entries)"
-dnf_install "${PKGS[@]}"
 if (( IS_X86_64 )); then
-  log "x86_64 package set (${#PKGS_X86_64[@]} entries)"
-  dnf_install "${PKGS_X86_64[@]}"
+  PKGS+=("${PKGS_X86_64[@]}")
 fi
+log "Package set (${#PKGS[@]} entries)"
+# DNF handles installed packages and partially installed groups itself. Keep
+# queries/transactions in the same root cache, with prompts answered and output
+# visible: an unprivileged, captured `group list` can wait on unseen key prompts.
+sudo dnf -y install "${PKGS[@]}"
 locale -a | grep -Fxi 'en_US.utf8' >/dev/null \
   || die "glibc-langpack-en was installed, but the en_US.UTF-8 locale is unavailable"
 for required_command in base64 git jq od sha512sum; do
@@ -2350,6 +2374,10 @@ for required_command in base64 git jq od sha512sum; do
 done
 
 #--- 4. Native developer tools ---------------------------------------------
+if [[ ${ARCH} == aarch64 ]]; then
+  log "PowerShell (verified native ARM64 release)"
+  install_powershell_arm64
+fi
 log "Resolving latest verified native developer-tool releases"
 resolve_native_tool_releases
 

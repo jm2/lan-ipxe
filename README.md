@@ -154,12 +154,18 @@ payloads (`files/`) relative to their own location.
   support and NVIDIA open modules for both `linux` and `linux-lts`. It installs the
   AUR `r8152-dkms` package only below kernel 7.2; on 7.2+ it purges that out-of-tree
   driver, regenerates the initramfs, and reports when a loaded out-of-tree module
-  requires a reboot to activate the in-tree driver.
+  requires a reboot to activate the in-tree driver. GNOME uses Vitals for sensors,
+  Dash to Dock from the AUR, and the bundled System Monitor extension with `libgtop`.
 - `setup-fedora-workstation.sh` — run as your normal user; Fedora 41+ (dnf5). Adds the
   signed third-party repos (`files/etc/yum.repos.d/`, the tributary copr, RPM Fusion,
-  Microsoft VS Code/PowerShell, Claude Code, sing-box; Chrome/NVIDIA/Steam repos on
-  x86_64), installs the dnf and flatpak sets (plus the x86_64-only 32-bit/Steam/Chrome
+  Microsoft VS Code, Chrome, Claude Code, sing-box; PowerShell/NVIDIA/Steam repos on
+  x86_64), installs the dnf and flatpak sets (plus the x86_64-only 32-bit/Steam
   extras), applies available DNF/Flatpak updates, and installs Zed plus native AI tools.
+  Both x86_64 and aarch64 are supported, including Fedora Asahi's 16K kernel variant.
+  DNF reconciles the package/group set directly with visible output and automatic
+  confirmation; there is no separate user-cache group query to block on hidden
+  repository-key prompts. Chrome and GitHub CLI are installed on both architectures;
+  ARM64 PowerShell uses Microsoft's checksum-verified release archive.
   Antigravity 2.0+ and its CLI, OpenCode, and Zed resolve the latest stable native
   artifacts and their published checksums on each run; Codex uses OpenAI's
   checksum-verifying current-release installer; Claude Code uses Anthropic's signed RPM

@@ -86,6 +86,7 @@ PKGS_OFFICIAL=(
   gnome-shell-extension-dash-to-panel
   gnome-shell-extension-desktop-icons-ng
   gnome-shell-extension-vitals
+  # Arch bundles System Monitor here; Fedora splits it into its own RPM.
   gnome-shell-extensions
   go
   gparted
@@ -110,6 +111,7 @@ PKGS_OFFICIAL=(
   lib32-vulkan-radeon
   lib32-vulkan-swrast
   lib32-vulkan-virtio
+  libgtop # Optional upstream, required by the System Monitor shell extension.
   libmpc
   libpulse
   libva-intel-driver
