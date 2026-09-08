@@ -405,7 +405,7 @@ class Workstation:
         if kind == 'cask' and 'Rosetta' in (info.get('caveats') or ''):
             self.rosetta()
         operation = 'upgrade' if installed else 'install'
-        self.command([self.brew, operation, '--' + kind, name], mutate=True, capture=False)
+        self.command([self.brew, operation, '--no-ask', '--' + kind, name], mutate=True, capture=False)
         okay = self.formula_installed(name) if kind == 'formula' else (self.prefix / 'Caskroom' / name / '.metadata').is_dir()
         if not okay:
             raise RuntimeError('Package postcondition missing: ' + name)
