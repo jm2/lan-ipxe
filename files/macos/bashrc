@@ -1,0 +1,70 @@
+# shellcheck shell=bash
+# Interactive macOS port of files/bashrc and files/etc/bash.bashrc.
+case $- in *i*) ;; *) return ;; esac
+[ -z "${_WORKSTATION_BASH_LOADED-}" ] || return
+_WORKSTATION_BASH_LOADED=1
+# Apple invokes /etc/bashrc from its system login profile. Non-login Bash needs it.
+if ! shopt -q login_shell && [ -r /etc/bashrc ]; then . /etc/bashrc; fi
+if [ -r "$HOME/.config/lan-ipxe/environment.sh" ]; then
+    . "$HOME/.config/lan-ipxe/environment.sh"
+fi
+shopt -s checkwinsize histappend
+command -v colordiff >/dev/null 2>&1 && alias diff='colordiff -u'
+alias ls='ls -G'
+alias dir='ls -CGb'
+if command grep --color=auto '' /dev/null >/dev/null 2>&1; then
+    alias grep='grep --color=auto'
+else
+    # No matches returns 1; unsupported flags return 2.
+    [ "$?" -ne 1 ] || alias grep='grep --color=auto'
+fi
+if [ -n "${DISPLAY-}" ] && [ -x /opt/X11/bin/xauth ]; then alias ssh='ssh -Y'; fi
+if command -v gdircolors >/dev/null 2>&1; then
+    if [ -r "$HOME/.dir_colors" ]; then eval "$(gdircolors -b "$HOME/.dir_colors")"; fi
+elif command -v dircolors >/dev/null 2>&1; then
+    if [ -r "$HOME/.dir_colors" ]; then eval "$(dircolors -b "$HOME/.dir_colors")"; fi
+fi
+
+# Load completion/preexec before capturing existing prompt hooks.
+if [ -z "${BASH_COMPLETION_VERSINFO-}" ] && [ -z "${BASH_COMPLETION-}" ] &&
+    [ -r /opt/homebrew/etc/profile.d/bash_completion.sh ]; then
+    . /opt/homebrew/etc/profile.d/bash_completion.sh
+fi
+_workstation_color=0
+if [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ] 2>/dev/null; then
+    _workstation_color=1
+else
+    case ${TERM-} in xterm*|screen*|tmux*|*-256color) _workstation_color=1 ;; esac
+fi
+_workstation_prompt() {
+    local status=$?
+    case ${TERM-} in
+        xterm*|rxvt*|screen*|tmux*) printf '\033]0;%s@%s: %s\007' "${USER:-user}" "${HOSTNAME%%.*}" "${PWD/#$HOME/~}" ;;
+    esac
+    if [ "$_workstation_color" = 1 ]; then
+        PS1='\[\e[1;32m\]\u@\h\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]'
+        [ "$UID" -ne 0 ] || PS1='\[\e[1;31m\]\u@\h\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]'
+        [ "$status" -eq 0 ] || PS1="$PS1"' \[\e[1;31m\]:(\[\e[0m\]'
+    else
+        PS1='\u@\h:\w'
+        [ "$status" -eq 0 ] || PS1="$PS1 :("
+    fi
+    PS1="$PS1"'\$ '
+    return "$status"
+}
+# Let bash-preexec own PROMPT_COMMAND when present; its precmd API preserves $?.
+if [ -z "${__bp_imported-}" ] && [ -r /opt/homebrew/opt/bash-preexec/etc/profile.d/bash-preexec.sh ]; then
+    . /opt/homebrew/opt/bash-preexec/etc/profile.d/bash-preexec.sh
+fi
+if [ -n "${__bp_imported-}" ]; then
+    precmd_functions=(_workstation_prompt ${precmd_functions[@]+"${precmd_functions[@]}"})
+elif declare -p PROMPT_COMMAND 2>/dev/null | command grep -q 'declare -a'; then
+    PROMPT_COMMAND=(_workstation_prompt "${PROMPT_COMMAND[@]}")
+else
+    # The declaration check above proves this branch is scalar.
+    # shellcheck disable=SC2178,SC2128
+    PROMPT_COMMAND="_workstation_prompt${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
+fi
+PS2='> '
+PS3='> '
+PS4='+ '

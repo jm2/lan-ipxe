@@ -133,11 +133,28 @@ the corresponding iPXE menu entry). Outputs the ISO plus extracted
 
 ### Workstation provisioning — `setup-*-workstation.*`
 
-One convergent script per platform, safe to re-run at any time. Package-manager
-refreshes and updates run on every pass (including Arch's full `pacman -Syu` and AUR
+One convergent script per platform. Package-manager
+refreshes and updates normally run on each pass (including Arch's full `pacman -Syu` and AUR
 update). They replaced the earlier comtrya manifests; comtrya is
 unmaintained upstream. Run from any directory: the Linux scripts resolve their config
 payloads (`files/`) relative to their own location.
+
+macOS now has `setup-macos-workstation.sh`, targeting native Apple Silicon on
+macOS 26. Its default **core** profile includes Linux CLI parity, **wget and Go**,
+Python/Rust, everyday apps and the portable Bash configuration. **Full** adds
+large toolchains, Java/Maven/Gradle, stable Android SDK/build-tools/NDK, optional
+apps and games. All Store apps and supplemental game-data downloads are excluded.
+Full prints the per-engine data directories to populate manually.
+
+Start with `./setup-macos-workstation.sh --dry-run` or `--check`; both are offline
+and read-only. Apply as the console user with no arguments for core, or
+`--profile full`. `--no-upgrade` retains installed versions; Xcode selection,
+Sharing and power settings each require their explicit `--with-*` flag.
+Exit codes are 0 for satisfied/dry-run, 1 for failures and 2 for drift/manual work.
+See the [macOS guide](docs/macos-workstation.md), [approved plan](docs/setup-macos-workstation-plan.md)
+and [package comparison](docs/macos-package-parity.md) for ownership, exclusions,
+manual steps and validation limits. Initial validation uses mocked tests and
+read-only previews; a clean-machine installation smoke test remains outstanding.
 
 Fedora and Arch install Balun alongside Tributary (`balun` from `jmsqrd/balun`
 COPR on Fedora, `balun-bin` from the AUR on Arch). Both also install Cockpit with

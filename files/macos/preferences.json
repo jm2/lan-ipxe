@@ -1,0 +1,54 @@
+{
+  ".GlobalPreferences": {
+    "AppleInterfaceStyle": "Dark",
+    "AppleLanguages": [
+      "en-US"
+    ],
+    "AppleLocale": "en_US",
+    "AppleShowAllExtensions": true,
+    "AppleMiniaturizeOnDoubleClick": false,
+    "InitialKeyRepeat": 15,
+    "KeyRepeat": 2,
+    "NSAutomaticCapitalizationEnabled": true,
+    "NSAutomaticPeriodSubstitutionEnabled": true,
+    "NSCloseAlwaysConfirmsChanges": true,
+    "NSUserKeyEquivalents": {
+      "Lock Screen": "@l"
+    },
+    "com.apple.swipescrolldirection": false
+  },
+  "com.apple.dock": {
+    "autohide": true,
+    "tilesize": 128,
+    "largesize": 128,
+    "magnification": true,
+    "minimize-to-application": true,
+    "show-recents": false,
+    "wvous-tl-corner": 2,
+    "wvous-tr-corner": 12,
+    "wvous-bl-corner": 1,
+    "wvous-br-corner": 1,
+    "wvous-tl-modifier": 0,
+    "wvous-tr-modifier": 0,
+    "wvous-bl-modifier": 0,
+    "wvous-br-modifier": 0
+  },
+  "com.apple.finder": {
+    "ShowPathbar": true,
+    "ShowStatusBar": true,
+    "ShowSidebar": true,
+    "ShowHardDrivesOnDesktop": true,
+    "ShowExternalHardDrivesOnDesktop": true,
+    "ShowRemovableMediaOnDesktop": true,
+    "ShowMountedServersOnDesktop": true,
+    "FXPreferredViewStyle": "icnv",
+    "FXDefaultSearchScope": "SCev",
+    "NewWindowTarget": "PfHm"
+  },
+  "com.apple.WindowManager": {
+    "EnableStandardClickToShowDesktop": false,
+    "StandardHideWidgets": true,
+    "HideDesktop": false,
+    "StageManagerHideWidgets": true
+  }
+}

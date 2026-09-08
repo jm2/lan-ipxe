@@ -535,7 +535,8 @@ test_new_behaviors_static_wiring() {
     || fail "could not locate diagnostic dump definitions or call sites"
 
   # Verify Quadlet validation occurs before service start
-  local omada_start=$(line_of 'start_unit_and_verify_active omada-db')
+  local omada_start
+  omada_start=$(line_of 'start_unit_and_verify_active omada-db')
   (( dryrun_call < omada_start )) \
     || fail "fresh Quadlet dryrun does not precede service activation"
 }
@@ -595,4 +596,3 @@ test_new_behaviors_static_wiring
 printf 'PASS new behavior static wiring and ordering\n'
 test_error_handling_and_pipeline_safety
 printf 'PASS error reporting trap and pipeline safety\n'
-

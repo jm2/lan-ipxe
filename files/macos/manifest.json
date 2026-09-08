@@ -1,0 +1,490 @@
+{
+  "schema": 1,
+  "validated": "2026-09-08",
+  "formulae": {
+    "core": [
+      "bash-completion",
+      "bash-preexec",
+      "bc",
+      "colordiff",
+      "dos2unix",
+      "htop",
+      "less",
+      "nano",
+      "screen",
+      "tmux",
+      "tree",
+      "vim",
+      "curl",
+      "wget",
+      "rsync",
+      "git",
+      "git-lfs",
+      "gh",
+      "openssh",
+      "gnupg",
+      "python",
+      "go",
+      "rustup",
+      "opencode",
+      "bison",
+      "flex",
+      "gperf",
+      "cmake",
+      "ninja",
+      "ccache",
+      "pkgconf",
+      "texinfo",
+      "cdrtools",
+      "dtc",
+      "erofs-utils",
+      "hfsutils",
+      "hivex",
+      "rpm",
+      "gnu-tar",
+      "zip",
+      "unar",
+      "lz4",
+      "lzop",
+      "pigz",
+      "squashfs",
+      "imagemagick",
+      "pngcrush",
+      "mpv",
+      "yt-dlp",
+      "transmission-cli",
+      "sing-box",
+      "gtk4",
+      "libadwaita",
+      "gstreamer",
+      "adwaita-icon-theme",
+      "jq",
+      "shellcheck",
+      "ripgrep",
+      "autoconf",
+      "automake",
+      "libtool",
+      "m4",
+      "make",
+      "gpatch",
+      "gettext"
+    ],
+    "full": [
+      "openjdk",
+      "maven",
+      "gradle",
+      "ruby",
+      "gcc",
+      "llvm",
+      "lld",
+      "boost",
+      "sdl2-compat",
+      "sdl12-compat",
+      "protobuf",
+      "dbus",
+      "libelf",
+      "gmp",
+      "libmpc",
+      "mpfr",
+      "gnutls",
+      "libxml2",
+      "libxslt",
+      "ncurses",
+      "openssl@3",
+      "zlib-ng",
+      "ollama",
+      "payload-dumper-go",
+      "lgogdownloader",
+      "supertux",
+      "molten-vk",
+      "vulkan-headers",
+      "vulkan-loader",
+      "vulkan-tools",
+      "spirv-tools"
+    ]
+  },
+  "aliases": {
+    "python": "python@3.14"
+  },
+  "apps": [
+    {
+      "name": "Google Chrome",
+      "app": "Google Chrome.app",
+      "id": "com.google.Chrome",
+      "profile": "core",
+      "cask": "google-chrome"
+    },
+    {
+      "name": "Firefox",
+      "app": "Firefox.app",
+      "id": "org.mozilla.firefox",
+      "profile": "core",
+      "cask": "firefox"
+    },
+    {
+      "name": "Visual Studio Code",
+      "app": "Visual Studio Code.app",
+      "id": "com.microsoft.VSCode",
+      "profile": "core",
+      "cask": "visual-studio-code"
+    },
+    {
+      "name": "Antigravity",
+      "app": "Antigravity.app",
+      "id": "com.google.antigravity",
+      "profile": "core",
+      "cask": "antigravity"
+    },
+    {
+      "name": "Claude",
+      "app": "Claude.app",
+      "id": "com.anthropic.claudefordesktop",
+      "profile": "core",
+      "cask": "claude"
+    },
+    {
+      "name": "Zed",
+      "app": "Zed.app",
+      "id": "dev.zed.Zed",
+      "profile": "core",
+      "cask": "zed"
+    },
+    {
+      "name": "XRG",
+      "app": "XRG.app",
+      "id": "com.piatekjimenez.XRG",
+      "profile": "core",
+      "cask": "xrg"
+    },
+    {
+      "name": "VLC",
+      "app": "VLC.app",
+      "id": "org.videolan.vlc",
+      "profile": "core",
+      "cask": "vlc"
+    },
+    {
+      "name": "GIMP",
+      "app": "GIMP.app",
+      "id": "org.gimp.gimp",
+      "profile": "core",
+      "cask": "gimp"
+    },
+    {
+      "name": "Inkscape",
+      "app": "Inkscape.app",
+      "id": "org.inkscape.Inkscape",
+      "profile": "core",
+      "cask": "inkscape"
+    },
+    {
+      "name": "Meld",
+      "app": "Meld.app",
+      "id": "org.gnome.meld",
+      "profile": "core",
+      "cask": "meld"
+    },
+    {
+      "name": "MediaInfo",
+      "app": "MediaInfo.app",
+      "id": "net.mediaarea.mediainfo.mac",
+      "profile": "core",
+      "cask": "mediainfo"
+    },
+    {
+      "name": "Outline Manager",
+      "app": "Outline Manager.app",
+      "id": "com.electron.outline-manager",
+      "profile": "core",
+      "cask": "outline-manager"
+    },
+    {
+      "name": "Wireshark",
+      "app": "Wireshark.app",
+      "id": "org.wireshark.Wireshark",
+      "profile": "core",
+      "cask": "wireshark-app"
+    },
+    {
+      "name": "GitHub Desktop",
+      "app": "GitHub Desktop.app",
+      "id": "com.github.GitHubClient",
+      "profile": "full",
+      "cask": "github"
+    },
+    {
+      "name": "Plex",
+      "app": "Plex.app",
+      "id": "tv.plex.desktop",
+      "profile": "full",
+      "cask": "plex"
+    },
+    {
+      "name": "Google Drive",
+      "app": "Google Drive.app",
+      "id": "com.google.drivefs",
+      "profile": "full",
+      "cask": "google-drive"
+    },
+    {
+      "name": "Steam",
+      "app": "Steam.app",
+      "id": "com.valvesoftware.steam",
+      "profile": "full",
+      "cask": "steam"
+    },
+    {
+      "name": "GOG Galaxy",
+      "app": "GOG Galaxy.app",
+      "id": "com.gog.galaxy",
+      "profile": "full",
+      "cask": "gog-galaxy"
+    },
+    {
+      "name": "Battle.net",
+      "app": "Battle.net.app",
+      "id": "net.battle.app",
+      "profile": "full",
+      "cask": "battle-net"
+    },
+    {
+      "name": "Android Studio",
+      "app": "Android Studio.app",
+      "id": "com.google.android.studio",
+      "profile": "full",
+      "cask": "android-studio"
+    },
+    {
+      "name": "SuperTuxKart",
+      "app": "SuperTuxKart.app",
+      "id": "net.sourceforge.supertuxkart",
+      "profile": "full",
+      "cask": "supertuxkart"
+    },
+    {
+      "name": "Balun",
+      "app": "Balun.app",
+      "id": "io.github.jm2.Balun",
+      "profile": "core",
+      "repo": "jm2/balun",
+      "tag": "v0.1.1",
+      "asset": "balun-macos-aarch64.dmg",
+      "sha256": "ec05187b2db4dc524626949218ef8016c0ec12fa0a96c8087589b4ffe4864e51",
+      "strict_source": false
+    },
+    {
+      "name": "Tributary",
+      "app": "Tributary.app",
+      "id": "io.github.tributary.Tributary",
+      "profile": "core",
+      "repo": "jm2/tributary",
+      "tag": "v0.6.2",
+      "asset": "tributary-macos-aarch64.dmg",
+      "sha256": "b046eb7e64dcc1ba66e6d1efca1e53f7f8e23570cc390692837a58b2e6d4c466",
+      "strict_source": false
+    },
+    {
+      "name": "Cro-Mag Rally",
+      "app": "Cro-Mag Rally.app",
+      "id": "io.jor.cromagrally",
+      "profile": "full",
+      "repo": "jm2/CroMagRally",
+      "tag": "v3.1.1",
+      "asset": "CroMagRally-3.1.1-mac.dmg",
+      "sha256": "0342240b417c23a62d8972323fca5ed6a2c07935844bb790dc1ae5a21b5a6a99",
+      "strict_source": true
+    },
+    {
+      "name": "Billy Frontier",
+      "app": "Billy Frontier.app",
+      "id": "io.jor.billyfrontier",
+      "profile": "full",
+      "repo": "jorio/BillyFrontier",
+      "tag": "v1.1.1",
+      "asset": "BillyFrontier-1.1.1-mac.dmg",
+      "sha256": "d8200ed658786406d0f8ef3ad56ed9eb3a0c4223a689685888e1454d1bb2de1e",
+      "strict_source": false
+    },
+    {
+      "name": "Bugdom",
+      "app": "Bugdom.app",
+      "id": "io.jor.bugdom",
+      "profile": "full",
+      "repo": "jorio/Bugdom",
+      "tag": "1.3.4",
+      "asset": "Bugdom-1.3.4-mac.dmg",
+      "sha256": "9797091290e29336e74f8d3692589acd5accc53bccf085e6aeb8636552349644",
+      "strict_source": false
+    },
+    {
+      "name": "Bugdom 2",
+      "app": "Bugdom 2.app",
+      "id": "io.jor.bugdom2",
+      "profile": "full",
+      "repo": "jorio/Bugdom2",
+      "tag": "v4.0.0",
+      "asset": "Bugdom2-4.0.0-mac.dmg",
+      "sha256": "c962aa3f135d829c2d4409a757480aebac0d1d6dd3fadfcf578503f85445175f",
+      "strict_source": false
+    },
+    {
+      "name": "Mighty Mike",
+      "app": "Mighty Mike.app",
+      "id": "io.jor.mightymike",
+      "profile": "full",
+      "repo": "jorio/MightyMike",
+      "tag": "v3.0.2",
+      "asset": "MightyMike-3.0.2-mac.dmg",
+      "sha256": "7643e45f480ef148655ab76790b8fa5b7688f041bf174244f8741e285e6092d9",
+      "strict_source": false
+    },
+    {
+      "name": "Nanosaur",
+      "app": "Nanosaur.app",
+      "id": "io.jor.nanosaur",
+      "profile": "full",
+      "repo": "jorio/Nanosaur",
+      "tag": "v1.4.4",
+      "asset": "Nanosaur-1.4.4-mac.dmg",
+      "sha256": "fac89eae8f51d3b4462e6aae1c858f017ed7b2738b4d8a99852933b1d5d7dc12",
+      "strict_source": false
+    },
+    {
+      "name": "Nanosaur 2",
+      "app": "Nanosaur 2.app",
+      "id": "io.jor.nanosaur2",
+      "profile": "full",
+      "repo": "jorio/Nanosaur2",
+      "tag": "v2.1.0",
+      "asset": "Nanosaur2-2.1.0-mac.dmg",
+      "sha256": "c2f81e0ac2b73f845d92a13d19b7fc6b83da8761d6453c2b8a34e2e2cfe1674b",
+      "strict_source": false
+    },
+    {
+      "name": "Otto Matic",
+      "app": "Otto Matic.app",
+      "id": "io.jor.ottomatic",
+      "profile": "full",
+      "repo": "jorio/OttoMatic",
+      "tag": "4.0.1",
+      "asset": "OttoMatic-4.0.1-mac.dmg",
+      "sha256": "2936a98e6f7d44c31cd08be7ecd11c817a83feaf80c307f77863812083c477ca",
+      "strict_source": false
+    },
+    {
+      "name": "Codex desktop",
+      "app": "Codex.app",
+      "id": "com.openai.codex",
+      "profile": "core",
+      "url": "https://persistent.oaistatic.com/codex-app-prod/Codex.dmg",
+      "team": "2DC432GLL2"
+    },
+    {
+      "name": "dhewm3",
+      "app": "dhewm3.app",
+      "id": "com.macsourceports.dhewm3",
+      "profile": "full",
+      "repo": "MacSourcePorts/MSPBuildSystem",
+      "tag": "dhewm3_1.5.5",
+      "asset": "dhewm3-1.5.5.dmg",
+      "sha256": "bb0467388df26ab2404b2f78eece09d89dac57f6ab137b64925f2f73613bcd68"
+    },
+    {
+      "name": "yquake2",
+      "app": "yquake2.app",
+      "id": "com.macsourceports.yquake2",
+      "profile": "full",
+      "repo": "MacSourcePorts/MSPBuildSystem",
+      "tag": "yquake2_8.70",
+      "asset": "yquake2-8.70.dmg",
+      "sha256": "526a2a5e5377b0295852d0c9f0c7e2ea7443f7f85a1a37ba88e951e19f84e166"
+    },
+    {
+      "name": "Prey2006",
+      "app": "Prey2006.app",
+      "id": "com.macsourceports.Prey2006",
+      "profile": "full",
+      "repo": "MacSourcePorts/MSPBuildSystem",
+      "tag": "Prey2006_1.5.4",
+      "asset": "Prey2006-1.5.4.dmg",
+      "sha256": "1da89b17f0dabb6b35f38c307f08ba6cecb29fa3103b28bff9e2ba165c73ad71"
+    },
+    {
+      "name": "ioquake3",
+      "app": "ioquake3.app",
+      "id": "com.macsourceports.ioquake3",
+      "profile": "full",
+      "repo": "MacSourcePorts/MSPBuildSystem",
+      "tag": "ioq3_1.36_2026-07-25",
+      "asset": "ioquake3_universal2_2026-07-25.dmg",
+      "sha256": "fab4eaf8c7a9b858eea25e61db400da2ce9bfba89339d164e8e2908489629977",
+      "alternatives": [
+        "org.quake3e.quake3e"
+      ]
+    },
+    {
+      "name": "Unreal Tournament",
+      "app": "UnrealTournament.app",
+      "id": "com.oldunreal.unrealtournament",
+      "profile": "full",
+      "repo": "OldUnreal/UnrealTournamentPatches",
+      "tag": "v469e",
+      "asset": "OldUnreal-UTPatch469e-macOS.dmg",
+      "sha256": "b6b3a1f462e4b702df0eecf90d663ef1f847cc36aadca1ec6dd35278d091fa0d"
+    },
+    {
+      "name": "ET Legacy",
+      "app": "ET Legacy.app",
+      "id": "com.etlegacy.etl",
+      "profile": "full",
+      "archive": true,
+      "folder": "ETLegacy",
+      "archive_root": "etlegacy-v2.85.0-macOS",
+      "url": "https://www.etlegacy.com/download/file/733",
+      "sha256": "9b6a144ad731b2514e30758ec41dd42e61dbaabbbb75c8e58036c8474175206a"
+    },
+    {
+      "name": "Maelstrom",
+      "app": "Maelstrom.app",
+      "id": "com.macsourceports.Maelstrom",
+      "profile": "full",
+      "repo": "MacSourcePorts/Maelstrom",
+      "tag": "Maelstrom_3.07_2025-07-12",
+      "asset": "Maelstrom-3.07.dmg",
+      "sha256": "8aee5efce3dc04b016895b4563e810e0273a9a9c8021beee16b0e571f3f266e7",
+      "alternatives": [
+        "org.libsdl.Maelstrom"
+      ]
+    }
+  ],
+  "exceptions": [
+    {
+      "name": "Chromium",
+      "reason": "Homebrew cask disabled; Chrome and Firefox provide supported browser parity."
+    },
+    {
+      "name": "MakeMKV",
+      "reason": "Homebrew cask disabled; preserve existing copy, manual vendor install if desired."
+    },
+    {
+      "name": "UT2004",
+      "reason": "Current OldUnreal channel is preview; preserve existing app and report manual data paths."
+    },
+    {
+      "name": "GDB",
+      "reason": "Darwin needs debugger signing/privileges; use Apple LLDB."
+    },
+    {
+      "name": "OpenArena / Tremulous / Maniadrive / Airshipper / Unigine Heaven",
+      "reason": "No verified maintained native ARM64 distribution in this manifest; retain existing copies."
+    },
+    {
+      "name": "Extreme Tux Racer",
+      "reason": "Inventoried Store app excluded."
+    },
+    {
+      "name": "Linux ROM / firmware / driver utilities",
+      "reason": "No supported Mac analogue for lineageos-devel, mstflint, schedtool or Linux service/driver stacks."
+    }
+  ]
+}

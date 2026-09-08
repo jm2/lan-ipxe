@@ -1,0 +1,3050 @@
+{
+  "snapshot_date": "2026-09-07/08",
+  "timezone": "America/Indiana/Indianapolis",
+  "repo_commit": "72cbcd6977f65e240ad6b61a18a37aecb6d90b8b",
+  "machine": {
+    "model": "MacBookPro18,2",
+    "chip": "Apple M1 Max",
+    "memory_gib": 64,
+    "macos": "26.6.2",
+    "build": "25G83",
+    "login_shell": "/bin/bash"
+  },
+  "coverage": "Application bundles in /Applications, /System/Applications and available ~/Applications, ~/Desktop, ~/Downloads; bundle contents pruned. Nested launcher apps counted separately. Not an OS-baseline diff.",
+  "apps": [
+    {
+      "name": "Affinity Photo",
+      "path": "/Applications/Affinity Photo.app",
+      "bundle_id": "com.seriflabs.affinityphoto",
+      "version": "1.10.8",
+      "build": "1.10.319",
+      "minimum_os": "10.9",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "Alto's Adventure",
+      "path": "/Applications/Alto's Adventure.app",
+      "bundle_id": "com.snowman.alto.mac",
+      "version": "1.8.0",
+      "build": "15",
+      "minimum_os": "11.0",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "Alto's Odyssey",
+      "path": "/Applications/Alto's Odyssey.app",
+      "bundle_id": "com.snowman.altos-odyssey.mac",
+      "version": "1.3.0",
+      "build": "22",
+      "minimum_os": "11.0",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "Antigravity",
+      "path": "/Applications/Antigravity.app",
+      "bundle_id": "com.google.antigravity",
+      "version": "2.12.2",
+      "build": "2.12.2",
+      "minimum_os": "12.0",
+      "architecture": "arm64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "Apple Configurator",
+      "path": "/Applications/Apple Configurator.app",
+      "bundle_id": "com.apple.configurator.ui",
+      "version": "2.20",
+      "build": "1001.5",
+      "minimum_os": "15.7",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "Aqara Home",
+      "path": "/Applications/Aqara Home.app",
+      "bundle_id": "com.lumiunited.pre.homekit",
+      "version": "6.4.0",
+      "build": "14",
+      "minimum_os": "18.0",
+      "architecture": "arm64",
+      "source_evidence": "iOS/iPadOS wrapper"
+    },
+    {
+      "name": "Balun",
+      "path": "/Applications/Balun.app",
+      "bundle_id": "io.github.jm2.Balun",
+      "version": "0.1.1",
+      "build": "0.1.1",
+      "minimum_os": "13.0",
+      "architecture": "script",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "Battle.net",
+      "path": "/Applications/Battle.net.app",
+      "bundle_id": "net.battle.app",
+      "version": "2.52.11.17778",
+      "build": "2.52.11 (17778)",
+      "minimum_os": "10.13",
+      "architecture": "x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "BBEdit",
+      "path": "/Applications/BBEdit.app",
+      "bundle_id": "com.barebones.bbedit",
+      "version": "16.0.3",
+      "build": "450000090",
+      "minimum_os": "14.0",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "Billy Frontier",
+      "path": "/Applications/Billy Frontier.app",
+      "bundle_id": "io.jor.billyfrontier",
+      "version": "1.1.1",
+      "build": "",
+      "minimum_os": "10.11",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "Blackmagic Disk Speed Test",
+      "path": "/Applications/Blackmagic Disk Speed Test.app",
+      "bundle_id": "com.blackmagic-design.DiskSpeedTest",
+      "version": "3.4.3",
+      "build": "30403.40.3",
+      "minimum_os": "10.13.0",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "Borderlands2",
+      "path": "/Applications/Borderlands2.app",
+      "bundle_id": "com.aspyr.borderlands2.appstore",
+      "version": "1.8.5",
+      "build": "175102",
+      "minimum_os": "10.12.6",
+      "architecture": "x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "Bugdom 2",
+      "path": "/Applications/Bugdom 2.app",
+      "bundle_id": "io.jor.bugdom2",
+      "version": "4.0.0",
+      "build": "",
+      "minimum_os": "10.11",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "Bugdom",
+      "path": "/Applications/Bugdom.app",
+      "bundle_id": "io.jor.bugdom",
+      "version": "1.3.4",
+      "build": "",
+      "minimum_os": "10.11",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "Channels",
+      "path": "/Applications/Channels.app",
+      "bundle_id": "com.getchannels.ios",
+      "version": "7.1.1",
+      "build": "6.29.228",
+      "minimum_os": "14.0.0",
+      "architecture": "arm64",
+      "source_evidence": "iOS/iPadOS wrapper"
+    },
+    {
+      "name": "ChatGPT",
+      "path": "/Applications/ChatGPT.app",
+      "bundle_id": "com.openai.codex",
+      "version": "26.901.41600",
+      "build": "7982",
+      "minimum_os": "13.0",
+      "architecture": "arm64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "ClamXav",
+      "path": "/Applications/ClamXav.app",
+      "bundle_id": "uk.co.markallan.clamxav",
+      "version": "2.6.4",
+      "build": "315",
+      "minimum_os": "10.6",
+      "architecture": "x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "Claude",
+      "path": "/Applications/Claude.app",
+      "bundle_id": "com.anthropic.claudefordesktop",
+      "version": "1.46388.4",
+      "build": "1.46388.4",
+      "minimum_os": "12.0",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "Cro-Mag Rally",
+      "path": "/Applications/Cro-Mag Rally.app",
+      "bundle_id": "io.jor.cromagrally",
+      "version": "3.1.1",
+      "build": "",
+      "minimum_os": "10.13",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "Crossy Road",
+      "path": "/Applications/Crossy Road.app",
+      "bundle_id": "com.hipsterwhale.crossy",
+      "version": "7.13.0",
+      "build": "25429",
+      "minimum_os": "18.0",
+      "architecture": "arm64",
+      "source_evidence": "iOS/iPadOS wrapper"
+    },
+    {
+      "name": "Developer",
+      "path": "/Applications/Developer.app",
+      "bundle_id": "developer.apple.wwdc-Release",
+      "version": "11.0.2",
+      "build": "1102.3.1",
+      "minimum_os": "15.0",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "dhewm3",
+      "path": "/Applications/dhewm3.app",
+      "bundle_id": "com.macsourceports.dhewm3",
+      "version": "1.5.5",
+      "build": "1.5.5",
+      "minimum_os": "10.7",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "DiRT 4",
+      "path": "/Applications/DiRT 4.app",
+      "bundle_id": "com.feralinteractive.dirt4",
+      "version": "1.0.1",
+      "build": "231433.43304.85761",
+      "minimum_os": "10.14",
+      "architecture": "x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "DiRT Rally",
+      "path": "/Applications/DiRT Rally.app",
+      "bundle_id": "com.feralinteractive.dirtrally",
+      "version": "1.1.4",
+      "build": "283550.51269.12251",
+      "minimum_os": "10.13",
+      "architecture": "x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "ET Legacy",
+      "path": "/Applications/ETLegacy/ET Legacy.app",
+      "bundle_id": "com.etlegacy.etl",
+      "version": "v2.85.0",
+      "build": "1",
+      "minimum_os": "",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "Extreme Tux Racer",
+      "path": "/Applications/Extreme Tux Racer.app",
+      "bundle_id": "com.drodin.extremetuxracer",
+      "version": "0.8.107",
+      "build": "8",
+      "minimum_os": "10.13",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "GOG Galaxy",
+      "path": "/Applications/GOG Galaxy.app",
+      "bundle_id": "com.gog.galaxy",
+      "version": "2.1.9",
+      "build": "27",
+      "minimum_os": "14.8",
+      "architecture": "arm64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "Google Chrome",
+      "path": "/Applications/Google Chrome.app",
+      "bundle_id": "com.google.Chrome",
+      "version": "152.0.7977.83",
+      "build": "7977.83",
+      "minimum_os": "13.0",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "GrandPerspective",
+      "path": "/Applications/GrandPerspective.app",
+      "bundle_id": "net.sourceforge.grandperspectiv",
+      "version": "3.7.2",
+      "build": "25",
+      "minimum_os": "11.0",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "GRIDLegends",
+      "path": "/Applications/GRIDLegends.app",
+      "bundle_id": "com.feralinteractive.gridlegends",
+      "version": "1.0",
+      "build": "376070.68732.33491",
+      "minimum_os": "13.3",
+      "architecture": "arm64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "HDHomeRun",
+      "path": "/Applications/HDHomeRun.app",
+      "bundle_id": "com.silicondust.hdhomerun",
+      "version": "20260730",
+      "build": "28",
+      "minimum_os": "11.0",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "Hex Fiend",
+      "path": "/Applications/Hex Fiend.app",
+      "bundle_id": "com.ridiculousfish.HexFiend",
+      "version": "2.15",
+      "build": "1653948392",
+      "minimum_os": "10.11",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "Keka",
+      "path": "/Applications/Keka.app",
+      "bundle_id": "com.aone.keka",
+      "version": "1.6.7",
+      "build": "5729",
+      "minimum_os": "10.10",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "Keynote Creator Studio",
+      "path": "/Applications/Keynote Creator Studio.app",
+      "bundle_id": "com.apple.Keynote",
+      "version": "15.3.1",
+      "build": "7050.1.1",
+      "minimum_os": "15.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "Mactracker",
+      "path": "/Applications/Mactracker.app",
+      "bundle_id": "com.mactrackerapp.Mactracker",
+      "version": "8.2.3",
+      "build": "510",
+      "minimum_os": "11.0",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "Maelstrom",
+      "path": "/Applications/Maelstrom.app",
+      "bundle_id": "org.libsdl.Maelstrom",
+      "version": "3.0.7",
+      "build": "3.0.7",
+      "minimum_os": "",
+      "architecture": "x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "mahjong 13 tiles",
+      "path": "/Applications/mahjong 13 tiles.app",
+      "bundle_id": "com.poesysoul.mj13",
+      "version": "6.0.3",
+      "build": "6.0.3",
+      "minimum_os": "18.0",
+      "architecture": "arm64",
+      "source_evidence": "iOS/iPadOS wrapper"
+    },
+    {
+      "name": "McDonald's",
+      "path": "/Applications/McDonald's.app",
+      "bundle_id": "com.mcdonalds.gma.cn",
+      "version": "7.0.410",
+      "build": "202609011612",
+      "minimum_os": "12.0.0",
+      "architecture": "arm64",
+      "source_evidence": "iOS/iPadOS wrapper"
+    },
+    {
+      "name": "Mighty Mike",
+      "path": "/Applications/Mighty Mike.app",
+      "bundle_id": "io.jor.mightymike",
+      "version": "3.0.2",
+      "build": "",
+      "minimum_os": "10.4",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "Mini Metro",
+      "path": "/Applications/Mini Metro.app",
+      "bundle_id": "com.mpdigital.MiniMetro",
+      "version": "2.46.0",
+      "build": "3.2.3",
+      "minimum_os": "10.9.0",
+      "architecture": "x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "Moom Classic",
+      "path": "/Applications/Moom Classic.app",
+      "bundle_id": "com.manytricks.Moom",
+      "version": "3.2.30",
+      "build": "3374",
+      "minimum_os": "10.13",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "Nanosaur 2",
+      "path": "/Applications/Nanosaur 2.app",
+      "bundle_id": "io.jor.nanosaur2",
+      "version": "2.1.0",
+      "build": "",
+      "minimum_os": "10.11",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "Nanosaur",
+      "path": "/Applications/Nanosaur.app",
+      "bundle_id": "io.jor.nanosaur",
+      "version": "1.4.4",
+      "build": "",
+      "minimum_os": "10.11",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "Numbers Creator Studio",
+      "path": "/Applications/Numbers Creator Studio.app",
+      "bundle_id": "com.apple.Numbers",
+      "version": "15.3.1",
+      "build": "7050.1.1",
+      "minimum_os": "15.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "Offline Games",
+      "path": "/Applications/Offline Games.app",
+      "bundle_id": "com.JindoBlu.OfflineGamesIOS",
+      "version": "3.14.1",
+      "build": "3203",
+      "minimum_os": "18.0",
+      "architecture": "arm64",
+      "source_evidence": "iOS/iPadOS wrapper"
+    },
+    {
+      "name": "Omada",
+      "path": "/Applications/Omada.app",
+      "bundle_id": "com.tplink.omada",
+      "version": "5.3.4",
+      "build": "62",
+      "minimum_os": "18.0",
+      "architecture": "arm64",
+      "source_evidence": "iOS/iPadOS wrapper"
+    },
+    {
+      "name": "openglex6",
+      "path": "/Applications/openglex6.app",
+      "bundle_id": "com.realtechvr.glview4",
+      "version": "6.4.99",
+      "build": "144",
+      "minimum_os": "10.13",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "Otto Matic",
+      "path": "/Applications/Otto Matic.app",
+      "bundle_id": "io.jor.ottomatic",
+      "version": "4.0.1",
+      "build": "",
+      "minimum_os": "10.11",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "Outline",
+      "path": "/Applications/Outline.app",
+      "bundle_id": "org.outline.macos.client",
+      "version": "1.21.0",
+      "build": "495403",
+      "minimum_os": "12.4",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "Pages Creator Studio",
+      "path": "/Applications/Pages Creator Studio.app",
+      "bundle_id": "com.apple.Pages",
+      "version": "15.3.1",
+      "build": "7050.1.1",
+      "minimum_os": "15.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "Pocket City",
+      "path": "/Applications/Pocket City.app",
+      "bundle_id": "com.codebrewgames.pocketcitymac",
+      "version": "1.6.5",
+      "build": "1.6.5",
+      "minimum_os": "10.10.0",
+      "architecture": "x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "PowerShell",
+      "path": "/Applications/PowerShell.app",
+      "bundle_id": "com.microsoft.powershell",
+      "version": "7.6.5",
+      "build": "7.6.5",
+      "minimum_os": "",
+      "architecture": "script",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "Prey2006",
+      "path": "/Applications/Prey2006.app",
+      "bundle_id": "com.macsourceports.Prey2006",
+      "version": "1.5.4",
+      "build": "1.5.4",
+      "minimum_os": "10.7",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "Prime Video",
+      "path": "/Applications/Prime Video.app",
+      "bundle_id": "com.amazon.aiv.AIVApp",
+      "version": "10.146",
+      "build": "10.14600.48",
+      "minimum_os": "14.0",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "Quake3e",
+      "path": "/Applications/Quake3e.app",
+      "bundle_id": "org.quake3e.quake3e",
+      "version": "1.32e",
+      "build": "1.32e",
+      "minimum_os": "10.9",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "Safari",
+      "path": "/Applications/Safari.app",
+      "bundle_id": "com.apple.Safari",
+      "version": "26.6.2",
+      "build": "21624.5.1.11.3",
+      "minimum_os": "26.6.0",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Server",
+      "path": "/Applications/Server.app",
+      "bundle_id": "com.apple.Server.v4",
+      "version": "5.12.2",
+      "build": "1059",
+      "minimum_os": "12.0",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "Sim City 4 Deluxe Edition",
+      "path": "/Applications/Sim City 4 Deluxe Edition.app",
+      "bundle_id": "com.aspyr.simcity4.appstore",
+      "version": "1.2.2",
+      "build": "358514.90",
+      "minimum_os": "10.14.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "SimCity",
+      "path": "/Applications/SimCity.app",
+      "bundle_id": "com.aspyr.simcity5.appstore",
+      "version": "1.0.4",
+      "build": "244971",
+      "minimum_os": "10.12.6",
+      "architecture": "x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "SiteSucker",
+      "path": "/Applications/SiteSucker.app",
+      "bundle_id": "us.sitesucker.mac.sitesucker",
+      "version": "6.2",
+      "build": "170",
+      "minimum_os": "12",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "Speedtest",
+      "path": "/Applications/Speedtest.app",
+      "bundle_id": "com.ookla.speedtest-macos",
+      "version": "1.27",
+      "build": "28",
+      "minimum_os": "10.11",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "StarCraft II Editor",
+      "path": "/Applications/StarCraft II/StarCraft II Editor.app",
+      "bundle_id": "com.blizzard.starcraft2.editor",
+      "version": "5.0.16 (97563)",
+      "build": "97563",
+      "minimum_os": "10.9",
+      "architecture": "x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "StarCraft II",
+      "path": "/Applications/StarCraft II/StarCraft II.app",
+      "bundle_id": "net.battle.bootstrapper",
+      "version": "1.18.5.3107",
+      "build": "1.18.5.3107",
+      "minimum_os": "10.10",
+      "architecture": "x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "Blizzard Error",
+      "path": "/Applications/StarCraft II/Support/Blizzard Error.app",
+      "bundle_id": "com.blizzard.blizzarderror",
+      "version": "2.3.24.0",
+      "build": "0",
+      "minimum_os": "",
+      "architecture": "x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "BlizzardBrowser",
+      "path": "/Applications/StarCraft II/Support/BlizzardBrowser/BlizzardBrowser.app",
+      "bundle_id": "com.blizzard.bnl.browser",
+      "version": "4.0.4",
+      "build": "4.0.4",
+      "minimum_os": "10.7",
+      "architecture": "x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "SC2Switcher",
+      "path": "/Applications/StarCraft II/Support/SC2Switcher.app",
+      "bundle_id": "com.blizzard.starcraft2switcher",
+      "version": "5.0.16 (97563)",
+      "build": "97563",
+      "minimum_os": "10.9",
+      "architecture": "x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "SC2",
+      "path": "/Applications/StarCraft II/Versions/Base97563/SC2.app",
+      "bundle_id": "com.blizzard.starcraft2",
+      "version": "5.0.16 (97563)",
+      "build": "97563",
+      "minimum_os": "10.9",
+      "architecture": "x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "StarCraft Launcher",
+      "path": "/Applications/StarCraft/StarCraft Launcher.app",
+      "bundle_id": "net.battle.bootstrapper",
+      "version": "1.18.5.3107",
+      "build": "1.18.5.3107",
+      "minimum_os": "10.10",
+      "architecture": "x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "Blizzard Error",
+      "path": "/Applications/StarCraft/x86_64/Blizzard Error.app",
+      "bundle_id": "com.blizzard.blizzarderror",
+      "version": "2.3.24.0",
+      "build": "0",
+      "minimum_os": "",
+      "architecture": "x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "StarCraft",
+      "path": "/Applications/StarCraft/x86_64/StarCraft.app",
+      "bundle_id": "com.blizzard.Starcraft",
+      "version": "1.23.10.13515",
+      "build": "1.23.10.13515",
+      "minimum_os": "10.10",
+      "architecture": "x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "Steam",
+      "path": "/Applications/Steam.app",
+      "bundle_id": "com.valvesoftware.steam",
+      "version": "6.1",
+      "build": "6.1",
+      "minimum_os": "10.13.0",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "Tailscale",
+      "path": "/Applications/Tailscale.app",
+      "bundle_id": "io.tailscale.ipn.macos",
+      "version": "1.102.3",
+      "build": "277.231.71033",
+      "minimum_os": "12.4",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "Tapo",
+      "path": "/Applications/Tapo.app",
+      "bundle_id": "com.tplink.tapo",
+      "version": "3.20.751",
+      "build": "32714",
+      "minimum_os": "18.0",
+      "architecture": "arm64",
+      "source_evidence": "iOS/iPadOS wrapper"
+    },
+    {
+      "name": "TestFlight",
+      "path": "/Applications/TestFlight.app",
+      "bundle_id": "com.apple.TestFlight",
+      "version": "4.3.1",
+      "build": "681.1",
+      "minimum_os": "13.0",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "Ting",
+      "path": "/Applications/Ting.app",
+      "bundle_id": "com.whiskerlabs.sparkfault.mobile",
+      "version": "3.0.4",
+      "build": "300000004",
+      "minimum_os": "18.0",
+      "architecture": "arm64",
+      "source_evidence": "iOS/iPadOS wrapper"
+    },
+    {
+      "name": "Tributary",
+      "path": "/Applications/Tributary.app",
+      "bundle_id": "io.github.tributary.Tributary",
+      "version": "0.6.2",
+      "build": "0.6.2",
+      "minimum_os": "13.0",
+      "architecture": "script",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "TripView",
+      "path": "/Applications/TripView.app",
+      "bundle_id": "com.grofsoft.TripView",
+      "version": "6.5.6",
+      "build": "786",
+      "minimum_os": "18.0",
+      "architecture": "arm64",
+      "source_evidence": "iOS/iPadOS wrapper"
+    },
+    {
+      "name": "uBlock Origin Lite",
+      "path": "/Applications/uBlock Origin Lite.app",
+      "bundle_id": "net.raymondhill.uBlock-Origin-Lite",
+      "version": "2026.901.1442",
+      "build": "1455.1313",
+      "minimum_os": "13.5",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "UniFi",
+      "path": "/Applications/UniFi.app",
+      "bundle_id": "com.ubnt.unifiac",
+      "version": "10.37.1",
+      "build": "6",
+      "minimum_os": "18.0",
+      "architecture": "arm64",
+      "source_evidence": "iOS/iPadOS wrapper"
+    },
+    {
+      "name": "UnrealTournament",
+      "path": "/Applications/UnrealTournament.app",
+      "bundle_id": "com.oldunreal.unrealtournament",
+      "version": "469e",
+      "build": "469e",
+      "minimum_os": "",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "UT2004",
+      "path": "/Applications/UT2004.app",
+      "bundle_id": "com.oldunreal.UT2004",
+      "version": "3374",
+      "build": "3374",
+      "minimum_os": "",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "Visual Studio Code",
+      "path": "/Applications/Visual Studio Code.app",
+      "bundle_id": "com.microsoft.VSCode",
+      "version": "1.136.1",
+      "build": "1.136.1",
+      "minimum_os": "12.0",
+      "architecture": "arm64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "BlizzardBrowser",
+      "path": "/Applications/Warcraft III/_retail_/x86_64/BlizzardBrowser/BlizzardBrowser.app",
+      "bundle_id": "com.blizzard.bnl.browser",
+      "version": "5.2.3",
+      "build": "5.2.3",
+      "minimum_os": "10.7",
+      "architecture": "x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "BlizzardBrowser Helper (GPU)",
+      "path": "/Applications/Warcraft III/_retail_/x86_64/BlizzardBrowser/BlizzardBrowser.app.pre-sign/Contents/Frameworks/BlizzardBrowser Helper (GPU).app",
+      "bundle_id": "com.blizzard.bnl.browser.helper.gpu",
+      "version": "5.2.3",
+      "build": "5.2.3",
+      "minimum_os": "10.7",
+      "architecture": "x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "BlizzardBrowser Helper (Plugin)",
+      "path": "/Applications/Warcraft III/_retail_/x86_64/BlizzardBrowser/BlizzardBrowser.app.pre-sign/Contents/Frameworks/BlizzardBrowser Helper (Plugin).app",
+      "bundle_id": "com.blizzard.bnl.browser.helper.plugin",
+      "version": "5.2.3",
+      "build": "5.2.3",
+      "minimum_os": "10.7",
+      "architecture": "x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "BlizzardBrowser Helper (Renderer)",
+      "path": "/Applications/Warcraft III/_retail_/x86_64/BlizzardBrowser/BlizzardBrowser.app.pre-sign/Contents/Frameworks/BlizzardBrowser Helper (Renderer).app",
+      "bundle_id": "com.blizzard.bnl.browser.helper.renderer",
+      "version": "5.2.3",
+      "build": "5.2.3",
+      "minimum_os": "10.7",
+      "architecture": "x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "BlizzardBrowser Helper",
+      "path": "/Applications/Warcraft III/_retail_/x86_64/BlizzardBrowser/BlizzardBrowser.app.pre-sign/Contents/Frameworks/BlizzardBrowser Helper.app",
+      "bundle_id": "com.blizzard.bnl.browser.helper",
+      "version": "5.2.3",
+      "build": "5.2.3",
+      "minimum_os": "10.7",
+      "architecture": "x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "Warcraft III",
+      "path": "/Applications/Warcraft III/_retail_/x86_64/Warcraft III.app",
+      "bundle_id": "com.blizzard.WarcraftIII",
+      "version": "2.0.4.23745",
+      "build": "2.0.4.23745",
+      "minimum_os": "10.13",
+      "architecture": "x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "Warcraft III Launcher",
+      "path": "/Applications/Warcraft III/Warcraft III Launcher.app",
+      "bundle_id": "net.battle.bootstrapper",
+      "version": "1.18.10.3140",
+      "build": "1.18.10.3140",
+      "minimum_os": "10.10",
+      "architecture": "x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "Weather Radio",
+      "path": "/Applications/Weather Radio.app",
+      "bundle_id": "com.coudriet.weatherradio",
+      "version": "15.4",
+      "build": "292",
+      "minimum_os": "18.0",
+      "architecture": "arm64",
+      "source_evidence": "iOS/iPadOS wrapper"
+    },
+    {
+      "name": "WeChat",
+      "path": "/Applications/WeChat.app",
+      "bundle_id": "com.tencent.xinWeChat",
+      "version": "4.1.13",
+      "build": "269602",
+      "minimum_os": "12.0",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "Windows App",
+      "path": "/Applications/Windows App.app",
+      "bundle_id": "com.microsoft.rdc.macos",
+      "version": "11.4.0",
+      "build": "3078",
+      "minimum_os": "14.0",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "Xcode",
+      "path": "/Applications/Xcode.app",
+      "bundle_id": "com.apple.dt.Xcode",
+      "version": "26.6",
+      "build": "24959",
+      "minimum_os": "26.2",
+      "architecture": "arm64",
+      "source_evidence": "App Store receipt"
+    },
+    {
+      "name": "XRG",
+      "path": "/Applications/XRG.app",
+      "bundle_id": "com.piatekjimenez.XRG",
+      "version": "3.2.1",
+      "build": "3.2.1",
+      "minimum_os": "10.13",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "yquake2",
+      "path": "/Applications/yquake2.app",
+      "bundle_id": "com.macsourceports.yquake2",
+      "version": "8.70",
+      "build": "8.70",
+      "minimum_os": "10.7",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "direct/local; installer not recorded by Homebrew"
+    },
+    {
+      "name": "App Store",
+      "path": "/System/Applications/App Store.app",
+      "bundle_id": "com.apple.AppStore",
+      "version": "3.0",
+      "build": "1011.6.3.1.1",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Apps",
+      "path": "/System/Applications/Apps.app",
+      "bundle_id": "com.apple.apps.launcher",
+      "version": "1.0",
+      "build": "79.2.1",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Automator",
+      "path": "/System/Applications/Automator.app",
+      "bundle_id": "com.apple.Automator",
+      "version": "2.10",
+      "build": "534",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Books",
+      "path": "/System/Applications/Books.app",
+      "bundle_id": "com.apple.iBooksX",
+      "version": "8.5",
+      "build": "6570",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Calculator",
+      "path": "/System/Applications/Calculator.app",
+      "bundle_id": "com.apple.calculator",
+      "version": "12.0",
+      "build": "225",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Calendar",
+      "path": "/System/Applications/Calendar.app",
+      "bundle_id": "com.apple.iCal",
+      "version": "16.0",
+      "build": "3036.4.14",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Chess",
+      "path": "/System/Applications/Chess.app",
+      "bundle_id": "com.apple.Chess",
+      "version": "3.18",
+      "build": "3.18",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Clock",
+      "path": "/System/Applications/Clock.app",
+      "bundle_id": "com.apple.clock",
+      "version": "1.1",
+      "build": "62",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Contacts",
+      "path": "/System/Applications/Contacts.app",
+      "bundle_id": "com.apple.AddressBook",
+      "version": "14.0",
+      "build": "2732.700.1",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Dictionary",
+      "path": "/System/Applications/Dictionary.app",
+      "bundle_id": "com.apple.Dictionary",
+      "version": "2.3.0",
+      "build": "294",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "FaceTime",
+      "path": "/System/Applications/FaceTime.app",
+      "bundle_id": "com.apple.FaceTime",
+      "version": "36",
+      "build": "36",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "FindMy",
+      "path": "/System/Applications/FindMy.app",
+      "bundle_id": "com.apple.findmy",
+      "version": "4.0",
+      "build": "442.26.4.19.1",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Font Book",
+      "path": "/System/Applications/Font Book.app",
+      "bundle_id": "com.apple.FontBook",
+      "version": "11.0",
+      "build": "526.4.0.1",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Freeform",
+      "path": "/System/Applications/Freeform.app",
+      "bundle_id": "com.apple.freeform",
+      "version": "4.5",
+      "build": "630.120.3",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Games",
+      "path": "/System/Applications/Games.app",
+      "bundle_id": "com.apple.games",
+      "version": "1.0",
+      "build": "1",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Home",
+      "path": "/System/Applications/Home.app",
+      "bundle_id": "com.apple.Home",
+      "version": "10.0",
+      "build": "1166.7.2",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Image Capture",
+      "path": "/System/Applications/Image Capture.app",
+      "bundle_id": "com.apple.Image_Capture",
+      "version": "8.0",
+      "build": "1106",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Image Playground",
+      "path": "/System/Applications/Image Playground.app",
+      "bundle_id": "com.apple.GenerativePlaygroundApp",
+      "version": "1.0",
+      "build": "148.5.2",
+      "minimum_os": "26.6",
+      "architecture": "arm64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "iPhone Mirroring",
+      "path": "/System/Applications/iPhone Mirroring.app",
+      "bundle_id": "com.apple.ScreenContinuity",
+      "version": "1.6",
+      "build": "98.5",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Journal",
+      "path": "/System/Applications/Journal.app",
+      "bundle_id": "com.apple.journal",
+      "version": "2.0",
+      "build": "49.120.2",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Mail",
+      "path": "/System/Applications/Mail.app",
+      "bundle_id": "com.apple.mail",
+      "version": "16.0",
+      "build": "3864.700.51.1.1",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Maps",
+      "path": "/System/Applications/Maps.app",
+      "bundle_id": "com.apple.Maps",
+      "version": "3.0",
+      "build": "2921.26.4.23.12",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Messages",
+      "path": "/System/Applications/Messages.app",
+      "bundle_id": "com.apple.MobileSMS",
+      "version": "26.0",
+      "build": "1450.700.71",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Mission Control",
+      "path": "/System/Applications/Mission Control.app",
+      "bundle_id": "com.apple.exposelauncher",
+      "version": "1.2",
+      "build": "79.2.1",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Music",
+      "path": "/System/Applications/Music.app",
+      "bundle_id": "com.apple.Music",
+      "version": "1.6.6",
+      "build": "1.6.6",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "News",
+      "path": "/System/Applications/News.app",
+      "bundle_id": "com.apple.news",
+      "version": "11.5",
+      "build": "5890",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Notes",
+      "path": "/System/Applications/Notes.app",
+      "bundle_id": "com.apple.Notes",
+      "version": "4.13",
+      "build": "3146.141.6",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Passwords",
+      "path": "/System/Applications/Passwords.app",
+      "bundle_id": "com.apple.Passwords",
+      "version": "2.6.2",
+      "build": "21624.5.1.11.3",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Phone",
+      "path": "/System/Applications/Phone.app",
+      "bundle_id": "com.apple.mobilephone",
+      "version": "1.0",
+      "build": "1",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Photo Booth",
+      "path": "/System/Applications/Photo Booth.app",
+      "bundle_id": "com.apple.PhotoBooth",
+      "version": "13.1",
+      "build": "1177",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Photos",
+      "path": "/System/Applications/Photos.app",
+      "bundle_id": "com.apple.Photos",
+      "version": "11.0",
+      "build": "860.0.170",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Podcasts",
+      "path": "/System/Applications/Podcasts.app",
+      "bundle_id": "com.apple.podcasts",
+      "version": "1.1.0",
+      "build": "4025.700.3",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Preview",
+      "path": "/System/Applications/Preview.app",
+      "bundle_id": "com.apple.Preview",
+      "version": "11.0",
+      "build": "1113.5.3",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "QuickTime Player",
+      "path": "/System/Applications/QuickTime Player.app",
+      "bundle_id": "com.apple.QuickTimePlayerX",
+      "version": "10.5",
+      "build": "1252.3",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Reminders",
+      "path": "/System/Applications/Reminders.app",
+      "bundle_id": "com.apple.reminders",
+      "version": "7.0",
+      "build": "3976",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Shortcuts",
+      "path": "/System/Applications/Shortcuts.app",
+      "bundle_id": "com.apple.shortcuts",
+      "version": "7.0",
+      "build": "4711",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Siri",
+      "path": "/System/Applications/Siri.app",
+      "bundle_id": "com.apple.siri.launcher",
+      "version": "1.0",
+      "build": "79.2.1",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Stickies",
+      "path": "/System/Applications/Stickies.app",
+      "bundle_id": "com.apple.Stickies",
+      "version": "10.3",
+      "build": "10.3",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Stocks",
+      "path": "/System/Applications/Stocks.app",
+      "bundle_id": "com.apple.stocks",
+      "version": "8.5",
+      "build": "1969",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "System Settings",
+      "path": "/System/Applications/System Settings.app",
+      "bundle_id": "com.apple.systempreferences",
+      "version": "15.0",
+      "build": "15.0",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "TextEdit",
+      "path": "/System/Applications/TextEdit.app",
+      "bundle_id": "com.apple.TextEdit",
+      "version": "1.20",
+      "build": "415",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Time Machine",
+      "path": "/System/Applications/Time Machine.app",
+      "bundle_id": "com.apple.backup.launcher",
+      "version": "1.3",
+      "build": "79.2.1",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Tips",
+      "path": "/System/Applications/Tips.app",
+      "bundle_id": "com.apple.helpviewer",
+      "version": "26.6",
+      "build": "527.5.1",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "TV",
+      "path": "/System/Applications/TV.app",
+      "bundle_id": "com.apple.TV",
+      "version": "1.6.6",
+      "build": "1.6.6",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Activity Monitor",
+      "path": "/System/Applications/Utilities/Activity Monitor.app",
+      "bundle_id": "com.apple.ActivityMonitor",
+      "version": "10.14",
+      "build": "1040",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "AirPort Utility",
+      "path": "/System/Applications/Utilities/AirPort Utility.app",
+      "bundle_id": "com.apple.airport.airportutility",
+      "version": "6.3.9",
+      "build": "639.29",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Audio MIDI Setup",
+      "path": "/System/Applications/Utilities/Audio MIDI Setup.app",
+      "bundle_id": "com.apple.audio.AudioMIDISetup",
+      "version": "3.8",
+      "build": "3.8",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Bluetooth File Exchange",
+      "path": "/System/Applications/Utilities/Bluetooth File Exchange.app",
+      "bundle_id": "com.apple.BluetoothFileExchange",
+      "version": "9.0",
+      "build": "1",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Boot Camp Assistant",
+      "path": "/System/Applications/Utilities/Boot Camp Assistant.app",
+      "bundle_id": "com.apple.bootcampassistant",
+      "version": "6.1.0",
+      "build": "6345",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "ColorSync Utility",
+      "path": "/System/Applications/Utilities/ColorSync Utility.app",
+      "bundle_id": "com.apple.ColorSyncUtility",
+      "version": "12.2.0",
+      "build": "431",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Console",
+      "path": "/System/Applications/Utilities/Console.app",
+      "bundle_id": "com.apple.Console",
+      "version": "1.1",
+      "build": "9.100.15",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Digital Color Meter",
+      "path": "/System/Applications/Utilities/Digital Color Meter.app",
+      "bundle_id": "com.apple.DigitalColorMeter",
+      "version": "6.11",
+      "build": "6.11",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Disk Utility",
+      "path": "/System/Applications/Utilities/Disk Utility.app",
+      "bundle_id": "com.apple.DiskUtility",
+      "version": "22.7",
+      "build": "2511.1",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Grapher",
+      "path": "/System/Applications/Utilities/Grapher.app",
+      "bundle_id": "com.apple.grapher",
+      "version": "2.8",
+      "build": "1",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Magnifier",
+      "path": "/System/Applications/Utilities/Magnifier.app",
+      "bundle_id": "com.apple.Magnifier",
+      "version": "1.0",
+      "build": "1",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Migration Assistant",
+      "path": "/System/Applications/Utilities/Migration Assistant.app",
+      "bundle_id": "com.apple.MigrateAssistant",
+      "version": "26.6",
+      "build": "26.6",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Print Center",
+      "path": "/System/Applications/Utilities/Print Center.app",
+      "bundle_id": "com.apple.printcenter",
+      "version": "1.0",
+      "build": "32.7",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Screen Sharing",
+      "path": "/System/Applications/Utilities/Screen Sharing.app",
+      "bundle_id": "com.apple.ScreenSharing",
+      "version": "6.1",
+      "build": "764.2",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Screenshot",
+      "path": "/System/Applications/Utilities/Screenshot.app",
+      "bundle_id": "com.apple.screenshot.launcher",
+      "version": "1.0",
+      "build": "79.2.1",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Script Editor",
+      "path": "/System/Applications/Utilities/Script Editor.app",
+      "bundle_id": "com.apple.ScriptEditor2",
+      "version": "2.11",
+      "build": "235",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "System Information",
+      "path": "/System/Applications/Utilities/System Information.app",
+      "bundle_id": "com.apple.SystemProfiler",
+      "version": "11.0",
+      "build": "915",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Terminal",
+      "path": "/System/Applications/Utilities/Terminal.app",
+      "bundle_id": "com.apple.Terminal",
+      "version": "2.15",
+      "build": "470.2",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "VoiceOver Utility",
+      "path": "/System/Applications/Utilities/VoiceOver Utility.app",
+      "bundle_id": "com.apple.VoiceOverUtility",
+      "version": "10",
+      "build": "993",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "VoiceMemos",
+      "path": "/System/Applications/VoiceMemos.app",
+      "bundle_id": "com.apple.VoiceMemos",
+      "version": "3.2",
+      "build": "1380",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    },
+    {
+      "name": "Weather",
+      "path": "/System/Applications/Weather.app",
+      "bundle_id": "com.apple.weather",
+      "version": "6.0",
+      "build": "1318",
+      "minimum_os": "26.6",
+      "architecture": "arm64 + x86_64",
+      "source_evidence": "macOS"
+    }
+  ],
+  "homebrew": {
+    "prefix": "/opt/homebrew",
+    "formulae": [
+      {
+        "name": "adwaita-icon-theme",
+        "versions": [
+          "50.0"
+        ],
+        "requested": true
+      },
+      {
+        "name": "aom",
+        "versions": [
+          "3.15.0"
+        ],
+        "requested": false
+      },
+      {
+        "name": "appstream",
+        "versions": [
+          "1.2.0"
+        ],
+        "requested": false
+      },
+      {
+        "name": "at-spi2-core",
+        "versions": [
+          "2.60.6"
+        ],
+        "requested": false
+      },
+      {
+        "name": "ca-certificates",
+        "versions": [
+          "2026-08-13"
+        ],
+        "requested": false
+      },
+      {
+        "name": "cairo",
+        "versions": [
+          "1.18.4"
+        ],
+        "requested": false
+      },
+      {
+        "name": "dav1d",
+        "versions": [
+          "1.5.4"
+        ],
+        "requested": false
+      },
+      {
+        "name": "dbus",
+        "versions": [
+          "1.16.2_1"
+        ],
+        "requested": false
+      },
+      {
+        "name": "faac",
+        "versions": [
+          "2.1"
+        ],
+        "requested": false
+      },
+      {
+        "name": "faad2",
+        "versions": [
+          "2.11.3"
+        ],
+        "requested": false
+      },
+      {
+        "name": "fdk-aac",
+        "versions": [
+          "2.0.3"
+        ],
+        "requested": false
+      },
+      {
+        "name": "ffmpeg",
+        "versions": [
+          "9.0.1_1"
+        ],
+        "requested": false
+      },
+      {
+        "name": "flac",
+        "versions": [
+          "1.5.0"
+        ],
+        "requested": false
+      },
+      {
+        "name": "fontconfig",
+        "versions": [
+          "2.18.3"
+        ],
+        "requested": false
+      },
+      {
+        "name": "freetype",
+        "versions": [
+          "2.14.3"
+        ],
+        "requested": false
+      },
+      {
+        "name": "fribidi",
+        "versions": [
+          "1.0.16"
+        ],
+        "requested": false
+      },
+      {
+        "name": "gdk-pixbuf",
+        "versions": [
+          "2.44.8"
+        ],
+        "requested": false
+      },
+      {
+        "name": "gettext",
+        "versions": [
+          "1.0"
+        ],
+        "requested": false
+      },
+      {
+        "name": "gh",
+        "versions": [
+          "2.100.0"
+        ],
+        "requested": true
+      },
+      {
+        "name": "giflib",
+        "versions": [
+          "6.1.3"
+        ],
+        "requested": false
+      },
+      {
+        "name": "glib",
+        "versions": [
+          "2.88.3"
+        ],
+        "requested": false
+      },
+      {
+        "name": "glib-networking",
+        "versions": [
+          "2.80.1"
+        ],
+        "requested": false
+      },
+      {
+        "name": "gmp",
+        "versions": [
+          "6.3.0"
+        ],
+        "requested": false
+      },
+      {
+        "name": "gnutls",
+        "versions": [
+          "3.8.13_2"
+        ],
+        "requested": false
+      },
+      {
+        "name": "gobject-introspection",
+        "versions": [
+          "1.86.0_3"
+        ],
+        "requested": false
+      },
+      {
+        "name": "graphene",
+        "versions": [
+          "1.10.8"
+        ],
+        "requested": false
+      },
+      {
+        "name": "graphite2",
+        "versions": [
+          "1.3.15"
+        ],
+        "requested": false
+      },
+      {
+        "name": "gsettings-desktop-schemas",
+        "versions": [
+          "50.1"
+        ],
+        "requested": false
+      },
+      {
+        "name": "gstreamer",
+        "versions": [
+          "1.28.7"
+        ],
+        "requested": true
+      },
+      {
+        "name": "gtk+3",
+        "versions": [
+          "3.24.52"
+        ],
+        "requested": false
+      },
+      {
+        "name": "gtk4",
+        "versions": [
+          "4.22.4"
+        ],
+        "requested": true
+      },
+      {
+        "name": "harfbuzz",
+        "versions": [
+          "14.4.0"
+        ],
+        "requested": false
+      },
+      {
+        "name": "hicolor-icon-theme",
+        "versions": [
+          "0.18"
+        ],
+        "requested": false
+      },
+      {
+        "name": "icu4c@78",
+        "versions": [
+          "78.3"
+        ],
+        "requested": false
+      },
+      {
+        "name": "imath",
+        "versions": [
+          "3.2.3"
+        ],
+        "requested": false
+      },
+      {
+        "name": "jemalloc",
+        "versions": [
+          "5.3.1"
+        ],
+        "requested": false
+      },
+      {
+        "name": "jpeg-turbo",
+        "versions": [
+          "3.2.0"
+        ],
+        "requested": false
+      },
+      {
+        "name": "json-c",
+        "versions": [
+          "0.19"
+        ],
+        "requested": false
+      },
+      {
+        "name": "json-glib",
+        "versions": [
+          "1.10.8"
+        ],
+        "requested": false
+      },
+      {
+        "name": "lame",
+        "versions": [
+          "4.0"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libadwaita",
+        "versions": [
+          "1.9.3"
+        ],
+        "requested": true
+      },
+      {
+        "name": "libass",
+        "versions": [
+          "0.17.5"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libcuefile",
+        "versions": [
+          "r475"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libdatrie",
+        "versions": [
+          "0.2.14"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libdeflate",
+        "versions": [
+          "1.26"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libepoxy",
+        "versions": [
+          "1.5.10"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libevent",
+        "versions": [
+          "2.1.13"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libfyaml",
+        "versions": [
+          "0.9.6"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libidn2",
+        "versions": [
+          "2.3.8"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libnghttp2",
+        "versions": [
+          "1.70.0"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libnice",
+        "versions": [
+          "0.1.24"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libogg",
+        "versions": [
+          "1.3.6"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libpng",
+        "versions": [
+          "1.6.58"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libpsl",
+        "versions": [
+          "0.23.3"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libreplaygain",
+        "versions": [
+          "r475"
+        ],
+        "requested": false
+      },
+      {
+        "name": "librsvg",
+        "versions": [
+          "2.62.3"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libshout",
+        "versions": [
+          "2.4.6_2"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libsndfile",
+        "versions": [
+          "1.2.2_1"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libsodium",
+        "versions": [
+          "1.0.22"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libsoup",
+        "versions": [
+          "3.6.6"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libtasn1",
+        "versions": [
+          "4.21.0"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libthai",
+        "versions": [
+          "0.1.30"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libtiff",
+        "versions": [
+          "4.7.2"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libunibreak",
+        "versions": [
+          "7.0"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libunistring",
+        "versions": [
+          "1.4.2"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libusrsctp",
+        "versions": [
+          "0.9.5.0_1"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libvmaf",
+        "versions": [
+          "3.2.0"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libvorbis",
+        "versions": [
+          "1.3.7"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libvpx",
+        "versions": [
+          "1.17.0"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libx11",
+        "versions": [
+          "1.8.13"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libxau",
+        "versions": [
+          "1.0.12"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libxcb",
+        "versions": [
+          "1.17.0"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libxdmcp",
+        "versions": [
+          "1.1.5"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libxext",
+        "versions": [
+          "1.3.7"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libxfixes",
+        "versions": [
+          "6.0.2"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libxi",
+        "versions": [
+          "1.8.3"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libxmlb",
+        "versions": [
+          "0.3.29"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libxrender",
+        "versions": [
+          "0.9.12"
+        ],
+        "requested": false
+      },
+      {
+        "name": "libxtst",
+        "versions": [
+          "1.2.5"
+        ],
+        "requested": false
+      },
+      {
+        "name": "little-cms2",
+        "versions": [
+          "2.19.1"
+        ],
+        "requested": false
+      },
+      {
+        "name": "lz4",
+        "versions": [
+          "1.10.0"
+        ],
+        "requested": false
+      },
+      {
+        "name": "lzo",
+        "versions": [
+          "2.10"
+        ],
+        "requested": false
+      },
+      {
+        "name": "mpdecimal",
+        "versions": [
+          "4.0.1"
+        ],
+        "requested": false
+      },
+      {
+        "name": "mpg123",
+        "versions": [
+          "1.33.7"
+        ],
+        "requested": false
+      },
+      {
+        "name": "musepack",
+        "versions": [
+          "r475"
+        ],
+        "requested": false
+      },
+      {
+        "name": "ncurses",
+        "versions": [
+          "6.6"
+        ],
+        "requested": false
+      },
+      {
+        "name": "nettle",
+        "versions": [
+          "4.0"
+        ],
+        "requested": false
+      },
+      {
+        "name": "opencore-amr",
+        "versions": [
+          "0.1.6"
+        ],
+        "requested": false
+      },
+      {
+        "name": "openexr",
+        "versions": [
+          "3.4.15"
+        ],
+        "requested": false
+      },
+      {
+        "name": "openjpeg",
+        "versions": [
+          "2.5.4"
+        ],
+        "requested": false
+      },
+      {
+        "name": "openjph",
+        "versions": [
+          "0.31.0"
+        ],
+        "requested": false
+      },
+      {
+        "name": "openssl@3",
+        "versions": [
+          "3.6.4"
+        ],
+        "requested": false
+      },
+      {
+        "name": "opus",
+        "versions": [
+          "1.6.1"
+        ],
+        "requested": false
+      },
+      {
+        "name": "orc",
+        "versions": [
+          "0.4.43"
+        ],
+        "requested": false
+      },
+      {
+        "name": "p11-kit",
+        "versions": [
+          "0.26.5"
+        ],
+        "requested": false
+      },
+      {
+        "name": "pango",
+        "versions": [
+          "1.58.2"
+        ],
+        "requested": false
+      },
+      {
+        "name": "pcre2",
+        "versions": [
+          "10.48"
+        ],
+        "requested": false
+      },
+      {
+        "name": "pixman",
+        "versions": [
+          "0.46.4"
+        ],
+        "requested": false
+      },
+      {
+        "name": "pkgconf",
+        "versions": [
+          "3.0.7"
+        ],
+        "requested": true
+      },
+      {
+        "name": "py3cairo",
+        "versions": [
+          "1.29.1"
+        ],
+        "requested": false
+      },
+      {
+        "name": "pygobject3",
+        "versions": [
+          "3.58.0"
+        ],
+        "requested": false
+      },
+      {
+        "name": "python@3.14",
+        "versions": [
+          "3.14.7"
+        ],
+        "requested": false
+      },
+      {
+        "name": "readline",
+        "versions": [
+          "8.3.3"
+        ],
+        "requested": false
+      },
+      {
+        "name": "rtmpdump",
+        "versions": [
+          "2.6"
+        ],
+        "requested": false
+      },
+      {
+        "name": "rustup",
+        "versions": [
+          "1.29.1"
+        ],
+        "requested": true
+      },
+      {
+        "name": "sdl2-compat",
+        "versions": [
+          "2.32.72"
+        ],
+        "requested": false
+      },
+      {
+        "name": "sdl3",
+        "versions": [
+          "3.4.16"
+        ],
+        "requested": false
+      },
+      {
+        "name": "speex",
+        "versions": [
+          "1.2.1"
+        ],
+        "requested": false
+      },
+      {
+        "name": "sqlite",
+        "versions": [
+          "3.53.4"
+        ],
+        "requested": false
+      },
+      {
+        "name": "srt",
+        "versions": [
+          "1.5.7"
+        ],
+        "requested": false
+      },
+      {
+        "name": "srtp",
+        "versions": [
+          "2.8.0"
+        ],
+        "requested": false
+      },
+      {
+        "name": "svt-av1",
+        "versions": [
+          "4.2.0"
+        ],
+        "requested": false
+      },
+      {
+        "name": "taglib",
+        "versions": [
+          "2.3.2"
+        ],
+        "requested": false
+      },
+      {
+        "name": "theora",
+        "versions": [
+          "1.2.0"
+        ],
+        "requested": false
+      },
+      {
+        "name": "tmux",
+        "versions": [
+          "3.7c"
+        ],
+        "requested": true
+      },
+      {
+        "name": "tree",
+        "versions": [
+          "2.3.2"
+        ],
+        "requested": true
+      },
+      {
+        "name": "utf8cpp",
+        "versions": [
+          "4.2.0"
+        ],
+        "requested": false
+      },
+      {
+        "name": "utf8proc",
+        "versions": [
+          "2.11.3"
+        ],
+        "requested": false
+      },
+      {
+        "name": "webp",
+        "versions": [
+          "1.6.0"
+        ],
+        "requested": false
+      },
+      {
+        "name": "x264",
+        "versions": [
+          "r3222"
+        ],
+        "requested": false
+      },
+      {
+        "name": "x265",
+        "versions": [
+          "4.3"
+        ],
+        "requested": false
+      },
+      {
+        "name": "xorgproto",
+        "versions": [
+          "2025.1"
+        ],
+        "requested": false
+      },
+      {
+        "name": "xz",
+        "versions": [
+          "5.8.3"
+        ],
+        "requested": false
+      },
+      {
+        "name": "zstd",
+        "versions": [
+          "1.5.7_1"
+        ],
+        "requested": false
+      }
+    ],
+    "casks": [],
+    "taps": []
+  },
+  "preferences": {
+    ".GlobalPreferences": {
+      "AppleInterfaceStyle": "Dark",
+      "AppleLanguages": [
+        "en-US"
+      ],
+      "AppleLocale": "en_US",
+      "AppleShowAllExtensions": true,
+      "AppleMiniaturizeOnDoubleClick": false,
+      "InitialKeyRepeat": 15.0,
+      "KeyRepeat": 2.0,
+      "NSAutomaticCapitalizationEnabled": true,
+      "NSAutomaticPeriodSubstitutionEnabled": true,
+      "NSCloseAlwaysConfirmsChanges": true,
+      "NSUserKeyEquivalents": {
+        "Lock Screen": "@l"
+      },
+      "com.apple.swipescrolldirection": false
+    },
+    "com.apple.dock": {
+      "autohide": true,
+      "tilesize": 128.0,
+      "largesize": 128.0,
+      "magnification": true,
+      "minimize-to-application": true,
+      "show-recents": false,
+      "wvous-tl-corner": 2,
+      "wvous-tr-corner": 12,
+      "wvous-bl-corner": 1,
+      "wvous-br-corner": 1,
+      "wvous-tl-modifier": 0,
+      "wvous-tr-modifier": 0,
+      "wvous-bl-modifier": 0,
+      "wvous-br-modifier": 0
+    },
+    "com.apple.finder": {
+      "ShowPathbar": true,
+      "ShowStatusBar": true,
+      "ShowSidebar": true,
+      "ShowHardDrivesOnDesktop": true,
+      "ShowExternalHardDrivesOnDesktop": true,
+      "ShowRemovableMediaOnDesktop": true,
+      "ShowMountedServersOnDesktop": true,
+      "FXPreferredViewStyle": "icnv",
+      "FXDefaultSearchScope": "SCev",
+      "NewWindowTarget": "PfHm",
+      "FXICloudDriveDesktop": false,
+      "FXICloudDriveDocuments": false,
+      "FinderSpawnTab": false
+    },
+    "com.apple.Terminal": {
+      "Default Window Settings": "Clear Dark",
+      "Startup Window Settings": "Clear Dark",
+      "SecureKeyboardEntry": false
+    },
+    "com.apple.AppleMultitouchTrackpad": {
+      "TrackpadHandResting": true,
+      "TrackpadPinch": 1,
+      "TrackpadFourFingerVertSwipeGesture": 2,
+      "USBMouseStopsTrackpad": 0,
+      "ActuateDetents": 1,
+      "TrackpadRotate": 1,
+      "SecondClickThreshold": 1,
+      "TrackpadHorizScroll": 1,
+      "TrackpadTwoFingerDoubleTapGesture": 1,
+      "UserPreferences": true,
+      "TrackpadThreeFingerTapGesture": 0,
+      "TrackpadThreeFingerHorizSwipeGesture": 2,
+      "Clicking": 0,
+      "FirstClickThreshold": 1,
+      "TrackpadFourFingerPinchGesture": 2,
+      "TrackpadMomentumScroll": true,
+      "DragLock": 0,
+      "TrackpadFiveFingerPinchGesture": 2,
+      "ForceSuppressed": false,
+      "TrackpadThreeFingerVertSwipeGesture": 2,
+      "TrackpadTwoFingerFromRightEdgeSwipeGesture": 3,
+      "TrackpadScroll": true,
+      "version": 12,
+      "Dragging": 0,
+      "TrackpadCornerSecondaryClick": 0,
+      "TrackpadRightClick": true,
+      "TrackpadFourFingerHorizSwipeGesture": 2,
+      "TrackpadThreeFingerDrag": false
+    },
+    "com.apple.driver.AppleBluetoothMultitouch.trackpad": {
+      "TrackpadThreeFingerDrag": false,
+      "TrackpadPinch": 1,
+      "USBMouseStopsTrackpad": 0,
+      "TrackpadFourFingerVertSwipeGesture": 2,
+      "TrackpadRotate": 1,
+      "TrackpadHorizScroll": 1,
+      "TrackpadTwoFingerDoubleTapGesture": 1,
+      "UserPreferences": true,
+      "TrackpadFourFingerPinchGesture": 2,
+      "TrackpadThreeFingerTapGesture": 0,
+      "TrackpadThreeFingerHorizSwipeGesture": 2,
+      "Clicking": 0,
+      "TrackpadMomentumScroll": true,
+      "version": 5,
+      "TrackpadScroll": true,
+      "DragLock": 0,
+      "TrackpadFiveFingerPinchGesture": 2,
+      "TrackpadTwoFingerFromRightEdgeSwipeGesture": 3,
+      "TrackpadThreeFingerVertSwipeGesture": 2,
+      "TrackpadHandResting": true,
+      "Dragging": 0,
+      "TrackpadCornerSecondaryClick": 0,
+      "TrackpadFourFingerHorizSwipeGesture": 2,
+      "TrackpadRightClick": true
+    },
+    "com.apple.AppleMultitouchMouse": {
+      "MouseOneFingerDoubleTapGesture": 0,
+      "MouseTwoFingerHorizSwipeGesture": 2,
+      "MouseVerticalScroll": true,
+      "UserPreferences": true,
+      "MouseHorizontalScroll": true,
+      "MouseButtonDivision": 55,
+      "MouseMomentumScroll": true,
+      "version": 1,
+      "MouseButtonMode": "OneButton",
+      "MouseTwoFingerDoubleTapGesture": 3
+    },
+    "com.apple.driver.AppleHIDMouse": {
+      "ButtonDominance": 1,
+      "ScrollH": 1,
+      "Button2": 1,
+      "Button4": 0,
+      "Button3": 0,
+      "ScrollSSize": 30,
+      "Button4Click": 0,
+      "ScrollV": 1,
+      "Button4Force": 0,
+      "Button1": 1,
+      "ScrollS": 4
+    },
+    "com.apple.screencapture": {},
+    "com.apple.WindowManager": {
+      "EnableStandardClickToShowDesktop": false,
+      "StandardHideWidgets": true,
+      "HideDesktop": false,
+      "StageManagerHideWidgets": true
+    },
+    "com.apple.menuextra.clock": {
+      "ShowDate": 0,
+      "ShowAMPM": true
+    },
+    "com.apple.CrashReporter": {},
+    "com.apple.ReportCrash": {},
+    "com.apple.HIToolbox": {
+      "AppleEnabledInputSources": [
+        {
+          "InputSourceKind": "Keyboard Layout",
+          "KeyboardLayout Name": "U.S.",
+          "KeyboardLayout ID": 0
+        },
+        {
+          "InputSourceKind": "Non Keyboard Input Method",
+          "Bundle ID": "com.apple.CharacterPaletteIM"
+        }
+      ]
+    },
+    "com.apple.loginwindow": {},
+    "com.apple.Safari": {}
+  },
+  "system_preferences": {
+    "com.apple.SoftwareUpdate": {
+      "AutomaticDownload": true,
+      "AutomaticallyInstallMacOSUpdates": true,
+      "ConfigDataInstall": true,
+      "CriticalUpdateInstall": true
+    },
+    "com.apple.commerce": {
+      "AutoUpdate": true
+    },
+    "com.apple.loginwindow": {
+      "GuestEnabled": false
+    },
+    "com.apple.RemoteManagement": {},
+    "com.apple.RemoteDesktop": {},
+    "com.apple.ARDAgent": {},
+    "com.apple.TimeMachine": {},
+    "com.apple.AssetCache": {
+      "Activated": false,
+      "CacheLimit": 0,
+      "LocalSubnetsOnly": true,
+      "PeerLocalSubnetsOnly": true,
+      "Port": 0
+    },
+    "com.apple.timezone.auto": {
+      "Active": true
+    }
+  },
+  "terminal_profile": {
+    "name": "Clear Dark",
+    "font": "SFMonoTerminal-Regular",
+    "font_size": 12,
+    "columns": 120,
+    "rows": 30,
+    "background_alpha": 0.95,
+    "background_blur": 0.5
+  },
+  "dock_apps": [
+    "XRG",
+    "App Store",
+    "Apps",
+    "Google Chrome",
+    "Maps",
+    "Photos",
+    "Messages",
+    "FaceTime",
+    "Phone",
+    "iPhone Mirroring",
+    "GrandPerspective",
+    "BBEdit",
+    "Visual Studio Code",
+    "Antigravity",
+    "Claude",
+    "ChatGPT",
+    "TV",
+    "Music",
+    "Games",
+    "Tributary",
+    "Balun",
+    "System Settings",
+    "Windows App",
+    "Terminal",
+    "Activity Monitor",
+    "Steam",
+    "Battle.net",
+    "GOG Galaxy"
+  ],
+  "dock_other": [
+    {
+      "label": "Downloads",
+      "type": "directory-tile"
+    }
+  ],
+  "launch_jobs": [
+    {
+      "file": "/Library/LaunchAgents/com.gog.galaxy.commservice.plist",
+      "Label": "com.gog.galaxy.commservice",
+      "Program": "/Users/Shared/GOG.com/Galaxy/redists/GalaxyCommunication",
+      "KeepAlive": {
+        "PathState": {
+          "/Users/Shared/GOG.com/Galaxy/GalaxyCommunication.txt": true
+        }
+      },
+      "executable": null
+    },
+    {
+      "file": "/Library/LaunchDaemons/com.gog.galaxy.ClientService.plist",
+      "Label": "com.gog.galaxy.ClientService",
+      "Program": "/Library/PrivilegedHelperTools/com.gog.galaxy.ClientService",
+      "executable": "/Library/PrivilegedHelperTools/com.gog.galaxy.ClientService"
+    },
+    {
+      "file": "~/Library/LaunchAgents/com.google.keystone.xpcservice.plist",
+      "executable": null
+    },
+    {
+      "file": "~/Library/LaunchAgents/com.google.keystone.agent.plist",
+      "executable": null
+    },
+    {
+      "file": "~/Library/LaunchAgents/com.valvesoftware.steamclean.plist",
+      "Label": "com.valvesoftware.steamclean",
+      "Program": "~/Library/Application Support/Steam/SteamApps/steamclean",
+      "RunAtLoad": true,
+      "executable": "~/Library/Application Support/Steam/SteamApps/steamclean"
+    },
+    {
+      "file": "~/Library/LaunchAgents/com.google.GoogleUpdater.wake.plist",
+      "Label": "com.google.GoogleUpdater.wake",
+      "StartInterval": 3600,
+      "executable": "~/Library/Application Support/Google/GoogleUpdater/Current/GoogleUpdater.app/Contents/MacOS/GoogleUpdater"
+    }
+  ],
+  "background_registration_records": [
+    {
+      "name": "Weather",
+      "identifier": "2.com.apple.weather",
+      "type": 2,
+      "disposition": 2
+    },
+    {
+      "name": "WeatherMenu",
+      "identifier": "4.com.apple.weather.menu",
+      "type": 4,
+      "disposition": 11
+    },
+    {
+      "name": "GoogleUpdater",
+      "identifier": "2.com.google.GoogleUpdater",
+      "type": 2,
+      "disposition": 2
+    },
+    {
+      "name": "GoogleUpdater",
+      "identifier": "8.com.google.GoogleUpdater.wake",
+      "type": 65544,
+      "disposition": 11
+    },
+    {
+      "name": "Windows App",
+      "identifier": "2.com.microsoft.rdc.macos",
+      "type": 2,
+      "disposition": 10
+    },
+    {
+      "name": "QuicklookExtension.appex",
+      "identifier": "2048.com.microsoft.rdc.macos.qlx",
+      "type": 2048,
+      "disposition": 11
+    },
+    {
+      "name": "Xcode",
+      "identifier": "2.com.apple.dt.Xcode",
+      "type": 2,
+      "disposition": 10
+    },
+    {
+      "name": "ProvisoningProfileQuicklookExtension.appex",
+      "identifier": "2048.com.apple.dt.DVTProvisioningProfileQuicklookExtension",
+      "type": 2048,
+      "disposition": 11
+    },
+    {
+      "name": "uuid.mdimporter",
+      "identifier": "64.com.apple.dt.MDImporter.uuid-importer",
+      "type": 64,
+      "disposition": 11
+    },
+    {
+      "name": "Icon Composer",
+      "identifier": "2.com.apple.IconComposer",
+      "type": 2,
+      "disposition": 10
+    },
+    {
+      "name": "Icon Composer QuickLook Preview.appex",
+      "identifier": "2048.com.apple.IconComposerQuickLookPreviewAppExtension",
+      "type": 2048,
+      "disposition": 11
+    },
+    {
+      "name": "Icon Composer Thumbnail.appex",
+      "identifier": "2048.com.apple.IconComposerThumbnailExtension",
+      "type": 2048,
+      "disposition": 11
+    },
+    {
+      "name": "GOG Galaxy",
+      "identifier": "2.com.gog.galaxy",
+      "type": 2,
+      "disposition": 2
+    },
+    {
+      "name": "GOG Galaxy Auto Launch Helper",
+      "identifier": "4.com.gog.galaxy.autoLauncher",
+      "type": 4,
+      "disposition": 11
+    },
+    {
+      "name": "GOG Sp. z o.o.",
+      "identifier": "GOG Sp. z o.o.",
+      "type": 32,
+      "disposition": 2
+    },
+    {
+      "name": "GalaxyCommunication",
+      "identifier": "8.com.gog.galaxy.commservice",
+      "type": 65544,
+      "disposition": 11
+    },
+    {
+      "name": "ChatGPT",
+      "identifier": "2.com.openai.codex",
+      "type": 2,
+      "disposition": 10
+    },
+    {
+      "name": "CodexDockTilePlugin.docktileplugin",
+      "identifier": "128.com.openai.codex.dock-tile-plugin",
+      "type": 128,
+      "disposition": 11
+    },
+    {
+      "name": "$null",
+      "identifier": "Unknown Developer",
+      "type": 32,
+      "disposition": 2
+    },
+    {
+      "name": "steamclean",
+      "identifier": "8.com.valvesoftware.steamclean",
+      "type": 65544,
+      "disposition": 11
+    },
+    {
+      "name": "GOG Sp. z o.o.",
+      "identifier": "GOG Sp. z o.o.",
+      "type": 32,
+      "disposition": 2
+    },
+    {
+      "name": "com.gog.galaxy.ClientService",
+      "identifier": "16.com.gog.galaxy.ClientService",
+      "type": 65552,
+      "disposition": 11
+    },
+    {
+      "name": "GOG Sp. z o.o.",
+      "identifier": "GOG Sp. z o.o.",
+      "type": 32,
+      "disposition": 2
+    }
+  ],
+  "vscode_extensions": [
+    {
+      "id": "google.google-antigravity",
+      "version": "1.2.0"
+    },
+    {
+      "id": "ms-vscode.powershell",
+      "version": "2025.4.0"
+    },
+    {
+      "id": "golang.go",
+      "version": "0.56.1"
+    },
+    {
+      "id": "rust-lang.rust-analyzer",
+      "version": "0.3.3033"
+    },
+    {
+      "id": "anthropic.claude-code",
+      "version": "2.1.261"
+    },
+    {
+      "id": "openai.chatgpt",
+      "version": "26.901.22334"
+    },
+    {
+      "id": "ms-python.vscode-python-envs",
+      "version": "1.36.0"
+    },
+    {
+      "id": "ms-python.debugpy",
+      "version": "2026.6.0"
+    },
+    {
+      "id": "ms-python.python",
+      "version": "2026.4.0"
+    },
+    {
+      "id": "ms-python.vscode-pylance",
+      "version": "2026.3.1"
+    }
+  ],
+  "chrome_extension_files": [
+    {
+      "id": "inomeogfingihgjfjlpeplalcfajhgai",
+      "name": "Chrome Remote Desktop",
+      "version": "2.1",
+      "status": "files present; enabled state not asserted"
+    },
+    {
+      "id": "nmmhkkegccagdldgiimedpiccmgmieda",
+      "name": "Chrome Web Store Payments",
+      "version": "1.0.0.6",
+      "status": "files present; enabled state not asserted"
+    },
+    {
+      "id": "pocpnlppkickgojjlmhdmidojbmbodfm",
+      "name": "Chromebook Recovery Utility",
+      "version": "0.2.3",
+      "status": "files present; enabled state not asserted"
+    },
+    {
+      "id": "gphhapmejobijbbhgpjhcjognlahblep",
+      "name": "GNOME Shell integration",
+      "version": "12.1",
+      "status": "files present; enabled state not asserted"
+    },
+    {
+      "id": "ghbmnnjooekpmoecnnnilnnbdlolhkhi",
+      "name": "Google Docs Offline",
+      "version": "1.109.1",
+      "status": "files present; enabled state not asserted"
+    },
+    {
+      "id": "mihcahmgecmbnbcchbopgniflfhgnkff",
+      "name": "Google Mail Checker",
+      "version": "4.4.4",
+      "status": "files present; enabled state not asserted"
+    },
+    {
+      "id": "kcnhkahnjcbndmmehfkdnkjomaanaooo",
+      "name": "Google Voice (by Google)",
+      "version": "3.0.11",
+      "status": "files present; enabled state not asserted"
+    },
+    {
+      "id": "hgccfdagfbilbdbkgmfdmmdfmjjoakfo",
+      "name": "Internet Connection Monitor",
+      "version": "6.2.1",
+      "status": "files present; enabled state not asserted"
+    },
+    {
+      "id": "dphlehoebkdjgennbalpfpjnhjojcceo",
+      "name": "NBN Availability Checker",
+      "version": "1.2.0",
+      "status": "files present; enabled state not asserted"
+    },
+    {
+      "id": "pkehgijcmpdhfbdbbnkijodmdjhbjlgp",
+      "name": "Privacy Badger",
+      "version": "2026.8.7",
+      "status": "files present; enabled state not asserted"
+    },
+    {
+      "id": "kdbmhfkmnlmbkgbabkdealhhbfhlmmon",
+      "name": "SteamDB",
+      "version": "4.37",
+      "status": "files present; enabled state not asserted"
+    },
+    {
+      "id": "ghnomdcacenbmilgjigehppbamfndblo",
+      "name": "The Camelizer",
+      "version": "3.0.16",
+      "status": "files present; enabled state not asserted"
+    },
+    {
+      "id": "ddkjiahejlhfcafbddmgiahcphecmpfh",
+      "name": "uBlock Origin Lite",
+      "version": "2026.901.1442",
+      "status": "files present; enabled state not asserted"
+    },
+    {
+      "id": "ddkjiahejlhfcafbddmgiahcphecmpfh",
+      "name": "uBlock Origin Lite",
+      "version": "2026.907.2003",
+      "status": "files present; enabled state not asserted"
+    },
+    {
+      "id": "djflhoibgkdhkhhcedjiklpkjnoahfmg",
+      "name": "User-Agent Switcher for Chrome",
+      "version": "2.0.2",
+      "status": "files present; enabled state not asserted"
+    }
+  ],
+  "limitations": [
+    "No pre-configuration baseline.",
+    "sfltool dumpbtm and systemsetup getters require interactive administrator authorization; archived registration metadata read directly, UI enablement not verified.",
+    "Application bundles present do not establish launchability, licensing, update availability or game compatibility.",
+    "System Settings UI inspection failed with cgWindowNotFound.",
+    "No credentials, account contents, browser history, game saves or private-key contents copied."
+  ]
+}

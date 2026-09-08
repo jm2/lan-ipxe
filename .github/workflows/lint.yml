@@ -54,6 +54,24 @@ jobs:
           tests/test-workstation-shell-helpers.sh
           tests/test-pacman-update.sh
           tests/test-zram-generator.sh
+          /bin/bash tests/test-macos-shell.sh
+          python3 -B tests/test-macos-workstation.py
+
+  macos-workstation:
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Check native Apple Bash bootstrap and shell behavior
+        shell: /bin/bash --noprofile --norc -eo pipefail {0}
+        run: |
+          /bin/bash --version
+          for file in setup-macos-workstation.sh files/macos/environment.sh files/macos/bashrc tests/test-macos-shell.sh; do
+            /bin/bash -n "$file"
+          done
+          /bin/bash tests/test-macos-shell.sh
+      - name: Run mocked macOS workstation reconciliation tests
+        run: python3 -B tests/test-macos-workstation.py
 
   powershell:
     runs-on: ubuntu-24.04

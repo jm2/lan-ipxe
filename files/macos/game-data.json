@@ -1,0 +1,215 @@
+[
+  {
+    "name": "Cro-Mag Rally",
+    "ids": [
+      "io.jor.cromagrally"
+    ],
+    "bundled": true,
+    "note": "Approved app release contains its resources. No additional data directory to populate."
+  },
+  {
+    "name": "Billy Frontier",
+    "ids": [
+      "io.jor.billyfrontier"
+    ],
+    "bundled": true,
+    "note": "Approved app release contains its resources. No additional data directory to populate."
+  },
+  {
+    "name": "Bugdom",
+    "ids": [
+      "io.jor.bugdom"
+    ],
+    "bundled": true,
+    "note": "Approved app release contains its resources. No additional data directory to populate."
+  },
+  {
+    "name": "Bugdom 2",
+    "ids": [
+      "io.jor.bugdom2"
+    ],
+    "bundled": true,
+    "note": "Approved app release contains its resources. No additional data directory to populate."
+  },
+  {
+    "name": "Mighty Mike",
+    "ids": [
+      "io.jor.mightymike"
+    ],
+    "bundled": true,
+    "note": "Approved app release contains its resources. No additional data directory to populate."
+  },
+  {
+    "name": "Nanosaur",
+    "ids": [
+      "io.jor.nanosaur"
+    ],
+    "bundled": true,
+    "note": "Approved app release contains its resources. No additional data directory to populate."
+  },
+  {
+    "name": "Nanosaur 2",
+    "ids": [
+      "io.jor.nanosaur2"
+    ],
+    "bundled": true,
+    "note": "Approved app release contains its resources. No additional data directory to populate."
+  },
+  {
+    "name": "Otto Matic",
+    "ids": [
+      "io.jor.ottomatic"
+    ],
+    "bundled": true,
+    "note": "Approved app release contains its resources. No additional data directory to populate."
+  },
+  {
+    "name": "Quake III / ioquake3 / Quake3e",
+    "ids": [
+      "com.macsourceports.ioquake3",
+      "org.quake3e.quake3e"
+    ],
+    "directories": [
+      "~/Library/Application Support/Quake3"
+    ],
+    "required": [
+      "baseq3/pak0.pk3"
+    ],
+    "note": "Populate baseq3/ from an existing Quake III installation (including its patch PK3 files); optional Team Arena content goes in missionpack/.",
+    "source": "https://www.macsourceports.com/game/quake3arena"
+  },
+  {
+    "name": "DOOM 3 / dhewm3",
+    "ids": [
+      "com.macsourceports.dhewm3"
+    ],
+    "directories": [
+      "~/Library/Application Support/dhewm3"
+    ],
+    "required": [
+      "base/pak000.pk4",
+      "base/pak001.pk4",
+      "base/pak002.pk4",
+      "base/pak003.pk4",
+      "base/pak004.pk4",
+      "base/pak005.pk4",
+      "base/pak006.pk4",
+      "base/pak007.pk4",
+      "base/pak008.pk4"
+    ],
+    "note": "Populate base/ from DOOM 3 1.3.1, not BFG Edition. Optional Resurrection of Evil data goes in d3xp/.",
+    "source": "https://www.macsourceports.com/game/doom3"
+  },
+  {
+    "name": "Quake II / Yamagi",
+    "ids": [
+      "com.macsourceports.yquake2"
+    ],
+    "directories": [
+      "~/.local/share/YamagiQ2"
+    ],
+    "required": [
+      "baseq2/pak0.pak"
+    ],
+    "note": "Populate baseq2/ with original Quake II data; optional expansions xatrix/ and rogue/. Version 8.70 uses existing ~/.yq2/ first, otherwise $XDG_DATA_HOME/YamagiQ2/ (default ~/.local/share/YamagiQ2/). This report resolves that precedence. Custom -cfgdir/-datadir/-portable arguments require manual review.",
+    "source": "https://github.com/yquake2/yquake2/blob/QUAKE2_8_70/src/backends/unix/system.c#L559"
+  },
+  {
+    "name": "Prey / Prey2006",
+    "ids": [
+      "com.macsourceports.Prey2006"
+    ],
+    "directories": [
+      "~/.local/share/prey06"
+    ],
+    "required": [
+      "base/pak000.pk4"
+    ],
+    "note": "Populate base/ with the original Prey PC data. Alternate system search root: /usr/local/share/games/prey06/. Do not put assets in the config-only ~/.config/prey06 directory.",
+    "source": "https://www.macsourceports.com/game/prey"
+  },
+  {
+    "name": "ET Legacy",
+    "ids": [
+      "com.etlegacy.etl"
+    ],
+    "directories": [
+      "/Applications/ETLegacy/etmain",
+      "~/Library/Application Support/etlegacy"
+    ],
+    "required": [
+      "pak0.pk3",
+      "pak1.pk3",
+      "pak2.pk3"
+    ],
+    "note": "Populate etmain/ next to ET Legacy.app with original Enemy Territory PK3 files. The user-support directory stores profiles/downloads. Paths follow the actual installed engine folder.",
+    "source": "https://github.com/etlegacy/etlegacy/wiki/macOS"
+  },
+  {
+    "name": "Unreal Tournament",
+    "ids": [
+      "com.oldunreal.unrealtournament"
+    ],
+    "directories": [
+      "~/Library/Application Support/Unreal Tournament"
+    ],
+    "required": [
+      "Maps",
+      "Sounds",
+      "Textures",
+      "Music"
+    ],
+    "note": "Populate Maps/, Sounds/, Textures/ and Music/. Do not copy the original System/ folder over the patch. Compressed .uz maps require manual decompression.",
+    "source": "https://github.com/OldUnreal/UnrealTournamentPatches#macos-installation"
+  },
+  {
+    "name": "UT2004 (existing/manual engine)",
+    "ids": [
+      "com.oldunreal.UT2004"
+    ],
+    "directories": [
+      "~/Library/Application Support/UT2004"
+    ],
+    "required": [
+      "Animations",
+      "Maps",
+      "Music",
+      "Sounds",
+      "StaticMeshes",
+      "Textures"
+    ],
+    "note": "Populate Animations/, Help/, KarmaData/, Maps/, Music/, Prefabs/, Sounds/, Speech/, StaticMeshes/, Textures/, Web/. Do not copy the original System/ folder. Current engine channel is preview, so fresh engine installation is manual.",
+    "source": "https://github.com/OldUnreal/UT2004Patches#macos-installation"
+  },
+  {
+    "name": "SuperTux / SuperTuxKart",
+    "ids": [
+      "net.sourceforge.supertuxkart"
+    ],
+    "bundled": true,
+    "note": "Distribution packages include their resources; no additional data required."
+  },
+  {
+    "name": "Steam / GOG / Battle.net",
+    "ids": [
+      "com.valvesoftware.steam",
+      "com.gog.galaxy",
+      "net.battle.net.app"
+    ],
+    "directories": [
+      "~/Library/Application Support/Steam/steamapps",
+      "/Applications"
+    ],
+    "note": "Library paths are chosen in each launcher. Steam default shown; GOG/Battle.net game folders are user-selectable. Sign in and install content manually; the script does not populate these folders."
+  },
+  {
+    "name": "Maelstrom",
+    "ids": [
+      "com.macsourceports.Maelstrom",
+      "org.libsdl.Maelstrom"
+    ],
+    "bundled": true,
+    "note": "Native Mac Source Ports app includes its resources; no additional data directory to populate.",
+    "source": "https://www.macsourceports.com/game/maelstrom"
+  }
+]
