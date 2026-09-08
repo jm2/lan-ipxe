@@ -8,7 +8,9 @@ import os
 from pathlib import Path
 import plistlib
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -122,6 +124,41 @@ class ConfigurationTests(unittest.TestCase):
         with patch.object(self.obj, 'command', side_effect=AssertionError('brew ran')):
             self.obj.package('wget')
 
+    def test_captured_command_timeout_kills_descendants_holding_output_open(self):
+        marker = self.home / 'orphan finished'
+        child = 'import pathlib,time; time.sleep(1); pathlib.Path(' + repr(str(marker)) + ').touch()'
+        parent = 'import subprocess,sys; subprocess.Popen([sys.executable,"-c",' + repr(child) + '])'
+        with self.assertRaisesRegex(RuntimeError, 'timed out'):
+            self.obj.command([sys.executable, '-c', parent], timeout=0.2)
+        time.sleep(1)
+        self.assertFalse(marker.exists())
+        result = self.obj.command([sys.executable, '-c', 'import sys; print(repr(sys.stdin.read()))'])
+        self.assertEqual(result.stdout.strip(), "''")
+
+    def test_zed_links_bundled_cli_without_running_it_or_homebrew(self):
+        app = next(a for a in self.obj.manifest['apps'] if a['name'] == 'Zed')
+        path = self.obj.applications / 'Zed.app'
+        target = path / 'Contents/MacOS/cli'
+        target.parent.mkdir(parents=True)
+        target.write_text('#!/bin/sh\nexit 99\n'); target.chmod(0o755)
+        self.obj.apps = [{'id': app['id'], 'path': path, 'store': False}]
+        self.obj.env['PATH'] = str(self.obj.prefix / 'bin')
+        with patch.object(self.obj, 'command', side_effect=AssertionError('app or brew ran')), \
+                patch.object(self.obj, 'validate_app'):
+            self.obj.application(app)
+            self.obj.application(app)
+        self.assertEqual((self.home / '.local/bin/zed').resolve(), target.resolve())
+        other = self.obj.prefix / 'bin/zed'
+        other.parent.mkdir(parents=True); other.write_text('other'); other.chmod(0o755)
+        with patch.object(self.obj, 'validate_app'), self.assertRaises(w.Deferred):
+            self.obj.application(app)
+
+    def test_live_log_retains_started_and_failed_actions(self):
+        self.obj.live_log = self.home / 'actions.jsonl'
+        self.obj.attempt('broken', lambda: (_ for _ in ()).throw(RuntimeError('broken installer')))
+        events = [json.loads(line) for line in self.obj.live_log.read_text().splitlines()]
+        self.assertEqual([event['status'] for event in events], ['START', 'FAILED'])
+
     def test_typed_preferences_merge_and_only_write_on_change(self):
         domains = {'test': {'nested': {'user': 1}, 'enabled': False}}
         calls = []
@@ -222,6 +259,29 @@ class ConfigurationTests(unittest.TestCase):
             path = root / name / 'source.properties'
             path.parent.mkdir(parents=True); path.write_text('Pkg.Revision=1')
         self.assertEqual(w.installed_sdk_versions(root), {'platforms': 'platforms;android-35', 'build-tools': 'build-tools;35.0.0', 'ndk': 'ndk;27.0.1'})
+
+    def test_android_uses_standalone_jdk_before_unlaunched_studio_runtime(self):
+        root = self.home / 'sdk'
+        packages = ['platforms;android-36', 'build-tools;36.0.0', 'ndk;29.0.1']
+        for relative in ['platform-tools/adb'] + [name.replace(';', '/') + '/source.properties' for name in packages]:
+            path = root / relative; path.parent.mkdir(parents=True, exist_ok=True); path.touch()
+        jdk = self.obj.prefix / 'opt/openjdk/libexec/openjdk.jdk/Contents/Home'
+        studio = self.obj.applications / 'Android Studio.app'
+        for path in [jdk / 'bin/java', studio / 'Contents/jbr/Contents/Home/bin/java']:
+            path.parent.mkdir(parents=True); path.touch()
+        self.obj.apps = [{'id': 'com.google.android.studio', 'path': studio}]
+        self.obj.args.no_upgrade = False
+        calls = []
+        def command(argv, **kwargs):
+            calls.append((argv, kwargs['env']['JAVA_HOME']))
+            return subprocess.CompletedProcess(argv, 0, '\n'.join(name + ' | 1 | stable' for name in packages), '')
+        with patch.object(self.obj, 'sdk_root', return_value=root), \
+                patch.object(self.obj, 'package'), patch.object(self.obj, 'link'), \
+                patch.object(self.obj, 'command', side_effect=command):
+            self.obj.android()
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(java == str(jdk) for _, java in calls))
+        self.assertTrue(all('--sdk_root=' + str(root) in argv for argv, _ in calls))
 
 
 class BootstrapTests(unittest.TestCase):

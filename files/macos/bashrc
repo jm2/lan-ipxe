@@ -28,7 +28,12 @@ fi
 # Load completion/preexec before capturing existing prompt hooks.
 if [ -z "${BASH_COMPLETION_VERSINFO-}" ] && [ -z "${BASH_COMPLETION-}" ] &&
     [ -r /opt/homebrew/etc/profile.d/bash_completion.sh ]; then
+    # Homebrew's Bash 3.2 completion package assumes unset variables expand empty.
+    _workstation_nounset=0
+    case $- in *u*) _workstation_nounset=1; set +u ;; esac
     . /opt/homebrew/etc/profile.d/bash_completion.sh
+    [ "$_workstation_nounset" = 0 ] || set -u
+    unset _workstation_nounset
 fi
 _workstation_color=0
 if [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ] 2>/dev/null; then

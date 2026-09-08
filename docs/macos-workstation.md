@@ -24,7 +24,7 @@ All Mac App Store/mobile apps are excluded, including Xcode installation. An exi
 
 Core installs Google's native `adb`/`fastboot` archive into `~/Library/Android/sdk/platform-tools`, with its SHA-256 checked against Homebrew's official metadata. It does **not** install the Homebrew platform-tools cask. Full's Google SDK manager uses this same SDK root and takes over platform-tools updates. The Homebrew command-line-tools package supplies only SDK manager itself; every SDK manager invocation passes `--sdk_root`.
 
-Full chooses the highest numeric stable platform, build-tools and NDK paths from `sdkmanager --list --channel=0`. It installs only those packages, keeps other project versions, and records its selections. `--no-upgrade` retains recorded versions and repairs missing selected packages; without a receipt it preserves the newest installed stable version in each category. Android licenses require an interactive terminal; the script never pipes `yes` into license acceptance. Studio's bundled Java runtime is preferred for SDK manager when present.
+Full chooses the highest numeric stable platform, build-tools and NDK paths from `sdkmanager --list --channel=0`. It installs only those packages, keeps other project versions, and records its selections. `--no-upgrade` retains recorded versions and repairs missing selected packages; without a receipt it preserves the newest installed stable version in each category. Android licenses require an interactive terminal; the script never pipes `yes` into license acceptance. SDK manager prefers the full profile's Homebrew JDK: freshly installed Studio's bundled Java can wait on macOS first-launch assessment. Studio's runtime is a fallback if the standalone JDK is unavailable.
 
 Matching `ANDROID_HOME`/`ANDROID_SDK_ROOT` overrides are supported. Conflicting roots or an existing `adb` owned outside the selected root are reported for reconciliation. Shell configuration exports SDK/JDK/NDK paths only when discovered; explicit project overrides remain authoritative. The NDK `current` link tracks the installer-selected version while project-specific versions remain installed.
 
@@ -35,6 +35,8 @@ Preview modes are offline and read-only: no Homebrew process, native agent/edito
 Normal runs update Homebrew metadata once and install/upgrade only selected packages and their necessary dependencies. Formula and cask installs/upgrades pass Homebrew's `--no-ask` flag to accept package/dependency confirmation automatically; separate authentication and license prompts remain interactive. No blanket upgrade, cleanup or removal occurs. `--no-upgrade` disables explicit metadata/package/toolchain upgrades and automatic Brew updates; installing missing packages may still resolve their required dependencies.
 
 Existing non-cask GUI apps keep their native owners and update channels. Cask apps declaring automatic updates retain that behavior. Existing native Codex and Claude Code CLIs are updated by their official installers; other command owners are preserved. PowerShell uses Microsoft's signed ARM64 package. Ookla Speedtest has the same presence-only policy as the other workstation scripts. Native release apps and games are deliberately presence-oriented on reruns: updating a reviewed game pin does not replace an independently installed app. Keep those native apps updated through their upstream channels.
+
+Zed uses its official stable Apple Silicon DMG, verified by bundle ID, signing team and Gatekeeper. Its bundled CLI is linked into `~/.local/bin` without executing it. Homebrew's Zed cask generates completions by launching the CLI during installation; that launch hung on this Mac before the CLI entered its own code. Existing Zed apps and Homebrew metadata are preserved; setup does not invoke that cask or generate its optional completions. Zed's native updater remains responsible for app updates.
 
 Game releases have reviewed repository/tag/asset/SHA-256 records. Cro-Mag Rally uses **jm2/CroMagRally**; the other seven Pangea titles use **jorio/** repositories. An existing Cro-Mag app requires a matching release executable before the script adopts its provenance. A different local build is preserved and reported for manual reconciliation; it is never silently treated as the requested fork. Checksums are checked before mounts/extraction. DMGs mount read-only and are detached; app identity and native executable are checked before staged copies. The moving Codex desktop URL additionally requires the expected signing team, bundle ID and Gatekeeper assessment. No global Gatekeeper/quarantine/security changes occur.
 
@@ -65,6 +67,8 @@ Full always ends with the [game-data checklist](../files/macos/game-data.json): 
 
 Exit codes: **0** satisfied (or valid dry-run), **1** installer/configuration failure, **2** drift or required manual/deferred work. Independent failures are collected while later apps/configuration continue. Review the result counts and manual entries; a successful dry-run does not assert installation is complete.
 
+Apply prints `START` before each action and `WAIT` every 30 seconds for commands that have not returned. Captured checks receive no interactive input and time out after two minutes, terminating their process group so inherited output pipes cannot keep setup waiting. Interactive installers retain terminal input and have no fixed overall time limit. Private `logs/<run-id>.jsonl` action records are appended throughout the run, including before a stall; the final `.json` summary is also retained. Neither log records command output or credentials.
+
 ```bash
 /bin/bash -n setup-macos-workstation.sh
 /bin/bash tests/test-macos-shell.sh
@@ -72,7 +76,9 @@ python3 -B tests/test-macos-workstation.py
 shellcheck -S warning setup-macos-workstation.sh files/macos/environment.sh files/macos/bashrc tests/test-macos-shell.sh
 ```
 
-Tests use temporary homes, fake package/system commands and configuration fixtures. The current Mac is checked only through read-only previews. The implementation has **not been applied to this workstation or smoke-tested on a disposable clean macOS 26 installation**. Hosted CI validates native Bash and mocked behavior; it does not prove fresh Homebrew, UI installer, Sharing/TCC, or complete full-profile installation success.
+Tests use temporary homes, fake package/system commands and configuration fixtures. On 8 September 2026, the full profile was applied locally on Apple Silicon macOS 26.6.2 and reached the final game-directory report. A second full run with `--no-upgrade` verified the Zed workaround, corrected MediaInfo/Outline Manager identities, Homebrew JDK selection, shell/editor configuration and desktop reconciliation. Wireshark and Google Drive still required administrator authentication, and Android SDK/build-tools/NDK installation required personal license review; those steps were deferred during the agent-driven test.
+
+The standalone Zed download/install path was also exercised in a temporary application directory, including ARM64, signature, signing-team and Gatekeeper checks. The captured-command timeout was observed terminating the stalled Studio Java process and continuing through all remaining phases. Native Bash/Zsh behavior tests, ShellCheck and 22 controller/bootstrap tests passed. A disposable clean macOS installation, optional Sharing/TCC and other opt-in system phases remain untested.
 
 ## Verified sources
 

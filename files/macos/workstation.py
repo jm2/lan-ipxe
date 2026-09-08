@@ -15,9 +15,11 @@ import platform
 import plistlib
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 import uuid
@@ -234,12 +236,19 @@ class Workstation:
         self.receipts = read_json(self.state / 'receipts.json', {})
         self.original_receipts = json.dumps(self.receipts, sort_keys=True)
         self.run_id = datetime.datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + str(os.getpid())
+        self.live_log = None
 
     def emit(self, kind, label, detail=''):
-        self.events.append({'status': kind, 'item': label, 'detail': detail})
+        event = {'status': kind, 'item': label, 'detail': detail}
+        self.events.append(event)
         print(f'{kind:8} {label}' + (': ' + detail if detail else ''), flush=True)
+        if self.live_log is not None:
+            with self.live_log.open('a') as stream:
+                stream.write(json.dumps(event) + '\n')
 
     def attempt(self, label, function, *args):
+        if not self.preview:
+            self.emit('START', label)
         try:
             return function(*args)
         except Deferred as exc:
@@ -248,13 +257,42 @@ class Workstation:
             self.emit('FAILED', label, str(exc) or type(exc).__name__)
         return None
 
-    def command(self, argv, *, mutate=False, capture=True, check=True, env=None):
+    def command(self, argv, *, mutate=False, capture=True, check=True, env=None, timeout=120):
         if mutate and self.preview:
             raise RuntimeError('Preview attempted a mutation: ' + str(argv[0]))
-        result = subprocess.run([str(arg) for arg in argv], check=False,
-                                stdout=subprocess.PIPE if capture else None,
-                                stderr=subprocess.PIPE if capture else None,
-                                env=env or self.env, text=True)
+        args = [str(arg) for arg in argv]
+        # Captured checks must never wait on hidden input or leave descendants
+        # holding their output pipes open. Interactive installers retain the TTY.
+        process = subprocess.Popen(args, stdin=subprocess.DEVNULL if capture else None,
+                                   stdout=subprocess.PIPE if capture else None,
+                                   stderr=subprocess.PIPE if capture else None,
+                                   start_new_session=capture, env=env or self.env, text=True)
+        started = time.monotonic()
+        while True:
+            elapsed = time.monotonic() - started
+            interval = max(0.01, min(30, timeout - elapsed)) if capture else 30
+            try:
+                stdout, stderr = process.communicate(timeout=interval)
+                break
+            except subprocess.TimeoutExpired:
+                if capture and time.monotonic() - started >= timeout:
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(process.pid, signal.SIGKILL)
+                    # A helper that deliberately detached from the process group
+                    # must not keep this cleanup waiting on an inherited pipe.
+                    try:
+                        process.communicate(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.stdout.close(); process.stderr.close()
+                    raise RuntimeError(f'{Path(args[0]).name} timed out after {timeout:g}s; later steps will continue') from None
+                self.emit('WAIT', Path(args[0]).name, f'still running after {int(time.monotonic() - started)}s')
+            except KeyboardInterrupt:
+                if capture:
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(process.pid, signal.SIGKILL)
+                    process.wait(timeout=5)
+                raise
+        result = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
         if check and result.returncode:
             # Do not echo arbitrary command output (may include private paths/config).
             raise RuntimeError(f'{Path(argv[0]).name} failed with exit {result.returncode}')
@@ -517,14 +555,14 @@ class Workstation:
                     privileged = not os.access(self.applications, os.W_OK)
                     prefix = ['/usr/bin/sudo'] if privileged else []
                     try:
-                        self.command(prefix + ['/usr/bin/ditto', source, staged], mutate=True)
+                        self.command(prefix + ['/usr/bin/ditto', source, staged], mutate=True, capture=not privileged)
                         self.validate_app(staged, app, signed=not checksum)
-                        self.command(prefix + ['/bin/mv', '-n', staged, destination], mutate=True)
+                        self.command(prefix + ['/bin/mv', '-n', staged, destination], mutate=True, capture=not privileged)
                         if staged.exists():
                             raise RuntimeError('Application destination appeared during install')
                     finally:
                         if staged.exists():
-                            self.command(prefix + ['/bin/rm', '-rf', staged], mutate=True)
+                            self.command(prefix + ['/bin/rm', '-rf', staged], mutate=True, capture=not privileged)
                 self.receipts.setdefault('apps', {})[app['id']] = {'repo': app.get('repo'), 'tag': tag, 'sha256': digest,
                     'path': str(destination), 'executable_sha256': executable_digest}
                 self.apps = self.scan_apps()
@@ -554,6 +592,22 @@ class Workstation:
             self.archive_app(app, current)
         else:
             self.direct_app(app, current)
+        if app.get('cli'):
+            current = self.app_for(app)
+            if not current:
+                if self.preview:
+                    self.emit('DRIFT', app['name'] + ' CLI', 'link bundled command after app installation'); return
+                raise RuntimeError('App missing for bundled CLI: ' + app['name'])
+            if not self.preview:
+                self.validate_app(current['path'], app, signed=True)
+            for name, relative in app['cli'].items():
+                target = current['path'] / relative
+                if not target.is_file() or not os.access(target, os.X_OK):
+                    raise RuntimeError('Bundled command is missing or not executable: ' + name)
+                public = shutil.which(name, path=self.env['PATH'])
+                if public and Path(public).resolve() != target.resolve():
+                    raise Deferred('Existing ' + name + ' command has a different owner: ' + public)
+                self.link(self.home / '.local/bin' / name, target)
 
     def archive_app(self, app, current):
         if current:
@@ -578,13 +632,13 @@ class Workstation:
             privileged = [] if os.access(self.applications, os.W_OK) else ['/usr/bin/sudo']
             staged = self.applications / ('.lan-ipxe-' + uuid.uuid4().hex)
             try:
-                self.command(privileged + ['/usr/bin/ditto', source, staged], mutate=True)
-                self.command(privileged + ['/bin/mv', '-n', staged, destination], mutate=True)
+                self.command(privileged + ['/usr/bin/ditto', source, staged], mutate=True, capture=not privileged)
+                self.command(privileged + ['/bin/mv', '-n', staged, destination], mutate=True, capture=not privileged)
                 if staged.exists():
                     raise RuntimeError('Engine destination appeared during install')
             finally:
                 if staged.exists():
-                    self.command(privileged + ['/bin/rm', '-rf', staged], mutate=True)
+                    self.command(privileged + ['/bin/rm', '-rf', staged], mutate=True, capture=not privileged)
             self.apps = self.scan_apps()
             self.emit('CHANGED', app['name'], 'engine archive; original game assets omitted')
 
@@ -766,7 +820,9 @@ class Workstation:
             raise Deferred('Resolve platform-tools before provisioning the full SDK')
         java = self.prefix / 'opt/openjdk/libexec/openjdk.jdk/Contents/Home'
         studio = self.app_for({'id': 'com.google.android.studio'})
-        if studio and (studio['path'] / 'Contents/jbr/Contents/Home/bin/java').exists():
+        # A freshly downloaded Studio helper can block at macOS first-launch
+        # assessment. Full already includes Homebrew's standalone JDK.
+        if not (java / 'bin/java').exists() and studio:
             java = studio['path'] / 'Contents/jbr/Contents/Home'
         if not (java / 'bin/java').exists():
             raise Deferred('Android requires the full JDK/Studio runtime')
@@ -1019,6 +1075,10 @@ class Workstation:
                 raise Deferred(f'Need at least {minimum} GiB free for this profile; found {free}')
             self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
             os.chmod(self.state, 0o700)
+            log_dir = self.state / 'logs'
+            log_dir.mkdir(exist_ok=True, mode=0o700)
+            self.live_log = log_dir / (self.run_id + '.jsonl')
+            self.live_log.touch(mode=0o600, exist_ok=False)
         self.attempt('Homebrew preparation', self.prepare_brew)
         names = self.manifest['formulae']['core'] + (self.manifest['formulae']['full'] if self.args.profile == 'full' else [])
         for name in names:

@@ -54,6 +54,9 @@ PROMPT_COMMAND=original_hook
 first=$PROMPT_COMMAND
 . "$ROOT/files/macos/bashrc"
 [ "$PROMPT_COMMAND" = "$first" ] || exit 11
+# bash-preexec defers hook installation until the first real prompt.
+eval "$PROMPT_COMMAND"
+case $- in *u*) ;; *) exit 20 ;; esac
 false; eval "$PROMPT_COMMAND"
 [ "$seen" = 1 ] || exit 12
 case "$PS1" in *":("*) ;; *) exit 13 ;; esac

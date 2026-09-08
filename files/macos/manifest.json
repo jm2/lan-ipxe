@@ -147,7 +147,11 @@
       "app": "Zed.app",
       "id": "dev.zed.Zed",
       "profile": "core",
-      "cask": "zed"
+      "url": "https://zed.dev/api/releases/stable/latest/Zed-aarch64.dmg",
+      "team": "MQ55VZLNZQ",
+      "cli": {
+        "zed": "Contents/MacOS/cli"
+      }
     },
     {
       "name": "XRG",
@@ -187,14 +191,15 @@
     {
       "name": "MediaInfo",
       "app": "MediaInfo.app",
-      "id": "net.mediaarea.mediainfo.mac",
+      "id": "net.mediaarea.mediainfo.mac-old",
+      "alternatives": ["net.mediaarea.mediainfo.mac"],
       "profile": "core",
       "cask": "mediainfo"
     },
     {
       "name": "Outline Manager",
       "app": "Outline Manager.app",
-      "id": "com.electron.outline-manager",
+      "id": "com.electron.outlineservermanager",
       "profile": "core",
       "cask": "outline-manager"
     },
