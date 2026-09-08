@@ -139,6 +139,11 @@ update). They replaced the earlier comtrya manifests; comtrya is
 unmaintained upstream. Run from any directory: the Linux scripts resolve their config
 payloads (`files/`) relative to their own location.
 
+Fedora and Arch install Balun alongside Tributary (`balun` from `jmsqrd/balun`
+COPR on Fedora, `balun-bin` from the AUR on Arch). Both also install Cockpit with
+file management, package updates, Podman containers, and storage/LVM support,
+and start `cockpit.socket` for access at `https://localhost:9090`.
+
 - `setup-arch-workstation.sh` — run as your normal user; sudo is used for the
   privileged steps (AUR builds refuse to run as root). Requires an existing GRUB
   installation, safely enables `[multilib]`, runs `pacman -Syu`, installs the official
@@ -157,7 +162,7 @@ payloads (`files/`) relative to their own location.
   requires a reboot to activate the in-tree driver. GNOME uses Vitals for sensors,
   Dash to Dock from the AUR, and the bundled System Monitor extension with `libgtop`.
 - `setup-fedora-workstation.sh` — run as your normal user; Fedora 41+ (dnf5). Adds the
-  signed third-party repos (`files/etc/yum.repos.d/`, the tributary copr, RPM Fusion,
+  signed third-party repos (`files/etc/yum.repos.d/`, the Tributary/Balun coprs, RPM Fusion,
   Microsoft VS Code, Chrome, Claude Code, sing-box; PowerShell/NVIDIA/Steam repos on
   x86_64), installs the dnf and flatpak sets (plus the x86_64-only 32-bit/Steam
   extras), applies available DNF/Flatpak updates, and installs Zed plus native AI tools.
@@ -166,6 +171,9 @@ payloads (`files/`) relative to their own location.
   confirmation; there is no separate user-cache group query to block on hidden
   repository-key prompts. Chrome and GitHub CLI are installed on both architectures;
   ARM64 PowerShell uses Microsoft's checksum-verified release archive.
+  Installs `dnf5-plugin-automatic` and enables `dnf5-automatic.timer` immediately,
+  with the controller setup's `apply_updates = yes` and `reboot = when-needed`
+  policy in `/etc/dnf/automatic.conf`.
   Antigravity 2.0+ and its CLI, OpenCode, and Zed resolve the latest stable native
   artifacts and their published checksums on each run; Codex uses OpenAI's
   checksum-verifying current-release installer; Claude Code uses Anthropic's signed RPM
@@ -216,6 +224,7 @@ Dotfiles and system config consumed by the workstation setup scripts: `bashrc`,
 `vimrc`, `grub` defaults, `etc/locale.conf`, `etc/sysctl.d/99-inotify.conf`,
 `etc/systemd/zram-generator.conf`,
 `etc/cron.daily/pacman-update` (unattended Arch updates + reboot scheduling),
+`etc/dnf/automatic.conf` (Fedora automatic updates + reboot when needed),
 `etc/dconf/db/gdm.d/10-font-settings`, Fedora repo definitions under
 `etc/yum.repos.d/`, and the Fedora Antigravity desktop entry under
 `usr/share/applications/`. `etc/pacman.conf` is kept for reference only — the Arch

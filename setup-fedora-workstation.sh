@@ -19,7 +19,7 @@
 #
 # What it does, in order:
 #   1. signed third-party repos: VS Code, Claude Code, the jmsqrd/tributary
-#      copr, RPM Fusion free+nonfree, Chrome, sing-box; on x86_64 also
+#      and jmsqrd/balun coprs, RPM Fusion free+nonfree, Chrome, sing-box; on x86_64 also
 #      Microsoft (PowerShell) and the RPM Fusion nvidia-driver + steam
 #      repos. The abandoned Antigravity 1.x RPM repo/package and VSCodium are
 #      retired in favor of native Antigravity 2.0+ and VS Code.
@@ -37,7 +37,8 @@
 #   8. dotfiles (~/.bashrc, ~/.vimrc) and system config
 #      from files/: /etc/locale.conf, the inotify sysctl limit, the Arch-style
 #      prompt as /etc/profile.d/01-arch-prompt.sh
-#   9. the service set, graphical.target as default
+#   9. the service set, graphical.target as default, Cockpit, and automatic
+#      DNF updates with the controller's apply-updates/reboot-when-needed policy
 #  10. publishes ~/.config/monitors.xml to GDM and applies the GDM font setting
 
 set -euo pipefail
@@ -49,7 +50,7 @@ ARCH=$(uname -m)
 KERNEL=$(uname -r)
 FEDORA_MIN_VERSION=41
 
-TRIBUTARY_COPR=jmsqrd/tributary
+COPRS=(jmsqrd/tributary jmsqrd/balun)
 RPMFUSION_FREE_URL="https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm"
 RPMFUSION_NONFREE_URL="https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm"
 GOOGLE_KEY_URL=https://dl.google.com/linux/linux_signing_key.pub
@@ -114,6 +115,7 @@ CA_BUNDLE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
 PKGS=(
   abattis-cantarell-fonts
   alsa-sof-firmware
+  balun
   bash-completion
   bc
   bison
@@ -129,6 +131,11 @@ PKGS=(
   clang
   clippy
   cmake
+  cockpit
+  cockpit-files
+  cockpit-packagekit
+  cockpit-podman
+  cockpit-storaged
   code
   cronie
   cups
@@ -136,6 +143,7 @@ PKGS=(
   curl
   dbus-devel
   dkms
+  dnf5-plugin-automatic
   @development-tools
   dos2unix
   dracut
@@ -232,6 +240,7 @@ PKGS=(
   transmission-remote-gtk
   tree
   tributary
+  udisks2-lvm2
   unar
   vim
   vlc
@@ -2308,14 +2317,16 @@ put_file -s "${FILES}/etc/yum.repos.d/claude-code.repo" /etc/yum.repos.d/claude-
 dnf_repo_enabled code || die "the Microsoft VS Code repository is not enabled"
 dnf_repo_enabled claude-code || die "the Claude Code repository is not enabled"
 
-if dnf_repo_enabled "copr:copr.fedorainfracloud.org:jmsqrd:tributary"; then
-  note "copr ${TRIBUTARY_COPR}: enabled"
-else
-  sudo dnf copr enable -y "${TRIBUTARY_COPR}"
-  dnf_repo_enabled "copr:copr.fedorainfracloud.org:jmsqrd:tributary" \
-    || die "copr ${TRIBUTARY_COPR} was not enabled successfully"
-  note "copr ${TRIBUTARY_COPR}: enabled now"
-fi
+for copr in "${COPRS[@]}"; do
+  repo_id="copr:copr.fedorainfracloud.org:${copr/\//:}"
+  if dnf_repo_enabled "${repo_id}"; then
+    note "copr ${copr}: enabled"
+  else
+    sudo dnf copr enable -y "${copr}"
+    dnf_repo_enabled "${repo_id}" || die "copr ${copr} was not enabled successfully"
+    note "copr ${copr}: enabled now"
+  fi
+done
 
 if rpm -q --quiet rpmfusion-free-release rpmfusion-nonfree-release; then
   note "RPM Fusion free + nonfree: installed"
@@ -2485,6 +2496,14 @@ else
   sudo systemctl set-default graphical.target
   note "default target: graphical.target (set now)"
 fi
+
+# Socket activation makes Cockpit available without starting a desktop session.
+log "Cockpit (https://localhost:9090)"
+sudo systemctl enable --now cockpit.socket
+
+log "Automatic OS updates (apply updates, reboot when needed)"
+put_file -s "${FILES}/etc/dnf/automatic.conf" /etc/dnf/automatic.conf
+sudo systemctl enable --now dnf5-automatic.timer
 
 #--- 10. GDM ----------------------------------------------------------------
 log "GDM"

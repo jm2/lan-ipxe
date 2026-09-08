@@ -47,6 +47,7 @@ YAY_VCS_DB=${XDG_CACHE_HOME:-${HOME}/.cache}/yay/vcs.json
 # Official repositories (groups are fine: gnome, gnome-circle, gnome-extra,
 # vulkan-devel are expanded before the installed-check)
 PKGS_OFFICIAL=(
+  archlinux-appstream-data
   base-devel
   bash-completion
   bash-preexec
@@ -63,6 +64,11 @@ PKGS_OFFICIAL=(
   chromium
   code
   cmake
+  cockpit
+  cockpit-files
+  cockpit-packagekit
+  cockpit-podman
+  cockpit-storaged
   colordiff
   cronie
   cups
@@ -125,6 +131,7 @@ PKGS_OFFICIAL=(
   lldb
   llvm
   lutris
+  lvm2
   maven
   mesa-utils
   mpfr
@@ -191,6 +198,7 @@ PKGS_AUR=(
   android-studio
   antigravity
   antigravity-cli
+  balun-bin
   bugdom
   bugdom2
   claude-code
@@ -796,6 +804,9 @@ log "Services"
 for unit in "${SERVICES[@]}"; do
   enable_unit "${unit}"
 done
+
+log "Cockpit (https://localhost:9090)"
+sudo systemctl enable --now cockpit.socket
 
 #--- 6. GDM -----------------------------------------------------------------
 log "GDM"
