@@ -177,3 +177,6 @@ finally {
     Remove-Module $module -Force
     Remove-Item -LiteralPath $scratch -Recurse -Force
 }
+# Expected DISM failures must not become the GitHub PowerShell runner's exit
+# status after every assertion passes. An assertion throw never reaches here.
+$global:LASTEXITCODE = 0
