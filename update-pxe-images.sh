@@ -14,9 +14,8 @@ TFTP_DIR="/srv/tftp"
 
 # iSCSI identity for the Windows 11 sanboot entry. Single source of truth — these
 # must match the LIO/targetcli target and ACL configuration on the server.
-# The initiator IQN is made per-client at boot (mac suffix) so two machines never
-# share one writable LUN (which would corrupt the NTFS volume); give each client
-# its own target/LUN or ACL accordingly.
+# The initiator IQN uses the selected NIC's MAC. Each client's ACL must map LUN 0
+# to its OWN writable backstore; distinct initiator names alone do not isolate data.
 ISCSI_TARGET_IQN="iqn.2026-02.lan.pxe:win11"
 ISCSI_INITIATOR_PREFIX="iqn.2026-02.lan.pxe"
 
@@ -605,13 +604,45 @@ if [ "$ENABLE_WIN11_PXE" = "true" ]; then
 :win11-pxe
 echo Booting Windows 11 from Network...
 set keep-san 1
-# Per-client initiator IQN (mac suffix) so clients never collide on one LUN.
-set initiator-iqn ${ISCSI_INITIATOR_PREFIX}:\${mac:hexhyp}
-# Clear the iBFT default gateway: with a non-zero gateway, once Windows takes over
-# some routers will not hairpin packets back to the originating subnet and the
-# iSCSI session drops (ipxe.org/howto/wds_iscsi). Harmless on a same-subnet target.
-set net0/gateway 0.0.0.0 ||
-sanboot iscsi:${PXE_SERVER%%:*}:::0:${ISCSI_TARGET_IQN} || goto shell
+sanunhook --drive 0x80 ||
+# Isolate each candidate so a successful login identifies the actual boot NIC.
+# Preserve existing IPv4 configuration; DHCP only interfaces without an address.
+ifclose
+set win11-index:int32 0
+:win11-interface
+iseq \${win11-index} 64 && goto win11-unreachable ||
+isset \${net\${win11-index}/mac} || goto win11-next
+ifopen net\${win11-index} || goto win11-next
+isset \${net\${win11-index}/ip} || goto win11-dhcp
+iseq \${net\${win11-index}/ip} 0.0.0.0 && goto win11-dhcp ||
+goto win11-configured
+:win11-dhcp
+dhcp --timeout 10000 net\${win11-index} || goto win11-next
+:win11-configured
+set initiator-iqn ${ISCSI_INITIATOR_PREFIX}:\${net\${win11-index}/mac:hexhyp}
+set win11-gateway 0.0.0.0
+isset \${net\${win11-index}/gateway} && set win11-gateway \${net\${win11-index}/gateway} ||
+# DHCP option 121 routes can reach remote subnets even with no default gateway.
+# Preserve routing in that case; a no-gateway probe would not prove on-link access.
+isset \${net\${win11-index}/121:hex} && goto win11-routed ||
+set net\${win11-index}/gateway 0.0.0.0 || goto win11-next
+# With one interface and no static/default routes, success proves on-link access.
+# This avoids the Windows iBFT gateway hairpin issue (ipxe.org/howto/wds_iscsi).
+sanhook --drive 0x80 iscsi:${PXE_SERVER%%:*}:::0:${ISCSI_TARGET_IQN} && goto win11-boot ||
+set net\${win11-index}/gateway \${win11-gateway} || goto shell
+iseq \${win11-gateway} 0.0.0.0 && goto win11-next ||
+:win11-routed
+sanhook --drive 0x80 iscsi:${PXE_SERVER%%:*}:::0:${ISCSI_TARGET_IQN} && goto win11-boot ||
+:win11-next
+ifclose net\${win11-index} ||
+inc win11-index
+goto win11-interface
+:win11-unreachable
+echo No interface could attach the Windows iSCSI target. Check link, IP, routing and target ACLs.
+goto shell
+:win11-boot
+echo Windows iSCSI boot via net\${win11-index}, initiator \${initiator-iqn}
+sanboot --drive 0x80 || goto shell
 EOF
 fi
 

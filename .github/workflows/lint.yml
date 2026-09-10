@@ -56,6 +56,7 @@ jobs:
           tests/test-zram-generator.sh
           /bin/bash tests/test-macos-shell.sh
           python3 -B tests/test-macos-workstation.py
+          python3 -B tests/test-win11-ipxe.py
 
   macos-workstation:
     runs-on: macos-26
@@ -91,6 +92,8 @@ jobs:
           ./tests/Test-HyperV.ps1
           ./tests/Test-WingetAntigravity.ps1
           ./tests/Test-WingetInventory.ps1
+          ./tests/Test-Win11Pxe.ps1
+          ./tests/Test-NetPower.ps1
 
   windows-powershell-51:
     runs-on: windows-2022
@@ -107,6 +110,7 @@ jobs:
             'setup-win11-workstation.ps1'
             'enable-openssh-win11.ps1'
             'enable-hyperv-win11.ps1'
+            'win11pxe/DisableNetPower.ps1'
           )
           foreach ($file in $files) {
             $tokens = $null
@@ -124,3 +128,7 @@ jobs:
           ./tests/Test-HyperV.ps1
           ./tests/Test-WingetAntigravity.ps1
           ./tests/Test-WingetInventory.ps1
+          ./tests/Test-NetPower.ps1
+      - name: Run PXE build tests with Windows PowerShell 7
+        shell: pwsh
+        run: ./tests/Test-Win11Pxe.ps1

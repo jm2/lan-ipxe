@@ -118,6 +118,7 @@ try {
         'setup-win11-workstation.ps1'
         'enable-openssh-win11.ps1'
         'enable-hyperv-win11.ps1'
+        'win11pxe/DisableNetPower.ps1'
     )
     $compatibilityIssues = @($windows51Files | ForEach-Object {
         Invoke-ScriptAnalyzer -Path $_ -Settings $compatibilitySettings -IncludeRule PSUseCompatibleSyntax

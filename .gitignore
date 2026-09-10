@@ -3,6 +3,7 @@ pxe_test/
 archiso/
 custom_archiso/
 *.vhdx
+*.vhdx.*
 *.iso
 *.img
 *.raw

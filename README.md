@@ -53,11 +53,19 @@ writes boot files with `bcdboot`, then edits the offline SYSTEM/SOFTWARE hives:
 promotes iSCSI/NIC/storage services to boot-start, sets the SAN policy, disables
 BitLocker auto-encryption, injects LabConfig hardware-check bypasses and `BypassNRO`,
 and drops an `unattend.xml` (local `lan` admin account with autologon) plus a
-`SetupComplete.cmd` that disables NIC power management.
+`SetupComplete.cmd` that disables supported NIC sleep features without restarting adapters.
+The helper logs errors to `%SystemRoot%\Logs\DisableNetPower.log`; SetupComplete
+logs to `DisableNetPower-setup.log` in the same directory. OEM-keyed editions can
+skip SetupComplete, so confirm execution on the target.
 
 - `-Drivers` runs every NIC/Wi-Fi `Get-*Drivers.ps1` scraper in parallel (the
   `Get-*GraphicsDrivers.ps1` shims are excluded — see `-GraphicsDrivers`) and injects
   the results with `DISM /Add-Driver`.
+- `-DriverPath .\drivers\boot-nic` injects extracted, tested driver packages from a
+  local directory (recursively) or an individual INF. Multiple paths are allowed.
+  Use it instead of `-Drivers` to avoid changing the NIC package on each catalog
+  refresh; it can still be combined with `-GraphicsDrivers`. The original driver
+  directory is never deleted. DISM servicing failures stop the build.
 - `-GraphicsDrivers Intel|AMD|NVIDIA|All` additionally injects GPU display drivers
   (also catalog-sourced) into the same image. GPU CABs are large (~0.6–1.2 GB each),
   so it is opt-in and separate from `-Drivers`; `All` injects the ~3–5 GB union of all
@@ -78,25 +86,48 @@ LIO/targetcli backstore behind `iqn.2026-02.lan.pxe:win11`. LIO serves file byte
 raw — it does not parse the VHDX container. The targetcli configuration itself is
 not versioned in this repo.
 
-**Boot NIC (`-BootAdapterGuid`):** a DISM-applied image has never run PnP, so its
-boot NIC exists only as a Services key and the kernel cannot bind it at boot —
-the classic `0x7B INACCESSIBLE_BOOT_DEVICE` over iSCSI. The script fixes this with
-the offline `DISM /Add-NetAdapter` verb (the same one Windows Setup runs when it
-detects an iBFT), which needs the boot NIC's adapter GUID:
+**Boot NIC (`-BootAdapterGuid`):** optionally run the undocumented DISM
+`/Add-NetAdapter` operation. The adapter must be present with a working driver in
+**the Windows session running this builder**. A GUID from another machine or a
+previous WinPE session is not a portable hardware identifier. Invalid/missing
+host adapters fail validation before a VHDX is created; a failed requested DISM
+operation stops the build.
 
 ```powershell
-# on a machine / WinPE where that NIC is live:
-wmic nic get GUID,Name,ServiceName
-# then:
-.\build_win11pxe.ps1 -IsoPath ... -Drivers -Updates -BootAdapterGuid '{GUID}'
+# Run on the build host; select the intended NIC rather than the first result:
+Get-CimInstance Win32_NetworkAdapter | Select-Object GUID,Name,ServiceName
+.\build_win11pxe.ps1 -IsoPath .\Win11_25H2_English_x64.iso -DriverPath .\drivers\boot-nic -BootAdapterGuid '{GUID}'
 ```
 
-Without `-BootAdapterGuid` the script warns and the image will almost certainly
-`0x7B`. **Deferred:** auto-detecting/validating the correct adapter from hardware
-IDs is not yet implemented — the GUID is supplied by hand for now. If
-`/Add-NetAdapter` is unavailable on your DISM build, install Windows by booting
-Setup over the `sanhook`'d LUN instead (see the notes block at the end of
-`build_win11pxe.ps1`).
+GUID-less builds remain available with boot-NIC preparation marked **unverified**.
+Windows can enumerate new hardware during first boot; missing pre-existing PnP
+entries alone do not prove failure. Driver staging and the fallback service table
+also do not prove iSCSI first-boot compatibility. Different `.sys` binaries with
+the same filename now stop fallback service creation instead of selecting the
+first file found; byte-identical duplicates are accepted. The fallback still
+cannot reproduce arbitrary INF/WDF/device installation requirements.
+
+**Output and diagnostics:** builds use a unique temporary VHDX beside `-OutPath`.
+The previous output is replaced only after image preparation, registry hive
+unloads and image dismounts succeed. Failed builds retain their temporary VHDX
+for inspection; a hive-unload failure deliberately leaves that disk attached.
+Each run writes `<OutPath>.<build-id>.build.json` and a DISM log alongside the
+output. The report includes source/serviced Windows versions, NIC package
+versions, native DISM results, service paths, start overrides and warnings.
+`Complete` means the build and cleanup succeeded, **not** that hardware boot was
+tested; `ColdBootValidated` remains false. Keep the matching report when copying
+an image. The large failed temporary images can be removed after inspection and
+successful hive/disk cleanup.
+
+**PXE interface selection:** the Windows menu entry tries interfaces `net0` through
+`net63` individually, preserving existing IPv4 settings and using DHCP only when
+an interface lacks an address. A successful iSCSI attachment identifies the NIC
+whose MAC supplies the initiator IQN. For ordinary subnet/default-gateway routing,
+it first tests attachment without a gateway; failure restores the gateway and
+tries routed access. DHCP option 121 routes bypass this workaround because a
+no-gateway probe would not establish on-link access. Each client's ACL must map
+LUN 0 to a separate writable backstore; unique initiator IQNs alone do not isolate
+NTFS volumes. The entry closes other iPXE interfaces to prevent ambiguous routing.
 
 Driver/update scrapers (Microsoft Update Catalog):
 
@@ -113,12 +144,10 @@ Driver/update scrapers (Microsoft Update Catalog):
 | `Get-AmdGraphicsDrivers.ps1` | AMD Radeon RX + Radeon Pro GPU (post-boot convenience) |
 | `Get-Win11CumulativeUpdates.ps1` | Latest monthly CU + checkpoint chain + SSU per Windows version |
 
-**Status:** the `0x7B INACCESSIBLE_BOOT_DEVICE` failure (DISM apply + service-key
-edits load the NIC driver but never PnP-*install* it) is addressed by the
-`-BootAdapterGuid` / `DISM /Add-NetAdapter` step described above. Supplying the boot
-NIC's adapter GUID is currently a manual step (auto-detection deferred); if the
-verb is unavailable on your DISM build, fall back to installing via Setup over the
-iBFT-attached LUN.
+**Status:** offline build hardening is implemented; first boot, OOBE and subsequent
+cold boots still require testing on the intended NIC, firmware and Windows build.
+There is no automatic WinPE provisioning stage. If offline NIC preparation is
+insufficient, Setup over an iBFT-attached LUN remains an alternative.
 
 ### Custom Arch live image — `build_archiso.sh`
 

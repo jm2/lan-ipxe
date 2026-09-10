@@ -32,6 +32,11 @@ param(
     [Parameter(Mandatory = $false)]
     [switch]$Drivers,
 
+    # Use extracted, tested packages instead of the NIC catalog scrapers.
+    # May be combined with -GraphicsDrivers, but not -Drivers.
+    [Parameter(Mandatory = $false)]
+    [string[]]$DriverPath,
+
     [Parameter(Mandatory = $false)]
     [switch]$Updates,
 
@@ -44,14 +49,10 @@ param(
     [ValidateSet('Intel', 'AMD', 'NVIDIA', 'All')]
     [string]$GraphicsDrivers,
 
-    # Adapter GUID(s) of the boot NIC, for the offline DISM /Add-NetAdapter step
-    # that actually makes Windows able to boot over iSCSI (see notes below).
-    # Obtain on a live machine / WinPE where that NIC is present:
-    #     wmic nic get GUID,Name,ServiceName
-    # (the GUID looks like {XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}).
-    # DEFERRED: auto-detecting/validating the correct adapter from hardware IDs is
-    # not yet implemented — the GUID must be supplied by hand for now. Without it,
-    # the image will almost certainly 0x7B INACCESSIBLE_BOOT_DEVICE over iSCSI.
+    # Optional DISM /Add-NetAdapter preparation. The adapter must be present in
+    # THIS Windows session; a GUID copied from another machine is insufficient.
+    # Get-CimInstance Win32_NetworkAdapter | Select-Object GUID,Name,ServiceName
+    # GUID-less builds remain available with boot-NIC preparation unverified.
     [Parameter(Mandatory = $false)]
     [string[]]$BootAdapterGuid
 )
@@ -68,6 +69,32 @@ if (-not (Test-Path -Path $IsoPath)) {
 }
 
 $ErrorActionPreference = "Stop"
+Import-Module (Join-Path $PSScriptRoot 'win11pxe\BuildHelpers.psm1') -Force
+$buildId = [guid]::NewGuid().ToString('N')
+$report = [ordered]@{
+    SchemaVersion = 1; BuildId = $buildId; StartedUtc = [datetime]::UtcNow.ToString('o')
+    State = 'Building'; OutputPath = $OutPath; WorkingPath = $null
+    IsoPath = $IsoPath; ImageIndex = $ImageIndex; SourceImageVersion = $null
+    ServicedImageVersion = $null; ServicedKernelVersion = $null; DismVersion = $null; DismLog = $null
+    DriverPaths = @(); BootAdapters = @(); BootNicPreparation = 'Unverified'
+    ColdBootValidated = $false; NicPackages = @()
+    DismOperations = [System.Collections.Generic.List[object]]::new()
+    Services = [System.Collections.Generic.List[object]]::new()
+    Warnings = [System.Collections.Generic.List[string]]::new()
+    Failure = $null
+}
+$success = $false
+$vhdCreated = $false
+$sysHiveLoaded = $false
+$softHiveLoaded = $false
+$isoImage = $null
+$workingPath = $null
+$reportPath = $null
+$dismScratchDir = $null
+$driverTempPath = $null
+$updatesTempPath = $null
+$tempHiveName = $null
+$tempSoftName = $null
 
 # Unload an offline registry hive reliably. The PowerShell registry provider
 # caches key handles, so reg unload often fails the first time with "Access is
@@ -75,6 +102,7 @@ $ErrorActionPreference = "Stop"
 # $true on success. Used both in the main flow and in the finally cleanup.
 function Dismount-Hive {
     param([string]$HiveName)
+    $PSNativeCommandUseErrorActionPreference = $false
     if (-not (Test-Path "HKLM:\$HiveName")) { return $true }
     for ($i = 0; $i -lt 5; $i++) {
         [gc]::Collect()
@@ -87,7 +115,6 @@ function Dismount-Hive {
 }
 
 try {
-    $success = $false
     # Track loaded offline hives so the finally block can unload them on any
     # mid-way throw (a left-loaded hive locks the VHDX and breaks the next run).
     $sysHiveLoaded = $false
@@ -95,15 +122,33 @@ try {
     # Convert paths to absolute to prevent issues with Mount-DiskImage
     $IsoPath = Convert-Path $IsoPath
     $OutPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutPath)
+    if ([System.IO.Path]::GetExtension($OutPath) -ine '.vhdx') { throw '-OutPath must use the .vhdx extension.' }
+    $workingPath = Join-Path (Split-Path $OutPath -Parent) ".win11-$buildId.building.vhdx"
+    $reportPath = "$OutPath.$buildId.build.json"
+    $dismLogPath = "$OutPath.$buildId.dism.log"
+    $report.OutputPath = $OutPath; $report.WorkingPath = $workingPath
+    $report.IsoPath = $IsoPath; $report.DismLog = $dismLogPath
 
-    Write-Host ">>> Creating VHDX at $OutPath ($($SizeBytes / 1GB) GB)..." -ForegroundColor Cyan
-    if (Test-Path $OutPath) {
-        Write-Host "Removing existing file..."
-        Remove-Item $OutPath -Force
+    # Validate explicit inputs before allocating a VHDX. Existing output is never
+    # removed up front, including when a requested adapter cannot be prepared.
+    if ($Drivers -and $DriverPath) { throw 'Use either -DriverPath or -Drivers, not both.' }
+    $localDriverPaths = @(Resolve-PxeDriverPath -Path $DriverPath | Select-Object -Unique)
+    $report.DriverPaths = $localDriverPaths
+    $bootAdapters = @()
+    if ($BootAdapterGuid) {
+        $bootAdapters = @(Resolve-PxeBootAdapter -Guid $BootAdapterGuid -Adapters @(Get-CimInstance Win32_NetworkAdapter))
+        $report.BootAdapters = $bootAdapters
     }
+    $report.DismVersion = (Get-Item (Get-Command dism.exe -CommandType Application).Source).VersionInfo.FileVersion
+    if (-not (Test-Path (Join-Path $PSScriptRoot 'win11pxe\DisableNetPower.ps1'))) {
+        throw 'Missing win11pxe\DisableNetPower.ps1 runtime helper.'
+    }
+    Write-PxeBuildReport $report $reportPath
 
-    New-VHD -Path $OutPath -Dynamic -SizeBytes $SizeBytes | Out-Null
-    $mountedVhd = Mount-VHD -Path $OutPath -PassThru
+    Write-Host ">>> Creating temporary VHDX at $workingPath ($($SizeBytes / 1GB) GB)..." -ForegroundColor Cyan
+    New-VHD -Path $workingPath -Dynamic -SizeBytes $SizeBytes | Out-Null
+    $vhdCreated = $true
+    Mount-VHD -Path $workingPath | Out-Null
 
     # Re-query the disk number after a settle delay rather than trusting the
     # Mount-VHD -PassThru snapshot (DiskNumber is not always populated yet, and a
@@ -111,7 +156,7 @@ try {
     $diskNumber = $null
     for ($i = 0; $i -lt 10 -and $null -eq $diskNumber; $i++) {
         Start-Sleep -Seconds 1
-        $diskNumber = (Get-VHD -Path $OutPath).DiskNumber
+        $diskNumber = (Get-VHD -Path $workingPath).DiskNumber
     }
     if ($null -eq $diskNumber) {
         throw "Mounted VHDX never exposed a disk number; cannot continue."
@@ -180,16 +225,17 @@ try {
     # Create a scratch directory on a drive with adequate space for DISM operations
     $dismScratchDir = Join-Path $env:TEMP "DISM_Scratch_$(Get-Random)"
     New-Item -ItemType Directory -Path $dismScratchDir -Force | Out-Null
-    $dismLogPath = Join-Path $env:TEMP "DISM_Build_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+    $imgInfo = Get-WindowsImage -ImagePath $wimPath -Index $ImageIndex -ErrorAction Stop
+    $report.SourceImageVersion = [string]$imgInfo.Version
+    if ([string]$imgInfo.Architecture -notin '9', 'x64', 'amd64') {
+        throw "This builder requires an x64 Windows image (found $($imgInfo.Architecture))."
+    }
 
     Write-Host ">>> Applying Windows Image (Index $ImageIndex) from $wimPath to VHDX..." -ForegroundColor Cyan
     Write-Host "    DISM Log: $dismLogPath" -ForegroundColor DarkGray
     # Using DISM to apply the image. Tokens are quoted so paths containing spaces
     # (e.g. a %TEMP% under a profile name with spaces) survive argument splitting.
-    dism.exe /Apply-Image "/ImageFile:$wimPath" /Index:$ImageIndex "/ApplyDir:$winDrivePath" "/LogPath:$dismLogPath"
-    if ($LASTEXITCODE -ne 0) {
-        throw "DISM /Apply-Image failed with exit code $LASTEXITCODE. Check log: $dismLogPath"
-    }
+    Invoke-PxeDism -Report $report -Arguments @('/Apply-Image', "/ImageFile:$wimPath", "/Index:$ImageIndex", "/ApplyDir:$winDrivePath", "/LogPath:$dismLogPath")
 
     if ($Drivers -or $GraphicsDrivers) {
         Write-Host ">>> Executing Driver Scrapers (parallel)..." -ForegroundColor Cyan
@@ -217,7 +263,7 @@ try {
             foreach ($gpuName in $wantedGpu) {
                 $gpuPath = Join-Path $PSScriptRoot $gpuName
                 if (Test-Path $gpuPath) { $driverScripts += Get-Item $gpuPath }
-                else { Write-Warning "    [!] Graphics scraper not found: $gpuName" }
+                else { Add-PxeBuildWarning $report "    [!] Graphics scraper not found: $gpuName" }
             }
         }
 
@@ -241,17 +287,22 @@ try {
         Write-Host "    -> Waiting for $($scraperJobs.Count) scrapers to complete (max $([int]($scraperTimeoutSec / 60)) min)..."
         $scraperJobs | Wait-Job -Timeout $scraperTimeoutSec | Out-Null
         foreach ($job in $scraperJobs) {
-            if ($job.State -eq 'Running') {
-                Write-Warning "    [!] $($job.Name) timed out — stopping."
+            if ($job.State -in 'Running', 'NotStarted') {
+                Add-PxeBuildWarning $report "    [!] $($job.Name) timed out — stopping."
                 Stop-Job $job
             }
-            elseif ($job.State -eq 'Failed') {
-                Write-Warning "    [!] $($job.Name) failed: $($job.ChildJobs[0].JobStateInfo.Reason)"
+            elseif ($job.State -ne 'Completed') {
+                Add-PxeBuildWarning $report "    [!] $($job.Name) ended in state $($job.State): $($job.JobStateInfo.Reason)"
             }
             else {
                 Write-Host "    -> $($job.Name) completed." -ForegroundColor Green
             }
-            Receive-Job $job -ErrorAction Continue 2>&1 | Out-Host
+            foreach ($record in @(Receive-Job $job -ErrorAction Continue 2>&1 3>&1)) {
+                if ($record -is [System.Management.Automation.WarningRecord] -or $record -is [System.Management.Automation.ErrorRecord]) {
+                    Add-PxeBuildWarning $report "$($job.Name): $record"
+                }
+                else { $record | Out-Host }
+            }
             Remove-Job $job -Force
         }
 
@@ -266,7 +317,7 @@ try {
             if ($proc.ExitCode -ne 0) {
                 # Keep the CAB so a partial/corrupt extraction can be inspected or retried,
                 # instead of silently discarding the only copy of a driver family.
-                Write-Warning "    [!] expand.exe failed ($($proc.ExitCode)) on $($cab.Name); leaving CAB in place."
+                Add-PxeBuildWarning $report "    [!] expand.exe failed ($($proc.ExitCode)) on $($cab.Name); leaving CAB in place."
             }
             else {
                 Remove-Item $cab.FullName -Force
@@ -274,13 +325,16 @@ try {
         }
 
         Write-Host ">>> Injecting Drivers into Offline Image..." -ForegroundColor Cyan
-        dism.exe "/Image:$winDrivePath" /Add-Driver "/Driver:$driverTempPath" /Recurse "/LogPath:$dismLogPath"
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning "DISM /Add-Driver completed with exit code $LASTEXITCODE. Some drivers may have been skipped. Check log: $dismLogPath"
-        }
+        Invoke-PxeDism -Report $report -Arguments @("/Image:$winDrivePath", '/Add-Driver', "/Driver:$driverTempPath", '/Recurse', "/LogPath:$dismLogPath")
 
         Write-Host ">>> Cleaning up Driver Temp Path..."
         Remove-Item -Path $driverTempPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    foreach ($path in $localDriverPaths) {
+        $driverArgs = @("/Image:$winDrivePath", '/Add-Driver', "/Driver:$path", "/LogPath:$dismLogPath")
+        if (Test-Path -LiteralPath $path -PathType Container) { $driverArgs += '/Recurse' }
+        Invoke-PxeDism -Report $report -Arguments $driverArgs
     }
 
     if ($Updates) {
@@ -300,21 +354,21 @@ try {
                     Write-Host "    -> Image build $build -> Windows 11 $win11Version" -ForegroundColor DarkGray
                 }
                 else {
-                    Write-Warning "    [!] Unrecognized image build $build; cannot map to a servicing version."
+                    Add-PxeBuildWarning $report "    [!] Unrecognized image build $build; cannot map to a servicing version."
                 }
             }
         }
         catch {
-            Write-Warning "    [!] Could not read image version: $($_.Exception.Message)"
+            Add-PxeBuildWarning $report "    [!] Could not read image version: $($_.Exception.Message)"
         }
         if (-not $win11Version) {
             if ($IsoPath -match "Win11_([0-9]{2}H[0-9])_") {
                 $win11Version = $matches[1]
-                Write-Warning "    [!] Falling back to ISO-filename version: $win11Version"
+                Add-PxeBuildWarning $report "    [!] Falling back to ISO-filename version: $win11Version"
             }
             else {
                 $win11Version = "25H2"
-                Write-Warning "    [!] Defaulting to $win11Version — updates may target the wrong stream."
+                Add-PxeBuildWarning $report "    [!] Defaulting to $win11Version — updates may target the wrong stream."
             }
         }
 
@@ -330,7 +384,7 @@ try {
                 & $updateScript -Version $win11Version -DownloadPath $updatesTempPath
             }
             catch {
-                Write-Warning "    [!] Cumulative-update fetch failed: $($_.Exception.Message). Continuing without updates."
+                Add-PxeBuildWarning $report "    [!] Cumulative-update fetch failed: $($_.Exception.Message). Continuing without updates."
             }
 
             $packages = Get-ChildItem -Path $updatesTempPath -Include *.msu, *.cab -Recurse -ErrorAction SilentlyContinue
@@ -344,14 +398,7 @@ try {
                 # CU dependencies and install packages in the correct order.
                 # /ScratchDir is critical — CUs are multi-GB and the default 64 MB
                 # scratch space inside the offline image is far too small.
-                dism.exe "/Image:$winDrivePath" /Add-Package "/PackagePath:$updatesTempPath" "/ScratchDir:$dismScratchDir" "/LogPath:$dismLogPath"
-                if ($LASTEXITCODE -ne 0) {
-                    Write-Warning "DISM /Add-Package completed with exit code $LASTEXITCODE. Check log: $dismLogPath"
-                    Write-Warning "This may indicate a checkpoint dependency issue or incompatible package."
-                }
-                else {
-                    Write-Host "    -> Cumulative updates applied successfully." -ForegroundColor Green
-                }
+                Invoke-PxeDism -Report $report -Arguments @("/Image:$winDrivePath", '/Add-Package', "/PackagePath:$updatesTempPath", "/ScratchDir:$dismScratchDir", "/LogPath:$dismLogPath")
             }
             else {
                 Write-Host "    [!] No .msu/.cab packages found after scraping." -ForegroundColor Yellow
@@ -368,50 +415,24 @@ try {
     # Clean up DISM scratch directory
     Remove-Item -Path $dismScratchDir -Recurse -Force -ErrorAction SilentlyContinue
 
-    # ===========================================================================
-    # Boot-NIC network installation (the actual fix for the 0x7B over iSCSI)
-    # ===========================================================================
-    # A DISM-applied image has never run PnP, so its boot NIC has no Enum devnode,
-    # no Net-class instance, and no TCP/IP binding — only a Services key. winload
-    # then LOADS the NIC driver but the kernel can never BIND it to the hardware,
-    # so iScsiPrt cannot re-establish the iBFT session and the boot volume never
-    # arrives -> 0x7B INACCESSIBLE_BOOT_DEVICE.
-    #
-    # /Add-NetAdapter is the (undocumented but real) offline DISM verb Windows
-    # Setup itself runs when it detects an iBFT: it creates the offline network
-    # interface, binds ms_tcpip/ms_tcpip6, and sets the NIC's boot-critical flag.
-    # It needs the boot NIC's adapter GUID, which is machine-specific and must be
-    # supplied via -BootAdapterGuid for now (auto-detection from hardware IDs is
-    # DEFERRED). If the GUID is omitted we warn loudly rather than silently ship
-    # an image that will bugcheck.
-    if ($BootAdapterGuid) {
+    # /Add-NetAdapter is an undocumented Setup operation using a live HOST
+    # adapter. A successful invocation is preparation, not proof of a cold boot.
+    # Staging drivers alone does not validate the boot-critical network path.
+    $winDir = Join-Path $winDrivePath 'Windows'
+    $report.ServicedKernelVersion = (Get-Item (Join-Path $winDir 'System32\ntoskrnl.exe')).VersionInfo.FileVersion
+    $report.NicPackages = @(Get-WindowsDriver -Path $winDrivePath -All | Where-Object ClassName -eq 'Net' |
+        Select-Object Driver, OriginalFileName, ProviderName, ClassName, Date, Version, Inbox, BootCritical)
+    if ($bootAdapters.Count) {
         Write-Host ">>> Installing boot NIC(s) into offline image (DISM /Add-NetAdapter)..." -ForegroundColor Cyan
-        foreach ($guid in $BootAdapterGuid) {
-            $g = $guid.Trim()
-            if ($g -notmatch '^\{?[0-9a-fA-F-]{36}\}?$') {
-                Write-Warning "    [!] '$g' does not look like an adapter GUID; skipping."
-                continue
-            }
-            if ($g -notmatch '^\{') { $g = "{$g}" }
+        foreach ($adapter in $bootAdapters) {
+            $g = $adapter.Guid
             Write-Host "    -> /Add-NetAdapter /HostAdapter:$g" -ForegroundColor DarkGray
-            dism.exe "/Image:$winDrivePath" /Add-NetAdapter "/HostAdapter:$g" /BootDriver:ms_tcpip /BootDriver:ms_tcpip6 "/LogPath:$dismLogPath"
-            if ($LASTEXITCODE -ne 0) {
-                Write-Warning "    [!] /Add-NetAdapter failed for $g (exit $LASTEXITCODE)."
-                Write-Warning "        This verb is undocumented and not present on every DISM build. If it is"
-                Write-Warning "        unavailable, install Windows by booting Setup over the sanhook'd LUN"
-                Write-Warning "        (WinPE + iBFT) instead — see the notes block at the end of this script."
-            }
-            else {
-                Write-Host "    -> Boot NIC $g installed and marked boot-critical." -ForegroundColor Green
-            }
+            Invoke-PxeDism -Report $report -Arguments @("/Image:$winDrivePath", '/Add-NetAdapter', "/HostAdapter:$g", '/BootDriver:ms_tcpip', '/BootDriver:ms_tcpip6', "/LogPath:$dismLogPath")
         }
+        $report.BootNicPreparation = 'Applied; cold boot unverified'
     }
     else {
-        Write-Warning ">>> No -BootAdapterGuid supplied: skipping offline NIC installation."
-        Write-Warning "    The resulting image will almost certainly 0x7B INACCESSIBLE_BOOT_DEVICE over"
-        Write-Warning "    iSCSI, because the boot NIC is loaded but never PnP-installed. Re-run with"
-        Write-Warning "    -BootAdapterGuid {GUID} (from 'wmic nic get GUID,Name,ServiceName' on a machine"
-        Write-Warning "    where that NIC is live), or install via Setup-over-iBFT (see notes at end)."
+        Add-PxeBuildWarning $report 'No -BootAdapterGuid supplied: boot-NIC preparation is unverified. Staged drivers and service promotion do not establish first-boot compatibility.'
     }
 
     Write-Host ">>> Writing Boot Files (BCDBoot)..." -ForegroundColor Cyan
@@ -430,7 +451,7 @@ try {
     function Invoke-Bcd {
         param([string[]]$BcdArgs)
         & bcdedit /store "$bcdStore" @BcdArgs
-        if ($LASTEXITCODE -ne 0) { Write-Warning "    [!] bcdedit $($BcdArgs -join ' ') failed (exit $LASTEXITCODE)." }
+        if ($LASTEXITCODE -ne 0) { Add-PxeBuildWarning $report "    [!] bcdedit $($BcdArgs -join ' ') failed (exit $LASTEXITCODE)." }
     }
     Invoke-Bcd @('/set', '{default}', 'sos', 'on')
     Invoke-Bcd @('/set', '{default}', 'bootlog', 'yes')
@@ -440,7 +461,7 @@ try {
     Write-Host ">>> Injecting iSCSI and Network Boot Settings..." -ForegroundColor Cyan
     # Load the offline SYSTEM registry hive directly from the applied image
     $sysHivePath = Join-Path $winDir "System32\config\SYSTEM"
-    $tempHiveName = "VHDX_Temp_SYSTEM"
+    $tempHiveName = "VHDX_${buildId}_SYSTEM"
 
     # Fail fast on stale state from a prior aborted run, then load with an
     # exit-code check (reg.exe does not throw under PS7 by default).
@@ -451,11 +472,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "reg load of SYSTEM hive failed (exit $LASTEXITCODE)." }
     $sysHiveLoaded = $true
 
-    # Determine which control sets exist for mirroring
-    $controlSets = @("ControlSet001")
-    if (Test-Path "HKLM:\$tempHiveName\ControlSet002") {
-        $controlSets += "ControlSet002"
-    }
+    $controlSets = @(Get-ChildItem "HKLM:\$tempHiveName" | Where-Object PSChildName -match '^ControlSet\d{3}$' | Select-Object -ExpandProperty PSChildName)
+    if (-not $controlSets.Count) { throw 'No offline SYSTEM control sets found.' }
 
     # Index every .sys in the DriverStore ONCE. FileRepository holds thousands of
     # directories and the per-def recursive search was running ~45 times per
@@ -465,7 +483,8 @@ try {
     $sysIndex = @{}
     if (Test-Path $driverStorePath) {
         Get-ChildItem -Path $driverStorePath -Recurse -Filter *.sys -ErrorAction SilentlyContinue | ForEach-Object {
-            if (-not $sysIndex.ContainsKey($_.Name)) { $sysIndex[$_.Name] = $_ }
+            if (-not $sysIndex.ContainsKey($_.Name)) { $sysIndex[$_.Name] = [System.Collections.Generic.List[System.IO.FileInfo]]::new() }
+            $sysIndex[$_.Name].Add($_)
         }
     }
     $anyBootNic = $false
@@ -480,13 +499,14 @@ try {
         #    this list vs. earlier versions: MSiSCSI (a user-mode svchost service —
         #    Start=0 is invalid for it and breaks post-boot initiator management),
         #    Winsock (a config key, not a loadable driver), and netfs (does not
-        #    exist on Windows). The actual 0x7B fix is /Add-NetAdapter above.
+        #    exist on Windows). The actual boot path still needs hardware testing.
         $coreServices = @("iScsiPrt", "NDIS", "Tcpip", "NetBT")
         foreach ($service in $coreServices) {
             $regPath = "HKLM:\$tempHiveName\$cs\Services\$service"
             if (Test-Path $regPath) {
                 Set-ItemProperty -Path $regPath -Name "Start" -Value 0 -Type DWord
-                Set-ItemProperty -Path $regPath -Name "BootFlags" -Value 1 -Type DWord
+                $flags = (Get-ItemProperty -Path $regPath -Name BootFlags -ErrorAction SilentlyContinue).BootFlags
+                Set-ItemProperty -Path $regPath -Name "BootFlags" -Value ([int]$flags -bor 1) -Type DWord
                 Write-Host "  Promoted Core Stack: $service"
             }
         }
@@ -607,16 +627,22 @@ try {
             if (Test-Path $regPath) {
                 # In-box driver with existing service entry — promote to boot-start
                 Set-ItemProperty -Path $regPath -Name "Start" -Value 0 -Type DWord
-                Set-ItemProperty -Path $regPath -Name "BootFlags" -Value 1 -Type DWord
+                $flags = (Get-ItemProperty -Path $regPath -Name BootFlags -ErrorAction SilentlyContinue).BootFlags
+                Set-ItemProperty -Path $regPath -Name "BootFlags" -Value ([int]$flags -bor 1) -Type DWord
                 Write-Host "  Promoted NIC Driver: $svcName (in-box)"
                 $nicPromoted++; $anyBootNic = $true
             }
             elseif ($sysIndex.ContainsKey($sysName)) {
                 # Staged in DriverStore but no service yet — copy the .sys to
                 # System32\drivers and hand-create a boot-start service entry.
-                $sysFile = $sysIndex[$sysName]
+                $sysFile = Select-PxeDriverBinary -Candidates $sysIndex[$sysName].ToArray()
                 $destPath = Join-Path $bootDriverDir $sysFile.Name
-                if (-not (Test-Path $destPath)) {
+                if (Test-Path -LiteralPath $destPath) {
+                    if ((Get-FileHash -LiteralPath $destPath).Hash -ne (Get-FileHash -LiteralPath $sysFile.FullName).Hash) {
+                        throw "Boot binary $destPath differs from selected package $($sysFile.FullName); refusing to retain a mismatched driver."
+                    }
+                }
+                else {
                     Copy-Item $sysFile.FullName $destPath -Force
                 }
 
@@ -629,11 +655,27 @@ try {
                 Set-ItemProperty -Path $regPath -Name "BootFlags"    -Value 1 -Type DWord
                 Write-Host "  Promoted NIC Driver: $svcName (created boot-start service)"
                 $nicCreated++; $anyBootNic = $true
+                Add-PxeBuildWarning $report "Created fallback service $svcName from $($sysFile.FullName). INF/WDF/device installation and cold boot remain unverified."
             }
             # else: driver not in image — not an error (we promote the union of all
             # supported NICs; most won't be present for any given target).
         }
         Write-Host "  NIC summary ($cs): $nicPromoted in-box promoted, $nicCreated created from DriverStore." -ForegroundColor DarkGray
+
+        $auditServices = @($coreServices) + @($storageServices) + @($nicDriverDefs.Service) + @($bootAdapters.ServiceName)
+        foreach ($service in ($auditServices | Where-Object { $_ } | Select-Object -Unique)) {
+            $audit = Get-PxeServiceAudit -RegistryPath "HKLM:\$tempHiveName" -WindowsPath $winDir -ControlSet $cs -Service $service
+            if ($audit) {
+                $report.Services.Add($audit)
+                if (-not $audit.BinaryExists -or @($audit.StartOverride.Values | Where-Object { $_ -ne 0 }).Count) {
+                    Add-PxeBuildWarning $report "$cs/$service needs review: binary exists=$($audit.BinaryExists), StartOverride=$($audit.StartOverride | ConvertTo-Json -Compress)."
+                }
+            }
+            if ($service -in $bootAdapters.ServiceName -and
+                (-not $audit -or -not $audit.BinaryExists -or ($audit.Start -ne 0 -and -not ($audit.BootFlags -band 1)))) {
+                throw "Requested boot adapter service $service is missing a binary or boot-start configuration in $cs."
+            }
+        }
 
         # 4. SAN Policy — OfflineInternal (4): bring iSCSI boot disk online, leave others offline
         $partmgrParamsPath = "HKLM:\$tempHiveName\$cs\Services\partmgr\Parameters"
@@ -658,8 +700,7 @@ try {
     Write-Host "Disabled BitLocker automatic device encryption"
 
     if (-not $anyBootNic) {
-        Write-Warning "  No boot NIC driver was promoted or created from the image. Unless -BootAdapterGuid"
-        Write-Warning "  covers your NIC, this image will 0x7B INACCESSIBLE_BOOT_DEVICE over iSCSI."
+        Add-PxeBuildWarning $report 'No NIC from the fallback table was promoted. Check the requested adapter service and package in the build report.'
     }
 
     # Bypass TPM/SecureBoot/RAM checks (LabConfig) — not per-ControlSet
@@ -678,13 +719,15 @@ try {
 
     Write-Host ">>> Injecting OOBE Settings into Offline SOFTWARE Registry..." -ForegroundColor Cyan
     $softHivePath = Join-Path $winDir "System32\config\SOFTWARE"
-    $tempSoftName = "VHDX_Temp_SOFTWARE"
+    $tempSoftName = "VHDX_${buildId}_SOFTWARE"
     if (Test-Path "HKLM:\$tempSoftName") {
         throw "HKLM\$tempSoftName is already loaded (stale from a previous run). Unload it and retry."
     }
     reg load "HKLM\$tempSoftName" "$softHivePath" | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "reg load of SOFTWARE hive failed (exit $LASTEXITCODE)." }
     $softHiveLoaded = $true
+    $versionInfo = Get-ItemProperty "HKLM:\$tempSoftName\Microsoft\Windows NT\CurrentVersion"
+    $report.ServicedImageVersion = "$($versionInfo.CurrentBuildNumber).$($versionInfo.UBR)"
 
     # Remove requirement for an online Microsoft account (BypassNRO)
     $oobeRegPath = "HKLM:\$tempSoftName\Microsoft\Windows\CurrentVersion\OOBE"
@@ -756,23 +799,16 @@ try {
         New-Item -ItemType Directory -Path $setupScriptsPath -Force | Out-Null
     }
 
-    # Create a helper PowerShell script that SetupComplete.cmd will invoke.
-    # This avoids cmd.exe quoting issues with embedded PowerShell syntax.
-    $psHelperPath = Join-Path $setupScriptsPath "DisableNetPower.ps1"
-    $psHelperContent = @'
-Get-NetAdapter | ForEach-Object {
-    Set-NetAdapterPowerManagement -Name $_.Name -AllowComputerToTurnOffDevice Disabled -ErrorAction SilentlyContinue
-}
-'@
-    Set-Content -Path $psHelperPath -Value $psHelperContent -Encoding UTF8
+    # Keep the Windows PowerShell 5.1 runtime helper independently testable.
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'win11pxe\DisableNetPower.ps1') -Destination $setupScriptsPath
 
     $setupCompletePath = Join-Path $setupScriptsPath "SetupComplete.cmd"
     # Use proper cmd.exe quoting — invoke the helper .ps1 directly
     $cmdContent = @"
 @echo off
-REM Disable NIC power management on first boot and schedule for subsequent boots
-powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File "%~dp0DisableNetPower.ps1"
-schtasks /create /f /ru SYSTEM /sc onstart /tn "DisableNetPower" /tr "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\Windows\Setup\Scripts\DisableNetPower.ps1"
+REM Register the startup task and adjust supported settings without restarting NICs.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0DisableNetPower.ps1" -InstallStartupTask >> "%SystemRoot%\Logs\DisableNetPower-setup.log" 2>&1
+if errorlevel 1 exit /b 1
 del "%~f0"
 "@
     Set-Content -Path $setupCompletePath -Value $cmdContent -Encoding Ascii
@@ -781,30 +817,73 @@ del "%~f0"
     $success = $true
 }
 catch {
-    # Use Write-Host, not Write-Error: under $ErrorActionPreference='Stop' a
-    # Write-Error in the catch becomes a NEW terminating error and the failure
-    # banner below would never run.
+    $report.Failure = $_.Exception.Message
     Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
     if ($_.ScriptStackTrace) { Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray }
 }
 finally {
-    # Unload any hive still loaded from a mid-way throw BEFORE dismounting the VHD,
-    # otherwise the dismount detaches a volume with a dirty loaded hive (losing the
-    # registry edits) and leaves the hive locked until reboot, breaking the next run.
-    if ($sysHiveLoaded -and $tempHiveName) {
-        if (-not (Dismount-Hive $tempHiveName)) { Write-Warning "Could not unload SYSTEM hive ($tempHiveName); a reboot may be required before the next run." }
+    # Never detach a disk while one of our registry hives is still loaded.
+    foreach ($entry in @(@($sysHiveLoaded, $tempHiveName), @($softHiveLoaded, $tempSoftName))) {
+        if ($entry[0]) {
+            try {
+                if (-not (Dismount-Hive $entry[1])) { throw "Could not unload $($entry[1])." }
+            }
+            catch {
+                $success = $false
+                Add-PxeBuildWarning $report "$($_.Exception.Message) Retaining the temporary image at $workingPath."
+            }
+        }
     }
-    if ($softHiveLoaded -and $tempSoftName) {
-        if (-not (Dismount-Hive $tempSoftName)) { Write-Warning "Could not unload SOFTWARE hive ($tempSoftName); a reboot may be required before the next run." }
-    }
-    # Each dismount in its own guard so one failure cannot skip the others.
     if ($isoImage) {
-        try { Dismount-DiskImage -ImagePath $IsoPath | Out-Null } catch { Write-Warning "Dismount-DiskImage failed: $($_.Exception.Message)" }
+        try { Dismount-DiskImage -ImagePath $IsoPath -ErrorAction Stop | Out-Null }
+        catch {
+            $success = $false
+            Add-PxeBuildWarning $report "ISO cleanup failed: $($_.Exception.Message)"
+        }
     }
-    if ($mountedVhd) {
-        try { Dismount-VHD -Path $OutPath | Out-Null } catch { Write-Warning "Dismount-VHD failed: $($_.Exception.Message)" }
+    if ($vhdCreated) {
+        try {
+            if (($tempHiveName -and (Test-Path "HKLM:\$tempHiveName")) -or
+                ($tempSoftName -and (Test-Path "HKLM:\$tempSoftName"))) {
+                throw 'Offline registry hive still loaded; refusing to dismount.'
+            }
+            if ((Get-VHD -Path $workingPath -ErrorAction Stop).Attached) {
+                Dismount-VHD -Path $workingPath -ErrorAction Stop | Out-Null
+            }
+            if ((Get-VHD -Path $workingPath -ErrorAction Stop).Attached) { throw 'Temporary VHDX is still attached.' }
+        }
+        catch {
+            $success = $false
+            Add-PxeBuildWarning $report "VHDX cleanup failed: $($_.Exception.Message)"
+        }
+    }
+    foreach ($path in @($dismScratchDir, $driverTempPath, $updatesTempPath)) {
+        if ($path -and (Test-Path -LiteralPath $path)) {
+            Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }
+
+$report.FinishedUtc = [datetime]::UtcNow.ToString('o')
+if ($success) {
+    try {
+        $report.State = 'ReadyToPublish'
+        Publish-PxeImage -WorkingPath $workingPath -OutPath $OutPath -ReportPath $reportPath -Report $report
+    }
+    catch {
+        $success = $false
+        $report.Failure = $_.Exception.Message
+        Write-Host "Image publication failed: $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+if (-not $success) {
+    $report.State = 'Failed'
+    if ($reportPath) {
+        try { Write-PxeBuildReport $report $reportPath }
+        catch { Add-PxeBuildWarning $report "Could not save build report: $($_.Exception.Message)" }
+    }
+}
+if ($reportPath) { Write-Host "Build report: $reportPath" }
 
 if ($success) {
     Write-Host "==========================================================" -ForegroundColor Green
@@ -817,11 +896,8 @@ if ($success) {
     Write-Host " iqn.2026-02.lan.pxe:win11, create an ACL for the client"
     Write-Host " initiator IQN, and set ENABLE_WIN11_PXE=true in"
     Write-Host " update-pxe-images.sh."
-    if (-not $BootAdapterGuid) {
-        Write-Host ""
-        Write-Host " WARNING: built WITHOUT -BootAdapterGuid — this image will" -ForegroundColor Yellow
-        Write-Host " likely 0x7B over iSCSI. See the boot-NIC notes below." -ForegroundColor Yellow
-    }
+    Write-Host " Boot-NIC preparation: $($report.BootNicPreparation)" -ForegroundColor Yellow
+    Write-Host " Cold boot has not been validated. Review $($report.Warnings.Count) report warning(s)." -ForegroundColor Yellow
     Write-Host "==========================================================" -ForegroundColor Green
 }
 else {
@@ -832,35 +908,20 @@ else {
 }
 
 <#
-===============================================================================
- BOOT-NIC NOTES — why an offline image 0x7Bs over iSCSI, and the options
-===============================================================================
-A DISM-applied image has never run PnP, so its boot NIC exists only as a
-Services key — there is no Enum\PCI devnode, no Net-class instance, and no
-TCP/IP interface binding. winload LOADS the NIC driver, but the kernel can
-never BIND it to the hardware, so iScsiPrt cannot re-establish the iBFT session
-after ExitBootServices and the boot volume never arrives -> 0x7B.
+BOOT-NIC NOTES
+Windows can enumerate new hardware during first boot. Missing pre-existing Enum
+keys alone do not prove failure; iSCSI needs a working network/storage stack early
+enough to access the system volume. Staging a driver is not proof of that path.
 
-Confirm the diagnosis: during a failing boot, the iSCSI target log shows iPXE's
-login but NO second (Windows kernel) login.
+-BootAdapterGuid invokes the undocumented DISM /Add-NetAdapter operation using an
+adapter present on the machine running this script. Its GUID is session-specific,
+not a portable hardware identifier. Failures are fatal when explicitly requested.
+GUID-less builds are permitted with preparation marked unverified. Neither mode
+replaces a cold-boot test on the intended NIC, firmware and Windows release.
 
-This script implements OPTION 3 (chosen): the offline DISM /Add-NetAdapter verb
-that Windows Setup itself runs when it detects an iBFT. Pass -BootAdapterGuid
-with the boot NIC's adapter GUID (from 'wmic nic get GUID,Name,ServiceName' on a
-machine/WinPE where that NIC is live). It creates the offline interface, binds
-ms_tcpip/ms_tcpip6, and marks the NIC boot-critical.
-
-DEFERRED: auto-detecting/validating the correct adapter from hardware IDs is not
-yet implemented; the GUID must be supplied by hand. (Tracked as a TODO.)
-
-If /Add-NetAdapter is unavailable on your DISM build, use the most reliable
-alternative — install Windows by booting Setup over the LUN:
-  1. update-pxe-images.sh: add an entry that does
-       sanhook --drive 0x80 iscsi:192.168.1.11:::0:iqn.2026-02.lan.pxe:win11
-       (with 'set keep-san 1'), then wimboot a WinPE (ADK; DISM the client NIC
-       driver into boot.wim) plus the Win11 ISO.
-  2. Run setup.exe against the iSCSI disk. On 24H2+ media choose "Previous
-     version of setup" (the new setup UI crashes scanning iSCSI disks).
-  Setup detects the iBFT, runs /Add-NetAdapter itself, and the image just works.
-===============================================================================
+A target log containing only iPXE's login indicates a handoff problem, but does
+not distinguish missing NIC setup from driver, iBFT, routing or target failures.
+Use the per-build report and DISM log, and capture target-side login/error logs.
+Setup over an iBFT-attached LUN remains an alternative when offline preparation
+is insufficient; this script does not implement that provisioning workflow.
 #>
