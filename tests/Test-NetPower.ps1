@@ -81,3 +81,6 @@ try {
     Write-Output 'NIC power management regression tests: PASS'
 }
 finally { Remove-Item -LiteralPath $scratch -Recurse -Force }
+# Expected helper failures must not become the GitHub PowerShell runner's exit
+# status after every assertion passes. An assertion throw never reaches here.
+$global:LASTEXITCODE = 0
