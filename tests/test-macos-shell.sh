@@ -21,7 +21,7 @@ HOME="$TEST_HOME" CARGO_HOME="$TEST_HOME/custom cargo" GOPATH="$TEST_HOME/custom
     MAKEFLAGS='--jobserver-auth=3,4 -j' EDITOR=nano /bin/bash --noprofile --norc -c '
 set -eu
 # Check automatic defaults without inheriting runner/user overrides.
-unset ANDROID_SDK_ROOT USE_CCACHE
+unset ANDROID_SDK_ROOT USE_CCACHE BASH_SILENCE_DEPRECATION_WARNING
 . "$ROOT/files/macos/environment.sh"
 first=$PATH
 . "$ROOT/files/macos/environment.sh"
@@ -32,6 +32,7 @@ first=$PATH
 [ "$MAKEFLAGS" = "--jobserver-auth=3,4 -j" ]
 [ "$EDITOR" = nano ]
 [ "$USE_CCACHE" = 1 ]
+[ "$BASH_SILENCE_DEPRECATION_WARNING" = 1 ]
 case ":$PATH:" in *":$TEST_HOME/custom cargo/bin:"*) ;; *) exit 1 ;; esac
 case ":$PATH:" in *":$TEST_HOME/custom go/bin:"*) ;; *) exit 1 ;; esac
 case ":$PATH:" in *":$TEST_HOME/sdk with spaces/platform-tools:"*) ;; *) exit 1 ;; esac

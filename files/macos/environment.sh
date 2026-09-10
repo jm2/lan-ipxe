@@ -57,7 +57,8 @@ _workstation_environment() {
     fi
     : "${EDITOR:=vi}"
     : "${USE_CCACHE:=1}"
-    export EDITOR USE_CCACHE PATH
+    : "${BASH_SILENCE_DEPRECATION_WARNING:=1}"
+    export BASH_SILENCE_DEPRECATION_WARNING EDITOR USE_CCACHE PATH
 }
 _workstation_environment
 unset -f _workstation_environment _workstation_path_prepend
