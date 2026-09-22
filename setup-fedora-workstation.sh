@@ -114,7 +114,11 @@ CA_BUNDLE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
 # or @groups
 PKGS=(
   abattis-cantarell-fonts
+  alsa-lib-devel
   alsa-sof-firmware
+  autoconf
+  automake
+  avahi-devel
   balun
   bash-completion
   bc
@@ -133,10 +137,16 @@ PKGS=(
   cmake
   cockpit
   cockpit-files
+  cockpit-machines
+  cockpit-networkmanager
   cockpit-packagekit
   cockpit-podman
+  cockpit-selinux
+  cockpit-sosreport
   cockpit-storaged
+  cockpit-system
   code
+  colordiff
   cronie
   cups
   cups-pk-helper
@@ -151,12 +161,14 @@ PKGS=(
   efibootmgr
   elfutils-libelf-devel
   erofs-utils
+  ffmpeg-free-devel
   flatpak
   flex
   fuse-libs
   gcc
   gdb
   genisoimage
+  gettext-devel
   gh
   git
   git-lfs
@@ -170,6 +182,9 @@ PKGS=(
   gnome-shell-extension-system-monitor
   gnome-tweaks
   gnupg2
+  htop
+  iperf3
+  json-c-devel
   kernel-headers
   gnutls-devel
   golang
@@ -188,11 +203,26 @@ PKGS=(
   jq
   less
   libadwaita-devel
+  libasan
+  libconfuse-devel
+  libcurl-devel
+  libdecor-devel
+  libevent-devel
+  libgcrypt-devel
   libicu
   libmpc-devel
+  libplist-devel
+  libsodium-devel
+  libstdc++-devel
+  libtool
+  libubsan
+  libunistring-devel
   libva
   libva-utils
+  libwebsockets-devel
+  libxkbcommon-devel
   libxml2
+  libxml2-devel
   libxslt
   lld
   lldb
@@ -201,33 +231,47 @@ PKGS=(
   lz4
   lzop
   maven
+  meld
   mesa-vulkan-drivers
+  meson
   mokutil
   mpfr-devel
   mpv
   nano
   ncurses-devel
   NetworkManager
+  nodejs
+  npm
+  openal-soft-devel
   openssh-server
   openssl-devel
   openssl-libs
+  pacman
   pigz
   pipewire
   pipewire-alsa
+  pipewire-devel
   pipewire-pulseaudio
   pngcrush
+  protobuf-c-devel
   protobuf-compiler
+  pulseaudio-libs-devel
   python3-protobuf
   rhythmbox
+  rpm-build
+  rpmdevtools
   rsync
   ruby
   rust-analyzer
   rust
   rustfmt
+  rustup
   schedtool
   SDL-devel
   seahorse
   sing-box
+  sqlite
+  sqlite-devel
   squashfs-tools
   sudo
   system-config-printer
