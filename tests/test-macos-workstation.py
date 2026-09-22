@@ -411,6 +411,10 @@ class BootstrapTests(unittest.TestCase):
 
             bin_dir = Path(temporary) / 'bin'
             bin_dir.mkdir()
+            # Fake Apple Silicon too, so Linux CI reaches the version gate.
+            uname = bin_dir / 'uname'
+            uname.write_text('#!/bin/sh\ncase "$1" in -s) echo Darwin;; -m) echo arm64;; *) exec /usr/bin/uname "$@";; esac\n')
+            uname.chmod(0o755)
             sw_vers = bin_dir / 'sw_vers'
             for unsupported in ('25', '28'):
                 sw_vers.write_text(f'#!/bin/sh\necho {unsupported}.0\n')
