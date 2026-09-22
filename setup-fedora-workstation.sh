@@ -20,12 +20,16 @@
 # What it does, in order:
 #   1. signed third-party repos: VS Code, Claude Code, the jmsqrd/tributary
 #      and jmsqrd/balun coprs, RPM Fusion free+nonfree, Chrome, sing-box; on x86_64 also
-#      Microsoft (PowerShell) and the RPM Fusion nvidia-driver + steam
-#      repos. The abandoned Antigravity 1.x RPM repo/package and VSCodium are
-#      retired in favor of native Antigravity 2.0+ and VS Code.
+#      Microsoft (PowerShell), Plex Media Server, and the RPM Fusion
+#      nvidia-driver + steam repos. The abandoned Antigravity 1.x RPM
+#      repo/package and VSCodium are retired in favor of native Antigravity
+#      2.0+ and VS Code.
 #   2. CA-bundle symlinks at the Debian-style paths some tools hard-code
 #   3. the dnf package set, including native Chrome on both architectures
-#      (plus the x86_64-only set: i686 libs, PowerShell RPM, Steam)
+#      (plus the x86_64-only set: i686 libs, PowerShell RPM, Steam, Plex
+#      Media Server), then the latest Navidrome release RPM, checksummed from
+#      its GitHub release metadata, and OwnTone built into an RPM from its
+#      checksummed latest release tarball with files/rpm/owntone.spec
 #   4. Antigravity desktop 2.0+, Antigravity CLI, OpenCode, Codex CLI, and Zed
 #      using the latest native vendor artifacts/installers (checksummed from
 #      live upstream release metadata where upstream publishes digests)
@@ -57,6 +61,9 @@ GOOGLE_KEY_URL=https://dl.google.com/linux/linux_signing_key.pub
 MICROSOFT_KEY_URL=https://packages.microsoft.com/keys/microsoft.asc
 MICROSOFT_KEY_FINGERPRINT=BC528686B50D79E339D3721CEB3E94ADBE1229CF
 MICROSOFT_KEY_FILE=/etc/pki/rpm-gpg/MICROSOFT-RPM-GPG-KEY
+PLEX_KEY_URL=https://downloads.plex.tv/plex-keys/PlexSign.v2.key
+PLEX_KEY_FINGERPRINT=6EFFEB478A6559D75C7C4FE706C521790B9CFFDE
+PLEX_KEY_FILE=/etc/pki/rpm-gpg/PLEX-RPM-GPG-KEY
 CLAUDE_KEY_URL=https://downloads.claude.ai/keys/claude-code.asc
 CLAUDE_KEY_FINGERPRINT=31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE
 CLAUDE_KEY_FILE=/etc/pki/rpm-gpg/ANTHROPIC-CLAUDE-CODE-RPM-GPG-KEY
@@ -90,6 +97,9 @@ ZED_VERSION=
 ZED_URL=
 ZED_ARCHIVE_SHA256=
 ZED_RELEASE_API=https://api.github.com/repos/zed-industries/zed/releases/latest
+NAVIDROME_RELEASE_API=https://api.github.com/repos/navidrome/navidrome/releases/latest
+OWNTONE_RELEASE_API=https://api.github.com/repos/owntone/owntone-server/releases/latest
+OWNTONE_SPEC=${FILES}/rpm/owntone.spec
 SPEEDTEST_VERSION=1.2.0
 SPEEDTEST_ARCHIVE_SHA256_X86_64=5690596c54ff9bed63fa3732f818a05dbc2db19ad36ed68f21ca5f64d5cfeeb7
 SPEEDTEST_BINARY_SHA256_X86_64=31f1124c5ab8acdae6b9fe1741e704df420f9f2e7d429679fabe62075453c051
@@ -307,6 +317,7 @@ PKGS_X86_64=(
   libstdc++-devel.i686
   libva.i686
   mesa-vulkan-drivers.i686
+  plexmediaserver
   powershell
   readline-devel.i686
   steam
@@ -336,10 +347,15 @@ SERVICES=(
   crond.service
   gdm.service
   gnome-remote-desktop.service
+  navidrome.service
   NetworkManager-dispatcher.service
   NetworkManager-wait-online.service
   NetworkManager.service
+  owntone.service
   sshd.service
+)
+SERVICES_X86_64=(
+  plexmediaserver.service
 )
 
 log()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
@@ -638,14 +654,15 @@ fetch_release_document() {
 
 # Sets RESOLVED_VERSION/URL/SHA256 from one stable GitHub release asset. The
 # digest comes from GitHub's release metadata and is bound to the exact
-# browser_download_url selected here. Release immutability is reported but is
+# browser_download_url selected here. An optional fourth argument replaces the
+# default vX.Y.Z tag pattern; its first capture group is the version. Release immutability is reported but is
 # advisory because GitHub does not apply it retroactively to existing releases.
 RESOLVED_VERSION=
 RESOLVED_URL=
 RESOLVED_SHA256=
 resolve_github_release_asset() {
-  local repo=$1 api=$2 asset=$3 metadata line tag digest expected_prefix
-  local release_immutable
+  local repo=$1 api=$2 asset=$3 tag_pattern=${4:-'^v([0-9]+\.[0-9]+\.[0-9]+)$'}
+  local metadata line tag digest expected_prefix release_immutable
   metadata=$(fetch_release_document "${api}") \
     || die "could not query the latest ${repo} release"
   line=$(jq -er --arg asset "${asset}" '
@@ -659,7 +676,7 @@ resolve_github_release_asset() {
     ' <<<"${metadata}") \
     || die "latest ${repo} metadata is not one stable release with asset ${asset}"
   IFS=$'\t' read -r tag RESOLVED_URL digest release_immutable <<<"${line}"
-  [[ ${tag} =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]] \
+  [[ ${tag} =~ ${tag_pattern} ]] \
     || die "latest ${repo} release has an unsupported tag '${tag}'"
   RESOLVED_VERSION=${BASH_REMATCH[1]}
   asset=${asset//\{version\}/${RESOLVED_VERSION}}
@@ -1061,6 +1078,88 @@ install_powershell_arm64() {
   mkdir -p "${HOME}/.local/bin"
   ensure_symlink "${install_dir}/pwsh" "${command_link}"
   note "PowerShell ${RESOLVED_VERSION}: native ARM64 release installed"
+}
+
+installed_rpm_version() {
+  if rpm -q --quiet "$1"; then
+    rpm -q --qf '%{VERSION}' "$1"
+  fi
+}
+
+# rpm_version_at_least <installed> <release>: true when the installed dotted
+# numeric version is that release or newer, so converged hosts skip the work.
+rpm_version_at_least() {
+  [[ $1 =~ ^[0-9]+(\.[0-9]+)*$ ]] \
+    && [[ $(printf '%s\n' "$2" "$1" | sort -V | tail -1) == "$1" ]]
+}
+
+# Navidrome publishes no repository. Install its official release RPM only
+# after checking the digest GitHub publishes for that exact asset; DNF then
+# upgrades in place and the package scriptlet restarts a running service.
+install_navidrome() {
+  local rpm_file installed_version
+  resolve_github_release_asset navidrome/navidrome "${NAVIDROME_RELEASE_API}" \
+    "navidrome_{version}_linux_${NAVIDROME_ARCH}.rpm"
+  installed_version=$(installed_rpm_version navidrome)
+  if rpm_version_at_least "${installed_version}" "${RESOLVED_VERSION}"; then
+    note "Navidrome ${installed_version}: installed (latest release ${RESOLVED_VERSION})"
+    return 0
+  fi
+  rpm_file=${WORK_DIR}/navidrome_${RESOLVED_VERSION}_linux_${NAVIDROME_ARCH}.rpm
+  curl --proto '=https' --tlsv1.2 -fL --retry 3 \
+    -o "${rpm_file}" "${RESOLVED_URL}" \
+    || die "could not download Navidrome ${RESOLVED_VERSION}"
+  printf '%s  %s\n' "${RESOLVED_SHA256}" "${rpm_file}" | sha256sum -c - \
+    || die "Navidrome RPM checksum mismatch"
+  sudo dnf -y install "${rpm_file}"
+  installed_version=$(installed_rpm_version navidrome)
+  [[ ${installed_version} == "${RESOLVED_VERSION}" ]] \
+    || die "Navidrome ${RESOLVED_VERSION} did not install (found '${installed_version:-none}')"
+  note "Navidrome ${RESOLVED_VERSION}: installed from verified release RPM"
+}
+
+# OwnTone has no Fedora package or repository. Build the latest upstream
+# release tarball, checked against its GitHub digest, into an RPM with the
+# repository's spec, then let DNF upgrade in place. The build runs unprivileged
+# in WORK_DIR; only build dependencies and the finished RPM go through sudo.
+install_owntone() {
+  local topdir=${WORK_DIR}/rpmbuild installed_version spec tarball
+  local build_log=${WORK_DIR}/owntone-build.log built_rpms=()
+  resolve_github_release_asset owntone/owntone-server "${OWNTONE_RELEASE_API}" \
+    'owntone-{version}.tar.xz' '^([0-9]+\.[0-9]+(\.[0-9]+)?)$'
+  installed_version=$(installed_rpm_version owntone)
+  if rpm_version_at_least "${installed_version}" "${RESOLVED_VERSION}"; then
+    note "OwnTone ${installed_version}: installed (latest release ${RESOLVED_VERSION})"
+    return 0
+  fi
+  spec=${topdir}/SPECS/owntone.spec
+  tarball=${topdir}/SOURCES/owntone-${RESOLVED_VERSION}.tar.xz
+  install -d "${topdir}/SOURCES" "${topdir}/SPECS"
+  curl --proto '=https' --tlsv1.2 -fL --retry 3 \
+    -o "${tarball}" "${RESOLVED_URL}" \
+    || die "could not download OwnTone ${RESOLVED_VERSION}"
+  printf '%s  %s\n' "${RESOLVED_SHA256}" "${tarball}" | sha256sum -c - \
+    || die "OwnTone source checksum mismatch"
+  install -m 0644 -- "${OWNTONE_SPEC}" "${spec}"
+  sudo dnf -y builddep --define "owntone_version ${RESOLVED_VERSION}" "${spec}"
+  note "building OwnTone ${RESOLVED_VERSION} from source"
+  if ! rpmbuild -bb \
+      --define "_topdir ${topdir}" \
+      --define "owntone_version ${RESOLVED_VERSION}" \
+      --define 'debug_package %{nil}' \
+      "${spec}" >"${build_log}" 2>&1; then
+    tail -n 60 -- "${build_log}" >&2
+    die "OwnTone ${RESOLVED_VERSION} failed to build (build log tail above)"
+  fi
+  mapfile -t built_rpms < <(find "${topdir}/RPMS/${ARCH}" -maxdepth 1 -type f \
+    -name "owntone-${RESOLVED_VERSION}-*.${ARCH}.rpm")
+  (( ${#built_rpms[@]} == 1 )) \
+    || die "OwnTone build did not produce exactly one ${ARCH} package"
+  sudo dnf -y install "${built_rpms[0]}"
+  installed_version=$(installed_rpm_version owntone)
+  [[ ${installed_version} == "${RESOLVED_VERSION}" ]] \
+    || die "OwnTone ${RESOLVED_VERSION} did not install (found '${installed_version:-none}')"
+  note "OwnTone ${RESOLVED_VERSION}: built and installed from verified release"
 }
 
 reconcile_zed_entrypoints() {
@@ -2295,6 +2394,7 @@ case ${ARCH} in
     ANTIGRAVITY_CLI_MANIFEST_URL=${ANTIGRAVITY_CLI_MANIFEST_BASE}/linux_amd64.json
     ANTIGRAVITY_CLI_URL_SUFFIX=/linux-x64/cli_linux_x64.tar.gz
     ZED_ARCH=x86_64
+    NAVIDROME_ARCH=amd64
     if grep -qwi avx2 /proc/cpuinfo; then
       OPENCODE_ASSET=opencode-linux-x64.tar.gz
     else
@@ -2309,6 +2409,7 @@ case ${ARCH} in
     ANTIGRAVITY_CLI_MANIFEST_URL=${ANTIGRAVITY_CLI_MANIFEST_BASE}/linux_arm64.json
     ANTIGRAVITY_CLI_URL_SUFFIX=/linux-arm/cli_linux_arm64.tar.gz
     ZED_ARCH=aarch64
+    NAVIDROME_ARCH=arm64
     OPENCODE_ASSET=opencode-linux-arm64.tar.gz
     ;;
   *)
@@ -2386,7 +2487,7 @@ ensure_symlink -s "${CA_BUNDLE}" /etc/pki/tls/certs/ca-bundle.crt
 
 #--- 1b. Repositories, continued (x86_64 repo files overwrite the disabled
 #        ones RPM Fusion ships, so they come after that install) ------------
-log "Repositories (Chrome, x86_64 extras, Microsoft, sing-box)"
+log "Repositories (Chrome, x86_64 extras, Microsoft, Plex, sing-box)"
 put_file -s "${FILES}/etc/yum.repos.d/google-chrome.repo" /etc/yum.repos.d/google-chrome.repo
 import_rpm_key "${GOOGLE_KEY_URL}" linux-packages-keymaster@google.com
 if (( IS_X86_64 )); then
@@ -2394,6 +2495,11 @@ if (( IS_X86_64 )); then
     put_file -s "${FILES}/etc/yum.repos.d/${repo}.repo" "/etc/yum.repos.d/${repo}.repo"
   done
   put_file -s "${FILES}/etc/yum.repos.d/microsoft-prod.repo" /etc/yum.repos.d/microsoft-prod.repo
+  # Plex publishes x86_64 RPMs only; the key signs both metadata and packages.
+  import_rpm_key "${PLEX_KEY_URL}" "Plex Inc." \
+    "${PLEX_KEY_FINGERPRINT}" "${PLEX_KEY_FILE}"
+  put_file -s "${FILES}/etc/yum.repos.d/plex.repo" /etc/yum.repos.d/plex.repo
+  dnf_repo_enabled PlexTv || die "the Plex Media Server repository is not enabled"
 fi
 # sing-box: modern multi-protocol proxy (shadowsocks incl. 2022 ciphers).
 # Reconcile enabled state rather than treating any file as sufficient.
@@ -2427,6 +2533,12 @@ for required_command in base64 git jq od sha512sum; do
   command -v "${required_command}" >/dev/null \
     || die "release resolution requires ${required_command}"
 done
+
+log "Navidrome (verified official release RPM)"
+install_navidrome
+
+log "OwnTone (verified upstream release, built as an RPM)"
+install_owntone
 
 #--- 4. Native developer tools ---------------------------------------------
 if [[ ${ARCH} == aarch64 ]]; then
@@ -2531,6 +2643,9 @@ put_file -s "${FILES}/etc/bash.bashrc" /etc/profile.d/01-arch-prompt.sh
 # Enabled only, not started: they come up on the next boot (starting gdm
 # from inside a session would tear that session down)
 log "Services"
+if (( IS_X86_64 )); then
+  SERVICES+=("${SERVICES_X86_64[@]}")
+fi
 for unit in "${SERVICES[@]}"; do
   enable_unit "${unit}"
 done

@@ -550,9 +550,10 @@ test_fedora_github_metadata_rejection() {
     select_fedora_artifacts x86_64
     unset -f grep
     fetch_release_document() {
-      local draft=false prerelease=false digest url assets
+      local draft=false prerelease=false digest url assets tag=v1.2.3
       digest=sha256:$(printf 'e%.0s' {1..64})
-      url=https://github.com/anomalyco/opencode/releases/download/v1.2.3/opencode-linux-x64.tar.gz
+      [[ ${scenario} != unprefixed-tag ]] || tag=1.2.3
+      url=https://github.com/anomalyco/opencode/releases/download/${tag}/opencode-linux-x64.tar.gz
       assets="{\"name\":\"opencode-linux-x64.tar.gz\",\"browser_download_url\":\"${url}\",\"digest\":\"${digest}\"}"
       case ${scenario} in
         draft) draft=true ;;
@@ -560,10 +561,11 @@ test_fedora_github_metadata_rejection() {
         duplicate) assets="${assets},${assets}" ;;
         bad-digest) digest=sha512:$(printf 'e%.0s' {1..128}); assets="{\"name\":\"opencode-linux-x64.tar.gz\",\"browser_download_url\":\"${url}\",\"digest\":\"${digest}\"}" ;;
         off-origin) url=https://downloads.example.invalid/opencode-linux-x64.tar.gz; assets="{\"name\":\"opencode-linux-x64.tar.gz\",\"browser_download_url\":\"${url}\",\"digest\":\"${digest}\"}" ;;
+        unprefixed-tag) ;;
         *) fail "unknown GitHub metadata scenario: ${scenario}" ;;
       esac
-      printf '{"draft":%s,"prerelease":%s,"immutable":true,"tag_name":"v1.2.3","assets":[%s]}\n' \
-        "${draft}" "${prerelease}" "${assets}"
+      printf '{"draft":%s,"prerelease":%s,"immutable":true,"tag_name":"%s","assets":[%s]}\n' \
+        "${draft}" "${prerelease}" "${tag}" "${assets}"
     }
     resolve_github_release_asset anomalyco/opencode "${OPENCODE_RELEASE_API}" \
       "${OPENCODE_ASSET}"
@@ -805,6 +807,236 @@ test_fedora_converged_zed() (
   (( link_calls == 1 )) || fail 'converged Zed did not reconcile its command link'
   (( desktop_calls == 1 )) || fail 'converged Zed did not reconcile its launcher'
 )
+
+test_fedora_media_servers() (
+  load_helpers setup-fedora-workstation.sh
+  array_contains plexmediaserver "${PKGS_X86_64[@]}" \
+    || fail 'Fedora x86_64 package set omits Plex Media Server'
+  ! array_contains plexmediaserver "${PKGS[@]}" \
+    || fail 'Plex Media Server is requested on architectures Plex does not publish'
+  array_contains plexmediaserver.service "${SERVICES_X86_64[@]}" \
+    || fail 'Fedora x86_64 service set omits Plex Media Server'
+  array_contains navidrome.service "${SERVICES[@]}" \
+    || fail 'Fedora service set omits Navidrome'
+  array_contains owntone.service "${SERVICES[@]}" \
+    || fail 'Fedora service set omits OwnTone'
+  local spec=${REPO_ROOT}/files/rpm/owntone.spec
+  [[ ${OWNTONE_RELEASE_API} == https://api.github.com/repos/owntone/owntone-server/releases/latest \
+     && ${OWNTONE_SPEC} == "${FILES}/rpm/owntone.spec" && -f ${spec} ]] \
+    || fail 'OwnTone release source or spec payload is missing'
+  grep -Fqx 'Version: %{owntone_version}' "${spec}" \
+    || fail 'OwnTone spec does not take its version from the resolved release'
+  ! grep -Fq '%{name}.sysusers' "${spec}" \
+    || fail 'OwnTone spec depends on a sysusers file the release tarball lacks'
+  [[ ${PLEX_KEY_FINGERPRINT} =~ ^[[:xdigit:]]{40}$ \
+     && ${PLEX_KEY_FILE} == /etc/pki/rpm-gpg/* ]] \
+    || fail 'Plex repository signing key is not fingerprint-pinned'
+
+  local repo=${REPO_ROOT}/files/etc/yum.repos.d/plex.repo line
+  for line in '[PlexTv]' enabled=1 gpgcheck=1 repo_gpgcheck=1 sslverify=1 \
+    "gpgkey=file://${PLEX_KEY_FILE}"; do
+    grep -Fqx -- "${line}" "${repo}" || fail "plex.repo lacks ${line}"
+  done
+  grep -Eq '^baseurl=https://[^[:space:]]+$' "${repo}" \
+    || fail 'plex.repo does not use an HTTPS package source'
+
+  [[ ${NAVIDROME_RELEASE_API} == https://api.github.com/repos/navidrome/navidrome/releases/latest ]] \
+    || fail 'Navidrome latest-release metadata source is incorrect'
+  local test_arch expected_arch
+  for test_arch in x86_64 aarch64; do
+    case ${test_arch} in
+      x86_64)  expected_arch=amd64 ;;
+      aarch64) expected_arch=arm64 ;;
+    esac
+    select_fedora_artifacts "${test_arch}"
+    [[ ${NAVIDROME_ARCH} == "${expected_arch}" ]] \
+      || fail "${test_arch} selects unexpected Navidrome architecture ${NAVIDROME_ARCH}"
+  done
+)
+
+# Mocks Navidrome release metadata, the RPM database, the download, and DNF.
+# $1: installed version ('' when absent); $2: good or corrupt download.
+NAVIDROME_FIXTURE_RPM=navidrome_0.70.1_linux_amd64.rpm
+setup_navidrome_fixture() {
+  local digest
+  NAVIDROME_INSTALLED=$1
+  NAVIDROME_DOWNLOAD=$2
+  digest=$(printf 'navidrome fixture rpm\n' | sha256sum)
+  NAVIDROME_DIGEST=${digest%% *}
+  select_fedora_artifacts x86_64
+  WORK_DIR=${TEST_ROOT}/navidrome-${1:-absent}-$2/work
+  install -d "${WORK_DIR}"
+  fetch_release_document() {
+    [[ $1 == "${NAVIDROME_RELEASE_API}" ]] \
+      || fail "Navidrome resolver requested an unexpected URL: $1"
+    printf '{"draft":false,"prerelease":false,"immutable":true,"tag_name":"v0.70.1","assets":[{"name":"%s","browser_download_url":"https://github.com/navidrome/navidrome/releases/download/v0.70.1/%s","digest":"sha256:%s"}]}\n' \
+      "${NAVIDROME_FIXTURE_RPM}" "${NAVIDROME_FIXTURE_RPM}" "${NAVIDROME_DIGEST}"
+  }
+  rpm() {
+    case "$*" in
+      '-q --quiet navidrome') [[ -n ${NAVIDROME_INSTALLED} ]] ;;
+      '-q --qf %{VERSION} navidrome') printf '%s' "${NAVIDROME_INSTALLED}" ;;
+      *) fail "unexpected rpm call: $*" ;;
+    esac
+  }
+  curl() {
+    local output=
+    while (( $# )); do
+      if [[ $1 == -o ]]; then output=$2; shift 2; else shift; fi
+    done
+    [[ -n ${output} ]] || fail 'mock curl received no output path'
+    if [[ ${NAVIDROME_DOWNLOAD} == good ]]; then
+      printf 'navidrome fixture rpm\n' >"${output}"
+    else
+      printf 'deliberately corrupt rpm\n' >"${output}"
+    fi
+  }
+  sudo() {
+    [[ "$*" == "dnf -y install ${WORK_DIR}/${NAVIDROME_FIXTURE_RPM}" ]] \
+      || fail "unexpected privileged Navidrome call: $*"
+    NAVIDROME_INSTALLED=0.70.1
+  }
+}
+
+test_fedora_navidrome_install() (
+  load_helpers setup-fedora-workstation.sh
+  local installed
+  for installed in '' 0.63.2; do
+    setup_navidrome_fixture "${installed}" good
+    install_navidrome >/dev/null
+    [[ ${NAVIDROME_INSTALLED} == 0.70.1 ]] \
+      || fail "Navidrome ${installed:-absent} was not upgraded to the verified release"
+  done
+
+  for installed in 0.70.1 0.71.0; do
+    setup_navidrome_fixture "${installed}" good
+    curl() { fail "Navidrome ${installed} attempted a download"; }
+    sudo() { fail "Navidrome ${installed} attempted a privileged mutation"; }
+    install_navidrome >/dev/null
+  done
+)
+
+test_fedora_navidrome_checksum_rejection() {
+  local rc=0
+  (
+    load_helpers setup-fedora-workstation.sh
+    setup_navidrome_fixture 0.63.2 corrupt
+    # A distinct status keeps a reached DNF install from passing as die's 1.
+    sudo() { exit 3; }
+    install_navidrome
+  ) >/dev/null 2>&1 || rc=$?
+  [[ ${rc} == 1 ]] || fail 'Fedora accepted a corrupt Navidrome RPM'
+}
+
+# Mocks OwnTone release metadata, the RPM database, the source download, DNF,
+# and rpmbuild. $1: installed version ('' when absent); $2: good, corrupt, or
+# broken (the build fails).
+setup_owntone_fixture() {
+  local digest
+  OWNTONE_INSTALLED=$1
+  OWNTONE_MODE=$2
+  digest=$(printf 'owntone fixture source\n' | sha256sum)
+  OWNTONE_DIGEST=${digest%% *}
+  select_fedora_artifacts x86_64
+  OWNTONE_SPEC=${REPO_ROOT}/files/rpm/owntone.spec
+  WORK_DIR=${TEST_ROOT}/owntone-${1:-absent}-$2/work
+  OWNTONE_CALLS=${WORK_DIR}/calls
+  # install_owntone captures rpmbuild output; keep mock assertions visible.
+  exec 9>&2
+  install -d "${WORK_DIR}"
+  : >"${OWNTONE_CALLS}"
+  fetch_release_document() {
+    [[ $1 == "${OWNTONE_RELEASE_API}" ]] \
+      || fail "OwnTone resolver requested an unexpected URL: $1"
+    printf '{"draft":false,"prerelease":false,"immutable":true,"tag_name":"29.4","assets":[{"name":"owntone-29.4.tar.xz","browser_download_url":"https://github.com/owntone/owntone-server/releases/download/29.4/owntone-29.4.tar.xz","digest":"sha256:%s"}]}\n' \
+      "${OWNTONE_DIGEST}"
+  }
+  rpm() {
+    case "$*" in
+      '-q --quiet owntone') [[ -n ${OWNTONE_INSTALLED} ]] ;;
+      '-q --qf %{VERSION} owntone') printf '%s' "${OWNTONE_INSTALLED}" ;;
+      *) fail "unexpected rpm call: $*" ;;
+    esac
+  }
+  curl() {
+    local output=
+    while (( $# )); do
+      if [[ $1 == -o ]]; then output=$2; shift 2; else shift; fi
+    done
+    [[ ${output} == "${WORK_DIR}/rpmbuild/SOURCES/owntone-29.4.tar.xz" ]] \
+      || fail "OwnTone source downloaded to unexpected path: ${output}"
+    if [[ ${OWNTONE_MODE} == corrupt ]]; then
+      printf 'deliberately corrupt source\n' >"${output}"
+    else
+      printf 'owntone fixture source\n' >"${output}"
+    fi
+  }
+  sudo() {
+    local spec=${WORK_DIR}/rpmbuild/SPECS/owntone.spec
+    case "$*" in
+      "dnf -y builddep --define owntone_version 29.4 ${spec}")
+        cmp -s -- "${OWNTONE_SPEC}" "${spec}" \
+          || fail 'OwnTone build dependencies were not read from the repository spec'
+        ;;
+      "dnf -y install ${WORK_DIR}/rpmbuild/RPMS/x86_64/owntone-29.4-1.fc44.x86_64.rpm")
+        OWNTONE_INSTALLED=29.4
+        ;;
+      *) fail "unexpected privileged OwnTone call: $*" ;;
+    esac
+    printf 'sudo %s\n' "$3" >>"${OWNTONE_CALLS}"
+  }
+  rpmbuild() {
+    local topdir=${WORK_DIR}/rpmbuild
+    [[ "$*" == "-bb --define _topdir ${topdir} --define owntone_version 29.4 --define debug_package %{nil} ${topdir}/SPECS/owntone.spec" ]] \
+      || fail "unexpected rpmbuild call: $*" 2>&9
+    [[ -f ${topdir}/SOURCES/owntone-29.4.tar.xz ]] \
+      || fail 'rpmbuild ran without the verified source tarball' 2>&9
+    printf 'rpmbuild\n' >>"${OWNTONE_CALLS}"
+    [[ ${OWNTONE_MODE} != broken ]] || return 1
+    install -d "${topdir}/RPMS/x86_64"
+    : >"${topdir}/RPMS/x86_64/owntone-29.4-1.fc44.x86_64.rpm"
+    : >"${topdir}/RPMS/x86_64/owntone-debugsource-29.4-1.fc44.x86_64.rpm"
+  }
+}
+
+test_fedora_owntone_install() (
+  load_helpers setup-fedora-workstation.sh
+  local installed
+  for installed in '' 29.3; do
+    setup_owntone_fixture "${installed}" good
+    install_owntone >/dev/null
+    [[ ${OWNTONE_INSTALLED} == 29.4 ]] \
+      || fail "OwnTone ${installed:-absent} was not upgraded to the verified release"
+    [[ $(<"${OWNTONE_CALLS}") == $'sudo builddep\nrpmbuild\nsudo install' ]] \
+      || fail "OwnTone ${installed:-absent} ran an unexpected build sequence"
+  done
+
+  for installed in 29.4 30.0; do
+    setup_owntone_fixture "${installed}" good
+    curl() { fail "OwnTone ${installed} attempted a download"; }
+    sudo() { fail "OwnTone ${installed} attempted a privileged mutation"; }
+    rpmbuild() { fail "OwnTone ${installed} attempted a rebuild"; }
+    install_owntone >/dev/null
+  done
+)
+
+test_fedora_owntone_rejection() {
+  local mode=$1 rc=0
+  (
+    load_helpers setup-fedora-workstation.sh
+    setup_owntone_fixture 29.3 "${mode}"
+    # A distinct status keeps a reached mutation from passing as die's 1.
+    case ${mode} in
+      corrupt)
+        sudo() { exit 3; }
+        rpmbuild() { exit 3; }
+        ;;
+      broken) sudo() { [[ $3 == builddep ]] || exit 3; } ;;
+    esac
+    install_owntone
+  ) >/dev/null 2>&1 || rc=$?
+  [[ ${rc} == 1 ]] || fail "Fedora installed OwnTone after a ${mode} source/build (rc=${rc})"
+}
 
 test_fedora_checksum_rejection() {
   local product=$1 rc=0
@@ -1105,7 +1337,7 @@ main() {
   printf 'PASS Fedora optional/explicit Antigravity rollout parsing\n'
   test_fedora_r8152_release_resolution
   printf 'PASS Fedora latest r8152 release-to-commit binding\n'
-  for scenario in draft prerelease duplicate bad-digest off-origin; do
+  for scenario in draft prerelease duplicate bad-digest off-origin unprefixed-tag; do
     test_fedora_github_metadata_rejection "${scenario}"
   done
   for scenario in legacy-desktop-version wrong-desktop-arch \
@@ -1121,6 +1353,17 @@ main() {
   printf 'PASS Fedora verified native OpenCode convergence\n'
   test_fedora_converged_zed
   printf 'PASS Fedora verified native Zed convergence\n'
+  test_fedora_media_servers
+  printf 'PASS Fedora Plex/Navidrome/OwnTone sources, services, spec, and artifact selection\n'
+  test_fedora_navidrome_install
+  printf 'PASS Fedora verified Navidrome RPM install/upgrade/convergence\n'
+  test_fedora_navidrome_checksum_rejection
+  printf 'PASS Fedora corrupt Navidrome RPM rejection\n'
+  test_fedora_owntone_install
+  printf 'PASS Fedora verified OwnTone build/install/convergence\n'
+  test_fedora_owntone_rejection corrupt
+  test_fedora_owntone_rejection broken
+  printf 'PASS Fedora corrupt-source and failed-build OwnTone rejection\n'
   test_fedora_checksum_rejection desktop
   test_fedora_checksum_rejection cli
   test_fedora_checksum_rejection opencode

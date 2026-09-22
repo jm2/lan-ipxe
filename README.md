@@ -209,7 +209,7 @@ and start `cockpit.socket` for access at `https://localhost:9090`.
   Dash to Dock from the AUR, and the bundled System Monitor extension with `libgtop`.
 - `setup-fedora-workstation.sh` — run as your normal user; Fedora 41+ (dnf5). Adds the
   signed third-party repos (`files/etc/yum.repos.d/`, the Tributary/Balun coprs, RPM Fusion,
-  Microsoft VS Code, Chrome, Claude Code, sing-box; PowerShell/NVIDIA/Steam repos on
+  Microsoft VS Code, Chrome, Claude Code, sing-box; PowerShell/NVIDIA/Steam/Plex repos on
   x86_64), installs the dnf and flatpak sets (plus the x86_64-only 32-bit/Steam
   extras), applies available DNF/Flatpak updates, and installs Zed plus native AI tools.
   Both x86_64 and aarch64 are supported, including Fedora Asahi's 16K kernel variant.
@@ -217,6 +217,12 @@ and start `cockpit.socket` for access at `https://localhost:9090`.
   confirmation; there is no separate user-cache group query to block on hidden
   repository-key prompts. Chrome and GitHub CLI are installed on both architectures;
   ARM64 PowerShell uses Microsoft's checksum-verified release archive.
+  Media servers: Plex Media Server comes from Plex's signed repository (x86_64 only;
+  Plex publishes no aarch64 RPM), Navidrome from its latest GitHub release RPM, and
+  OwnTone from its latest release tarball, built unprivileged into an RPM with
+  `files/rpm/owntone.spec`. Navidrome and OwnTone downloads are checked against the
+  SHA-256 digests GitHub publishes, and both are skipped when the installed version is
+  already current. All three services are enabled.
   Installs `dnf5-plugin-automatic` and enables `dnf5-automatic.timer` immediately,
   with the controller setup's `apply_updates = yes` and `reboot = when-needed`
   policy in `/etc/dnf/automatic.conf`.
