@@ -44,7 +44,6 @@ Core parity is default. Full contains the additional heavy developer and optiona
 | `lzop` (F) | core | Homebrew lzop |
 | `mpv` (A/F) | core | Homebrew mpv |
 | `nano` (A/F) | core | Homebrew nano |
-| `opencode` (A) | core | Homebrew opencode |
 | `openssh` (A) | core | Homebrew openssh |
 | `pigz` (F) | core | Homebrew pigz |
 | `pngcrush` (F) | core | Homebrew pngcrush |
@@ -63,6 +62,7 @@ Core parity is default. Full contains the additional heavy developer and optiona
 | `yt-dlp` (A) | core | Homebrew yt-dlp |
 | `zip` (F) | core | Homebrew zip |
 | `antigravity-cli` (A), `claude-code` (A/F), `ookla-speedtest-bin` (A), `openai-codex` (A), `powershell` (F), `powershell-bin` (A) | core | Official native CLI; owner-aware reconciliation (Ookla presence-only) |
+| `opencode` (A) | core | opencode.ai `latest` CLI feed (same channel as the OpenCode desktop app) in `~/.opencode/bin`, linked into `~/.local/bin`; OpenCode desktop via the `opencode-desktop` cask |
 | `balun` (F), `balun-bin` (A), `tributary` (F), `tributary-bin` (A) | core | Verified jm2 release app; preserve local source checkouts |
 | `gnome-icon-theme` (A), `gnome-icon-theme-symbolic` (A) | core | adwaita-icon-theme; native desktop appearance managed separately |
 | `transmission` (F), `transmission-daemon` (F), `transmission-gtk` (F), `transmission-remote-gtk` (F) | core | transmission-cli; no daemon enablement or Linux GTK service UI |

@@ -26,7 +26,6 @@
       "python",
       "go",
       "rustup",
-      "opencode",
       "bison",
       "flex",
       "gperf",
@@ -141,6 +140,13 @@
       "id": "com.anthropic.claudefordesktop",
       "profile": "core",
       "cask": "claude"
+    },
+    {
+      "name": "OpenCode",
+      "app": "OpenCode.app",
+      "id": "ai.opencode.desktop",
+      "profile": "core",
+      "cask": "opencode-desktop"
     },
     {
       "name": "Zed",
@@ -460,6 +466,31 @@
       "alternatives": [
         "org.libsdl.Maelstrom"
       ]
+    }
+  ],
+  "feed_clis": [
+    {
+      "name": "OpenCode CLI",
+      "command": "opencode",
+      "feed": "https://opencode.ai/update/api/latest/cli/opencode/",
+      "asset": "opencode-darwin-arm64.zip",
+      "url_prefix": "https://opencode.ai/files/bin/",
+      "url_suffix": "/opencode-darwin-arm64.zip",
+      "member": "opencode",
+      "path": ".opencode/bin/opencode",
+      "team": "5NZ4Q7NXJ4",
+      "homebrew": ["formula", "opencode"]
+    },
+    {
+      "name": "Antigravity CLI",
+      "command": "agy",
+      "feed": "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/darwin_arm64.json",
+      "url_prefix": "https://storage.googleapis.com/antigravity-public/antigravity-cli/",
+      "url_suffix": "/darwin-arm/cli_mac_arm64.tar.gz",
+      "member": "antigravity",
+      "path": ".local/bin/agy",
+      "team": "EQHXZ8M8AV",
+      "homebrew": ["cask", "antigravity-cli"]
     }
   ],
   "exceptions": [

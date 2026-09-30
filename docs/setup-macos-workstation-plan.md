@@ -49,7 +49,7 @@ Application/tool parity, with **W/F/A** denoting active Windows/Fedora/Arch inte
 | VS Code | W/F/A; old VSCodium retired | Installed; ten extensions; no `code` on login PATH | Core; expose CLI and merge observed editor settings. No migration needed for absent VSCodium. |
 | Antigravity desktop/CLI | W/F/A; legacy 1.x replaced | Desktop 2.12.2; two `agy` copies | Core; detect v2 identity and reconcile one public CLI. Do not install the legacy IDE. |
 | Claude Code / Codex CLI | W/F/A | Native standalone installs | Core; retain native CLI owners and desktop Claude. Preserve the existing Codex desktop identity. |
-| OpenCode / Zed | W/F/A | Absent | Core: Homebrew OpenCode and the Zed cask. |
+| OpenCode / Zed | W/F/A | Absent | Core: OpenCode CLI from the opencode.ai `latest` feed (matching the desktop app's channel), the `opencode-desktop` cask, and the Zed cask. |
 | Git / GitHub CLI | W/F/A; GitHub Desktop W; Git LFS F | Apple Git and Homebrew `gh`; Desktop/LFS absent | Core Homebrew Git, Git LFS and gh. GitHub Desktop is an optional full-profile GUI. No identity/auth provisioning. |
 | Python | Latest stable Python resolved on W; Python tooling/dependencies F/A | CLT and Brew Python coexist | Core explicitly requests current stable Homebrew Python and establishes deliberate interactive PATH precedence; preserve Apple tool paths. |
 | Rust | W rustup; F/A distro toolchain | Brew rustup, stable ARM64 compiler | Core rustup with stable native target and rustfmt/clippy/rust-analyzer. No duplicate Homebrew rust compiler owner. |
@@ -90,7 +90,7 @@ The final manifest must map every active Fedora/Arch CLI or build-tool entry to 
 | --- | --- |
 | Shell and general CLI | `bash-completion` for Apple Bash 3.2, `bash-preexec`, `bc`, `colordiff`, `dos2unix`, `htop`, `less`, `nano`, `screen`, `tmux`, `tree`, `vim` |
 | Downloads, version control, remote clients | `curl`, `wget`, `rsync`, `git`, `git-lfs`, `gh`, `openssh`, `gnupg` |
-| Languages and developer agents | current stable Homebrew Python, `go`, `rustup` and native stable Rust/components, `opencode`, native Codex/Claude Code/Antigravity CLI, official PowerShell. Node may arrive as an agent/editor dependency; do not install duplicate owners. |
+| Languages and developer agents | current stable Homebrew Python, `go`, `rustup` and native stable Rust/components, native OpenCode/Codex/Claude Code/Antigravity CLI, official PowerShell. Node may arrive as an agent/editor dependency; do not install duplicate owners. |
 | Build tools | Apple CLT/clang/LLDB, `bison`, `flex`, `gperf`, `cmake`, `ninja`, `ccache`, `pkgconf`, `texinfo`. Additional compilers/linkers/code-generation stacks move to full. |
 | Archives, images and media CLI | `cdrtools`, `dtc`, `erofs-utils`, `hfsutils`, `hivex`, `rpm`, `gnu-tar`, `zip`, `unar`, `lz4`, `lzop`, `pigz`, `squashfs`, `imagemagick`, `pngcrush`, `mpv`, `yt-dlp`, `transmission-cli` |
 | Service-capable CLI tools | `sing-box` in core without configuring a tunnel or starting a daemon. Ollama moves to full; no model downloads or automatic service enablement. |
