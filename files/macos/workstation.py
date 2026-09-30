@@ -703,15 +703,21 @@ class Workstation:
 
     def feed_release(self, cli):
         data = json.loads(self.fetch(cli['feed']))
+        # attempt() contains RuntimeError, not the TypeError a wrongly shaped feed would raise.
+        def mapping(value):
+            if not isinstance(value, dict):
+                raise RuntimeError('Malformed release feed for ' + cli['name'])
+            return value
+        mapping(data)
         if cli.get('asset'):
             # opencode.ai distribution feed: the channel the desktop app also follows.
             if data.get('channel') != 'latest' or not data.get('active'):
                 raise Deferred('Inactive or unexpected release channel for ' + cli['name'])
-            entry = data['metadata']['files'][cli['asset']]
-            url, algorithm, digest = entry['url'], 'sha256', entry['sha256']
+            entry = mapping(mapping(mapping(data.get('metadata')).get('files')).get(cli['asset']))
+            url, algorithm, digest = entry.get('url'), 'sha256', entry.get('sha256')
         else:
-            url, algorithm, digest = data['url'], 'sha512', data['sha512']
-        version = data['version']
+            url, algorithm, digest = data.get('url'), 'sha512', data.get('sha512')
+        version = data.get('version')
         if not isinstance(version, str) or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version):
             raise RuntimeError('Invalid release version for ' + cli['name'])
         stem = cli['url_prefix'] + version
