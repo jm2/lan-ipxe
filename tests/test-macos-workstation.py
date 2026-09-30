@@ -233,8 +233,9 @@ class ConfigurationTests(unittest.TestCase):
             check(lambda top, entry: entry.update(url='https://downloads.example.invalid/1.2.14' + cli['url_suffix']), RuntimeError)
             check(lambda top, entry: top.update(version='1.2.1'), RuntimeError)
             check(lambda top, entry: entry.update({'sha256' if cli.get('asset') else 'sha512': ''}), w.Deferred)
-            malformed = [[], {'channel': 'latest', 'active': True, 'metadata': []},
-                         {'channel': 'latest', 'active': True, 'metadata': {'files': {cli.get('asset'): 'x'}}}]
+            malformed = [[]] + ([{'channel': 'latest', 'active': True, 'metadata': []},
+                                 {'channel': 'latest', 'active': True, 'metadata': {'files': {cli['asset']: 'x'}}}]
+                                if cli.get('asset') else [])
             for body in malformed:
                 self.obj.fetch = lambda *a, b=body: json.dumps(b).encode()
                 with self.assertRaisesRegex(RuntimeError, 'Malformed release feed'):
