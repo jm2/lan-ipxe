@@ -18,11 +18,13 @@ import shutil
 import signal
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import urllib.parse
 import urllib.request
 import uuid
+import zipfile
 
 PAYLOAD = Path(__file__).resolve().parent
 
@@ -202,6 +204,31 @@ def yamagi_data_root(home, environment):
     if legacy.is_dir():
         return legacy
     return Path(environment.get('XDG_DATA_HOME', str(home / '.local/share'))) / 'YamagiQ2'
+
+
+def extract_member(archive, member, destination):
+    """Copy one named regular file out of a zip or tar.gz; archive paths are never trusted."""
+    try:
+        _extract_member(archive, member, destination)
+    except (tarfile.TarError, zipfile.BadZipFile) as exc:
+        raise RuntimeError('Unreadable archive: ' + str(exc)) from None
+
+
+def _extract_member(archive, member, destination):
+    if zipfile.is_zipfile(archive):
+        with zipfile.ZipFile(archive) as bundle:
+            info = bundle.getinfo(member)
+            if info.is_dir() or (info.external_attr >> 16) & 0o170000 == 0o120000:
+                raise RuntimeError('Archive member is not a regular file: ' + member)
+            with bundle.open(info) as source, open(destination, 'wb') as target:
+                shutil.copyfileobj(source, target)
+        return
+    with tarfile.open(archive, 'r:gz') as bundle:
+        info = bundle.getmember(member)
+        if not info.isfile():
+            raise RuntimeError('Archive member is not a regular file: ' + member)
+        with bundle.extractfile(info) as source, open(destination, 'wb') as target:
+            shutil.copyfileobj(source, target)
 
 
 def power_values(text):
@@ -652,19 +679,14 @@ class Workstation:
         if self.preview:
             self.emit('CURRENT' if existing else 'DRIFT', name, 'native CLI; no execution in preview'); return
         if existing:
-            if self.args.no_upgrade or name == 'agy':
+            if self.args.no_upgrade:
                 self.emit('CURRENT', name, 'existing owner retained'); return
             target = existing.resolve()
             owned = (name == 'codex' and str(target).startswith(str(self.home / '.codex/packages/standalone/releases') + '/')) or (
                 name == 'claude' and str(target).startswith(str(self.home / '.local/share/claude/versions') + '/'))
             if not owned:
                 self.emit('CURRENT', name, 'other installer owner retained'); return
-        if name == 'agy':
-            self.package('antigravity-cli', 'cask')
-            if not (self.prefix / 'bin/agy').exists():
-                raise RuntimeError('Antigravity CLI command missing')
-            return
-        url = {'codex': 'https://chatgpt.com/codex/install.sh', 'claude': 'https://claude.ai/install.sh'}[name]
+        url ={'codex': 'https://chatgpt.com/codex/install.sh', 'claude': 'https://claude.ai/install.sh'}[name]
         with tempfile.TemporaryDirectory(prefix='macos-cli-') as temporary:
             installer = Path(temporary) / 'install.sh'
             self.fetch(url, installer)
@@ -678,6 +700,92 @@ class Workstation:
         if not path.exists() or not os.access(path, os.X_OK):
             raise RuntimeError(name + ' native installation did not produce a command')
         self.emit('CHANGED', name, 'official native installer (upstream verifies release checksums)')
+
+    def feed_release(self, cli):
+        data = json.loads(self.fetch(cli['feed']))
+        if cli.get('asset'):
+            # opencode.ai distribution feed: the channel the desktop app also follows.
+            if data.get('channel') != 'latest' or not data.get('active'):
+                raise Deferred('Inactive or unexpected release channel for ' + cli['name'])
+            entry = data['metadata']['files'][cli['asset']]
+            url, algorithm, digest = entry['url'], 'sha256', entry['sha256']
+        else:
+            url, algorithm, digest = data['url'], 'sha512', data['sha512']
+        version = data['version']
+        if not isinstance(version, str) or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version):
+            raise RuntimeError('Invalid release version for ' + cli['name'])
+        stem = cli['url_prefix'] + version
+        # The separator check keeps 1.2.1 from matching a 1.2.14 URL.
+        if not (isinstance(url, str) and url.startswith(stem) and url[len(stem):len(stem) + 1] in ('-', '/')
+                and url.endswith(cli['url_suffix']) and '..' not in url):
+            raise RuntimeError('Unexpected download origin for ' + cli['name'])
+        length = {'sha256': 64, 'sha512': 128}[algorithm]
+        if not isinstance(digest, str) or not re.fullmatch('[0-9a-fA-F]{%d}' % length, digest):
+            raise Deferred(cli['name'] + ' release lacks ' + algorithm.upper())
+        return version, url, algorithm, digest.lower()
+
+    def verify_binary(self, binary, cli, version):
+        if 'arm64' not in self.command(['/usr/bin/file', '-b', binary]).stdout:
+            raise Deferred('Native ARM64 executable not verified for ' + cli['name'])
+        self.command(['/usr/bin/codesign', '--verify', '--strict', binary])
+        details = self.command(['/usr/bin/codesign', '-dv', '--verbose=4', binary]).stderr
+        if 'TeamIdentifier=' + cli['team'] not in details:
+            raise RuntimeError('Unexpected signing team for ' + cli['name'])
+        reported = self.command([binary, '--version']).stdout.split()
+        if not reported or reported[-1].lstrip('v') != version:
+            raise RuntimeError(cli['name'] + ' reported an unexpected version')
+
+    def feed_cli(self, cli):
+        path = self.home / cli['path']
+        public = self.home / '.local/bin' / cli['command']
+        kind, legacy = cli['homebrew']
+        superseded = self.formula_installed(legacy) if kind == 'formula' else (self.prefix / 'Caskroom' / legacy / '.metadata').is_dir()
+        if path.is_symlink():
+            raise Deferred('Install path is a symlink; preserve and reconcile manually: ' + str(path))
+        if self.preview:
+            self.emit('CURRENT' if path.exists() else 'DRIFT', cli['name'], 'vendor release feed; no network or execution in preview')
+        elif path.exists() and self.args.no_upgrade:
+            self.emit('CURRENT', cli['name'], 'existing install retained')
+        else:
+            self.feed_install(cli, path)
+        if path != public and path.exists():
+            self.link(public, path)
+        if superseded:
+            # Setup never removes packages; ~/.local/bin already shadows this copy.
+            raise Deferred(f'Superseded Homebrew copy remains; run: brew uninstall --{kind} {legacy}')
+
+    def feed_install(self, cli, path):
+        receipt = self.receipts.get('clis', {}).get(cli['command'], {})
+        owned = receipt.get('path') == str(path)
+        version, url, algorithm, digest = self.feed_release(cli)
+        if owned and path.is_file() and receipt.get('version') == version and receipt.get('digest') == digest \
+                and hashlib.sha256(path.read_bytes()).hexdigest() == receipt.get('executable_sha256'):
+            self.emit('CURRENT', cli['name'], version); return
+        with tempfile.TemporaryDirectory(prefix='macos-feed-cli-') as temporary:
+            folder = Path(temporary)
+            archive = folder / Path(urllib.parse.urlparse(url).path).name
+            self.fetch(url, archive)
+            if hashlib.new(algorithm, archive.read_bytes()).hexdigest() != digest:
+                raise RuntimeError(cli['name'] + ' archive ' + algorithm.upper() + ' mismatch')
+            binary = folder / ('extracted-' + cli['member'])
+            extract_member(archive, cli['member'], binary)
+            binary.chmod(0o755)
+            self.verify_binary(binary, cli, version)
+            executable = hashlib.sha256(binary.read_bytes()).hexdigest()
+            present = path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == executable
+            if path.exists() and not owned and not present:
+                raise Deferred('Existing ' + str(path) + ' has a different owner; preserve and reconcile manually')
+            if not present:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                staged = path.with_name('.' + path.name + '.' + uuid.uuid4().hex)
+                try:
+                    shutil.copyfile(binary, staged); staged.chmod(0o755); os.replace(staged, path)
+                finally:
+                    if staged.exists():
+                        staged.unlink()
+        self.receipts.setdefault('clis', {})[cli['command']] = {'version': version, 'url': url, 'digest': digest,
+            'path': str(path), 'executable_sha256': executable}
+        self.emit('CURRENT' if present else 'CHANGED', cli['name'], version + (' (verified existing copy adopted)' if present else ''))
 
     def powershell(self):
         path = Path('/usr/local/microsoft/powershell/7/pwsh')
@@ -1086,8 +1194,10 @@ class Workstation:
         self.attempt('Rust', self.rust)
         for app in self.selected_apps():
             self.attempt(app['name'], self.application, app)
-        for name in ('codex', 'claude', 'agy'):
+        for name in ('codex', 'claude'):
             self.attempt(name, self.native_cli, name)
+        for cli in self.manifest['feed_clis']:
+            self.attempt(cli['name'], self.feed_cli, cli)
         self.attempt('PowerShell', self.powershell)
         self.attempt('Speedtest', self.speedtest)
         self.attempt('Android platform-tools', self.platform_tools)
