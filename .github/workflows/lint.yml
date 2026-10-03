@@ -52,6 +52,8 @@ jobs:
           tests/test-controller-release-updates.sh
           tests/test-antigravity-migration.sh
           tests/test-workstation-shell-helpers.sh
+          tests/test-arch-profiles.sh
+          tests/test-fedora-profiles.sh
           tests/test-pacman-update.sh
           tests/test-zram-generator.sh
           /bin/bash tests/test-macos-shell.sh
@@ -92,6 +94,7 @@ jobs:
           ./tests/Test-HyperV.ps1
           ./tests/Test-WingetAntigravity.ps1
           ./tests/Test-WingetInventory.ps1
+          ./tests/Test-Win11Profiles.ps1
           ./tests/Test-Win11Pxe.ps1
           ./tests/Test-NetPower.ps1
 
@@ -128,6 +131,7 @@ jobs:
           ./tests/Test-HyperV.ps1
           ./tests/Test-WingetAntigravity.ps1
           ./tests/Test-WingetInventory.ps1
+          ./tests/Test-Win11Profiles.ps1
           ./tests/Test-NetPower.ps1
       - name: Run PXE build tests with Windows PowerShell 7
         shell: pwsh

@@ -2,42 +2,52 @@
 #
 # Idempotent Fedora Workstation setup. Replaces the former comtrya manifest
 # fedora_workstation.yaml (comtrya is unmaintained upstream). Targets Fedora
-# 41+ (dnf5).
+# 41+ (dnf5) on x86_64 and aarch64, including Fedora Asahi Remix.
 #
 # Run as your normal user - NOT root - from any directory: the config payloads
 # are resolved relative to this script (files/). Privileged steps go through
 # sudo (one password prompt; the timestamp is kept alive for the whole run).
 #
+# Profiles (--profile, default core):
+#   core  every developer toolchain, -devel library, editor, agent, browser,
+#         Cockpit (including machines/podman) and desktop setting
+#   full  core plus games (Lutris, Steam and its i686 libraries, the
+#         io.jor.* Flatpaks) and media extras (Navidrome, OwnTone, Plex,
+#         Rhythmbox, Brasero, the Transmission GUI/daemon/remote)
+# Modes: --dry-run prints the plan offline (no sudo, network, or writes);
+# --check reports CURRENT/DRIFT read-only and exits 2 on drift;
+# --no-upgrade installs only what is missing and keeps installed versions.
+#
 # Safe to re-run: every step checks state first, config files are rewritten
 # only when their content, type, mode, or ownership differs (and relabelled for SELinux when
 # they are), package/Flatpak steps apply available updates and install what is
-# missing, and the
-# follow-ups that only a real change needs (sysctl reload, dconf update,
-# dkms build, dracut) run only then. A converged system avoids repeating those
+# missing, and the follow-ups that only a real change needs (sysctl reload,
+# dconf update) run only then. A converged system avoids repeating those
 # mutations; vendor installers that manage their own release channel may still
 # perform a lightweight update check.
 #
 # What it does, in order:
 #   1. signed third-party repos: VS Code, Claude Code, the jmsqrd/tributary
-#      and jmsqrd/balun coprs, RPM Fusion free+nonfree, Chrome, sing-box; on x86_64 also
-#      Microsoft (PowerShell), Plex Media Server, and the RPM Fusion
-#      nvidia-driver + steam repos. The abandoned Antigravity 1.x RPM
-#      repo/package and VSCodium are retired in favor of native Antigravity
-#      2.0+ and VS Code.
+#      and jmsqrd/balun coprs, RPM Fusion free+nonfree, Chrome, sing-box; on
+#      x86_64 also Microsoft (PowerShell) and the RPM Fusion nvidia-driver
+#      repo, plus (full) the RPM Fusion steam repo and Plex Media Server. The
+#      abandoned Antigravity 1.x RPM repo/package and VSCodium are retired in
+#      favor of native Antigravity 2.0+ and VS Code.
 #   2. CA-bundle symlinks at the Debian-style paths some tools hard-code
-#   3. the dnf package set, including native Chrome on both architectures
-#      (plus the x86_64-only set: i686 libs, PowerShell RPM, Steam, Plex
-#      Media Server), then the latest Navidrome release RPM, checksummed from
-#      its GitHub release metadata, and OwnTone built into an RPM from its
-#      checksummed latest release tarball with files/rpm/owntone.spec
+#   3. the dnf package set, including native Chrome and Chromium on both
+#      architectures (plus the x86_64-only PowerShell RPM and Intel VA driver);
+#      full adds the games/media packages, the x86_64-only i686 libs, Steam
+#      and Plex Media Server, then the latest Navidrome release RPM,
+#      checksummed from its GitHub release metadata, and OwnTone built into an
+#      RPM from its checksummed latest release tarball with
+#      files/rpm/owntone.spec
 #   4. Antigravity desktop 2.0+, Antigravity CLI, OpenCode, Codex CLI, and Zed
 #      using the latest native vendor artifacts/installers (checksummed from
 #      live upstream release metadata where upstream publishes digests)
-#   5. a checksum-pinned Ookla speedtest CLI into ~/.local/bin
-#   6. on kernels older than 7.2, the latest stable Realtek r8152 USB NIC
-#      driver release, resolved to and fetched by one verified upstream commit;
-#      on 7.2+ the now-unneeded out-of-tree DKMS install is purged instead
-#   7. flathub + the flatpak set (plus x86_64-only extras)
+#   5. Rust via rustup only: a per-user stable toolchain with rustfmt, clippy
+#      and rust-analyzer (distro rust/cargo packages are purged)
+#   6. a checksum-pinned Ookla speedtest CLI into ~/.local/bin
+#   7. flathub + the flatpak set (plus x86_64-only extras; full adds games)
 #   8. dotfiles (~/.bashrc, ~/.vimrc) and system config
 #      from files/: /etc/locale.conf, the inotify sysctl limit, the Arch-style
 #      prompt as /etc/profile.d/01-arch-prompt.sh
@@ -51,12 +61,13 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 FILES=${SCRIPT_DIR}/files
 ARCH=$(uname -m)
-KERNEL=$(uname -r)
 FEDORA_MIN_VERSION=41
 
 COPRS=(jmsqrd/tributary jmsqrd/balun)
-RPMFUSION_FREE_URL="https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm"
-RPMFUSION_NONFREE_URL="https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm"
+# Completed with the release number after preflight; no rpm call at load time
+# keeps --dry-run usable on non-Fedora hosts.
+RPMFUSION_FREE_URL_BASE=https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-
+RPMFUSION_NONFREE_URL_BASE=https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-
 GOOGLE_KEY_URL=https://dl.google.com/linux/linux_signing_key.pub
 MICROSOFT_KEY_URL=https://packages.microsoft.com/keys/microsoft.asc
 MICROSOFT_KEY_FINGERPRINT=BC528686B50D79E339D3721CEB3E94ADBE1229CF
@@ -105,19 +116,6 @@ SPEEDTEST_ARCHIVE_SHA256_X86_64=5690596c54ff9bed63fa3732f818a05dbc2db19ad36ed68f
 SPEEDTEST_BINARY_SHA256_X86_64=31f1124c5ab8acdae6b9fe1741e704df420f9f2e7d429679fabe62075453c051
 SPEEDTEST_ARCHIVE_SHA256_AARCH64=3953d231da3783e2bf8904b6dd72767c5c6e533e163d3742fd0437affa431bd3
 SPEEDTEST_BINARY_SHA256_AARCH64=d99fa13293f658b53eaa79fe81f4b210db39fdfc1e9698f33da3f234a6008df7
-R8152_REPO=https://github.com/awesometic/realtek-r8152-dkms.git
-R8152_RELEASE_API=https://api.github.com/repos/awesometic/realtek-r8152-dkms/releases/latest
-R8152_TAG=
-R8152_COMMIT=
-R8152_IN_TREE_KERNEL_MIN=7.2
-R8152_SOURCE_ROOT=/usr/src
-R8152_SYSFS_ROOT=/sys
-R8152_UDEV_RULE=/etc/udev/rules.d/50-usb-realtek-net.rules
-R8152_UDEV_MARKER=/etc/udev/rules.d/.50-usb-realtek-net.rules.lan-ipxe
-# Ownership signature for the udev rule installed by the formerly pinned
-# revision of this script. It identifies that legacy file; it is not a release
-# selection pin for future DKMS installations.
-R8152_LEGACY_UDEV_RULE_SHA256=0858aeb2905c6061f04e3fd55573ae5c01d3673ddb4d60f24ef284279ba2993b
 CA_BUNDLE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
 
 # Entries may be package names, provides (vim -> vim-enhanced), name.arch,
@@ -136,14 +134,11 @@ PKGS=(
   bluez
   bluez-tools
   boost-devel
-  brasero
-  cargo
   ccache
   chromium
   chrony
   claude-code
   clang
-  clippy
   cmake
   cockpit
   cockpit-files
@@ -162,7 +157,6 @@ PKGS=(
   cups-pk-helper
   curl
   dbus-devel
-  dkms
   dnf5-plugin-automatic
   @development-tools
   dos2unix
@@ -237,14 +231,12 @@ PKGS=(
   lld
   lldb
   llvm
-  lutris
   lz4
   lzop
   maven
   meld
   mesa-vulkan-drivers
   meson
-  mokutil
   mpfr-devel
   mpv
   nano
@@ -267,14 +259,10 @@ PKGS=(
   protobuf-compiler
   pulseaudio-libs-devel
   python3-protobuf
-  rhythmbox
   rpm-build
   rpmdevtools
   rsync
   ruby
-  rust-analyzer
-  rust
-  rustfmt
   rustup
   schedtool
   SDL-devel
@@ -287,11 +275,7 @@ PKGS=(
   system-config-printer
   tar
   texinfo
-  transmission
   transmission-cli
-  transmission-daemon
-  transmission-gtk
-  transmission-remote-gtk
   tree
   tributary
   udisks2-lvm2
@@ -309,16 +293,29 @@ PKGS=(
   zram-generator
 )
 
-# x86_64 only: 32-bit libraries for Steam/Wine, plus packages that exist
-# only for that architecture
+# Full profile only: games and media extras (transmission-cli stays in core)
+PKGS_FULL=(
+  brasero
+  lutris
+  rhythmbox
+  transmission
+  transmission-daemon
+  transmission-gtk
+  transmission-remote-gtk
+)
+
+# x86_64 only: packages that exist only for that architecture
 PKGS_X86_64=(
-  glibc-devel.i686
   libva-intel-media-driver
+  powershell
+)
+# x86_64 + full: Steam, its 32-bit Steam/Wine libraries, and Plex
+PKGS_FULL_X86_64=(
+  glibc-devel.i686
   libstdc++-devel.i686
   libva.i686
   mesa-vulkan-drivers.i686
   plexmediaserver
-  powershell
   readline-devel.i686
   steam
   vulkan-loader.i686
@@ -326,6 +323,14 @@ PKGS_X86_64=(
 )
 
 FLATPAKS=(
+  net.nokyan.Resources
+)
+FLATPAKS_X86_64=(
+  com.google.AndroidStudio
+  org.getoutline.OutlineClient
+  org.getoutline.OutlineManager
+)
+FLATPAKS_FULL=(
   io.jor.bugdom
   io.jor.bugdom2
   io.jor.cromagrally
@@ -333,12 +338,6 @@ FLATPAKS=(
   io.jor.nanosaur2
   io.jor.ottomatic
   io.jor.mightymike
-  net.nokyan.Resources
-)
-FLATPAKS_X86_64=(
-  com.google.AndroidStudio
-  org.getoutline.OutlineClient
-  org.getoutline.OutlineManager
 )
 
 SERVICES=(
@@ -347,14 +346,16 @@ SERVICES=(
   crond.service
   gdm.service
   gnome-remote-desktop.service
-  navidrome.service
   NetworkManager-dispatcher.service
   NetworkManager-wait-online.service
   NetworkManager.service
-  owntone.service
   sshd.service
 )
-SERVICES_X86_64=(
+SERVICES_FULL=(
+  navidrome.service
+  owntone.service
+)
+SERVICES_FULL_X86_64=(
   plexmediaserver.service
 )
 
@@ -365,21 +366,48 @@ die()  { printf '\033[1;31m==> ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() {
   cat <<USAGE
-Usage: ${0##*/} [-h|--help]
+Usage: ${0##*/} [--profile core|full] [--check | --dry-run] [--no-upgrade]
+       ${0##*/} -h|--help
 
 Idempotent Fedora Workstation setup: third-party repos, dnf + flatpak package
-sets, the r8152 DKMS driver, dotfiles and system config from files/, services,
-GDM settings. Run as your normal user (sudo is used for the privileged steps);
-safe to re-run at any time.
+sets, rustup, native developer tools, dotfiles and system config from files/,
+services, GDM settings. Run as your normal user (sudo is used for the
+privileged steps); safe to re-run at any time.
+
+  --profile core  developer toolchains, editors, agents, browsers (default)
+  --profile full  core plus games and media extras
+  --check         read-only state report; no sudo or network
+  --dry-run       offline plan for the selected profile; no sudo, network,
+                  or writes
+  --no-upgrade    install only what is missing; skip system/Flatpak upgrades
+                  and keep installed vendor tools at their current version
+
+Exit: 0 converged/dry-run, 1 error, 2 drift found by --check.
 USAGE
 }
 
+PROFILE=core
+MODE=apply
+NO_UPGRADE=0
 while (( $# )); do
   case $1 in
     -h|--help) usage; exit 0 ;;
-    *)         usage >&2; die "Unknown option: $1" ;;
+    --profile)
+      (( $# >= 2 )) || { usage >&2; die "--profile requires core or full"; }
+      case $2 in
+        core|full) PROFILE=$2 ;;
+        *) usage >&2; die "Invalid profile: $2" ;;
+      esac
+      shift ;;
+    --check|--dry-run)
+      [[ ${MODE} == apply ]] || { usage >&2; die "Choose one of --check or --dry-run"; }
+      MODE=${1#--} ;;
+    --no-upgrade) NO_UPGRADE=1 ;;
+    *) usage >&2; die "Unknown option: $1" ;;
   esac
+  shift
 done
+if [[ ${ARCH} == x86_64 ]]; then IS_X86_64=1; else IS_X86_64=0; fi
 
 #--- Helpers ----------------------------------------------------------------
 # put_file [-s] <src> <dst> [mode]
@@ -780,31 +808,6 @@ resolve_native_tool_releases() {
   ZED_ARCHIVE_SHA256=${RESOLVED_SHA256}
 
   note "resolved Antigravity ${ANTIGRAVITY_VERSION}, Antigravity CLI ${ANTIGRAVITY_CLI_VERSION}, OpenCode ${OPENCODE_VERSION}, and Zed ${ZED_VERSION}"
-}
-
-resolve_r8152_release() {
-  local metadata refs sha ref
-  metadata=$(fetch_release_document "${R8152_RELEASE_API}") \
-    || die "could not query the latest r8152 DKMS release"
-  R8152_TAG=$(jq -er '
-      select(.draft == false and .prerelease == false) | .tag_name
-    ' <<<"${metadata}") \
-    || die "latest r8152 release metadata is invalid"
-  [[ ${R8152_TAG} =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$ ]] \
-    || die "latest r8152 release tag has an unsupported form: ${R8152_TAG}"
-  refs=$(git ls-remote --exit-code --tags "${R8152_REPO}" \
-      "refs/tags/${R8152_TAG}" "refs/tags/${R8152_TAG}^{}") \
-    || die "could not resolve latest r8152 tag ${R8152_TAG}"
-  R8152_COMMIT=
-  while read -r sha ref; do
-    [[ ${sha} =~ ^[[:xdigit:]]{40}$ ]] || continue
-    case ${ref} in
-      "refs/tags/${R8152_TAG}^{}") R8152_COMMIT=${sha,,} ;;
-      "refs/tags/${R8152_TAG}") [[ -n ${R8152_COMMIT} ]] || R8152_COMMIT=${sha,,} ;;
-    esac
-  done <<<"${refs}"
-  [[ ${R8152_COMMIT} =~ ^[[:xdigit:]]{40}$ ]] \
-    || die "latest r8152 tag did not resolve to one commit"
 }
 
 # Optional install root keeps artifact/convergence tests unprivileged.
@@ -1263,1118 +1266,271 @@ install_zed() {
   note "Zed ${ZED_VERSION}: installed from verified official release archive"
 }
 
-# Compare only the numeric major/minor components of a Fedora kernel release.
-# uname -r appends patch, Fedora build, flavour, and architecture suffixes
-# (for example 7.2.1-200.fc44.x86_64); none of those change the 7.2 cutoff.
-kernel_version_at_least() {
-  local running=$1 minimum=$2
-  local running_major running_minor minimum_major minimum_minor
-  [[ ${running} =~ ^([0-9]+)\.([0-9]+)([.-]|$) ]] \
-    || die "could not parse running kernel version: ${running}"
-  running_major=${BASH_REMATCH[1]}
-  running_minor=${BASH_REMATCH[2]}
-  [[ ${minimum} =~ ^([0-9]+)\.([0-9]+)$ ]] \
-    || die "invalid kernel-version cutoff: ${minimum}"
-  minimum_major=${BASH_REMATCH[1]}
-  minimum_minor=${BASH_REMATCH[2]}
-  (( 10#${running_major} > 10#${minimum_major} \
-     || (10#${running_major} == 10#${minimum_major} \
-         && 10#${running_minor} >= 10#${minimum_minor}) ))
+# keep_installed <command|rpm:name>: with --no-upgrade, succeed (and skip the
+# installer) when the tool is already present; otherwise fail so it runs.
+tool_present() {
+  case $1 in
+    rpm:*) rpm -q --quiet -- "${1#rpm:}" 2>/dev/null ;;
+    *) PATH="${HOME}/.local/bin:${PATH}" command -v "$1" >/dev/null ;;
+  esac
+}
+keep_installed() {
+  (( NO_UPGRADE )) && tool_present "$1" || return 1
+  note "${1#rpm:}: installed; kept at its current version (--no-upgrade)"
 }
 
-# Remove exact DKMS registrations created under both the historical module
-# name used by this setup and the package name declared by current upstream.
-# A source tree is deleted only when its immediate /usr/src-style path and its
-# dkms.conf both match a captured registration, or when it carries our marker.
-R8152_PURGE_CHANGED=0
-R8152_PURGE_MODULE_CHANGED=0
-R8152_PURGED_KERNELS=()
-# shellcheck disable=SC2120
-purge_r8152_dkms() {
-  local source_root=${1:-${R8152_SOURCE_ROOT}}
-  local udev_rule=${2:-${R8152_UDEV_RULE}}
-  local udev_marker=${3:-${R8152_UDEV_MARKER}}
-  local status remaining line module source_module version entry source package_name package_version
-  local source_digest
-  local source_stage stage_name retirement retirement_guard retirement_name
-  local status_tail registered_kernel
-  local marker_version marker_module marker_sha current_rule_sha source_rule
-  local rule_owned=0 marker_owned=0
-  local -a registrations=()
-  local -A seen=() seen_kernels=() registered_versions=() removed_sources=()
-  local -A prepared_retirements=()
-  R8152_PURGE_CHANGED=0
-  R8152_PURGE_MODULE_CHANGED=0
-  R8152_PURGED_KERNELS=()
-
-  status=$(dkms status 2>/dev/null) \
-    || die "could not query DKMS registrations before purging r8152"
-  while IFS= read -r line; do
-    if [[ ${line} =~ ^(r8152|realtek-r8152)/([^,:[:space:]]+) ]]; then
-      module=${BASH_REMATCH[1]}
-      version=${BASH_REMATCH[2]}
-      [[ ${version} =~ ^[0-9][0-9A-Za-z._+~-]*$ ]] \
-        || die "refusing unsafe r8152 DKMS version from status: ${version}"
-      entry=${module}/${version}
-      registered_versions[${version}]=1
-      if [[ ${line} == *,* ]]; then
-        status_tail=${line#*,}
-        status_tail=${status_tail#"${status_tail%%[![:space:]]*}"}
-        registered_kernel=${status_tail%%,*}
-        registered_kernel=${registered_kernel%%[[:space:]]*}
-        if [[ ${registered_kernel} =~ ^[0-9][0-9A-Za-z._+~-]*$ \
-              && -z ${seen_kernels[${registered_kernel}]:-} ]]; then
-          seen_kernels[${registered_kernel}]=1
-          R8152_PURGED_KERNELS+=("${registered_kernel}")
-        fi
-      fi
-      [[ -n ${seen[${entry}]:-} ]] && continue
-      seen[${entry}]=1
-      registrations+=("${entry}")
+# Per-user rustup is the only Rust source on every platform: distro rust/cargo
+# packages are purged first (only Rust-family packages depend on them).
+purge_distro_rust() {
+  local pkg installed=()
+  for pkg in "${DISTRO_RUST_PKGS[@]}"; do
+    if rpm -q --quiet -- "${pkg}" 2>/dev/null; then
+      installed+=("${pkg}")
     fi
-  done <<<"${status}"
-  if (( ${#R8152_PURGED_KERNELS[@]} )); then
-    note "captured r8152 DKMS kernels before removal: ${R8152_PURGED_KERNELS[*]}"
-  fi
-
-  if [[ -f ${udev_marker} && ! -L ${udev_marker} ]] \
-     && grep -Fxq 'managed-by=lan-ipxe/setup-fedora-workstation.sh' \
-       "${udev_marker}"; then
-    marker_sha=$(sed -n 's/^rule-sha256=//p' "${udev_marker}" | tail -1)
-    if [[ ${marker_sha} =~ ^[[:xdigit:]]{64}$ ]]; then
-      marker_owned=1
-      marker_sha=${marker_sha,,}
-    fi
-  fi
-  if [[ -f ${udev_rule} && ! -L ${udev_rule} ]]; then
-    current_rule_sha=$(sha256sum -- "${udev_rule}") \
-      || die "could not hash ${udev_rule} before the r8152 purge"
-    current_rule_sha=${current_rule_sha%% *}
-    if (( marker_owned )) && [[ ${current_rule_sha} == "${marker_sha}" ]]; then
-      rule_owned=1
-    elif [[ ${current_rule_sha} == "${R8152_LEGACY_UDEV_RULE_SHA256}" ]]; then
-      rule_owned=1
-    fi
-    # Existing installations predate the ownership marker. Bind their rule to
-    # the captured registration by requiring byte-for-byte source equality.
-    for version in "${!registered_versions[@]}"; do
-      for module in r8152 realtek-r8152; do
-        source_rule=${source_root}/${module}-${version}/udev/rules.d/50-usb-realtek-net.rules
-        if [[ -f ${source_rule} && ! -L ${source_rule} ]] \
-           && cmp -s -- "${source_rule}" "${udev_rule}"; then
-          rule_owned=1
-        fi
-      done
-    done
-  fi
-
-  for entry in "${registrations[@]}"; do
-    module=${entry%%/*}
-    version=${entry#*/}
-    for source_module in r8152 realtek-r8152; do
-      source=${source_root}/${source_module}-${version}
-      [[ -e ${source} || -L ${source} ]] || continue
-      [[ -z ${prepared_retirements[${source}]:-} ]] || continue
-      [[ -d ${source} && ! -L ${source} ]] || continue
-      package_name=$(sed -n 's/^PACKAGE_NAME="\([^"]*\)"/\1/p' \
-        "${source}/dkms.conf" 2>/dev/null | tail -1)
-      package_version=$(sed -n 's/^PACKAGE_VERSION="\([^"]*\)"/\1/p' \
-        "${source}/dkms.conf" 2>/dev/null | tail -1)
-      [[ ( ${package_name} == r8152 || ${package_name} == realtek-r8152 ) \
-            && ${package_version} == "${version}" ]] || continue
-      recover_r8152_source_retirement "${source}" "${source_module}" \
-        "${version}" 1
-      source_digest=$(r8152_source_tree_sha256 "${source}")
-      prepare_r8152_source_retirement "${source}" "${source_module}" \
-        "${version}" "${source_digest}"
-      prepared_retirements[${source}]=1
-    done
-    sudo dkms remove -m "${module}" -v "${version}" --all \
-      || die "could not remove DKMS registration ${entry}"
-    R8152_PURGE_CHANGED=1
-    R8152_PURGE_MODULE_CHANGED=1
-    note "removed DKMS registration ${entry}"
   done
-
-  remaining=$(dkms status 2>/dev/null) \
-    || die "could not query DKMS registrations after purging r8152"
-  while IFS= read -r line; do
-    [[ ${line} =~ ^(r8152|realtek-r8152)/ ]] \
-      && die "an r8152 DKMS registration remains after removal: ${line}"
-  done <<<"${remaining}"
-
-  # First cover source trees belonging to registrations captured above. Check
-  # both names because older revisions placed realtek-r8152 sources beneath an
-  # r8152-* directory.
-  for version in "${!registered_versions[@]}"; do
-    for module in r8152 realtek-r8152; do
-      source=${source_root}/${module}-${version}
-      [[ -e ${source} || -L ${source} ]] || continue
-      if [[ ! -d ${source} || -L ${source} ]]; then
-        warn "leaving unsafe or non-directory r8152 source path: ${source}"
-        continue
-      fi
-      package_name=$(sed -n 's/^PACKAGE_NAME="\([^"]*\)"/\1/p' \
-        "${source}/dkms.conf" 2>/dev/null | tail -1)
-      package_version=$(sed -n 's/^PACKAGE_VERSION="\([^"]*\)"/\1/p' \
-        "${source}/dkms.conf" 2>/dev/null | tail -1)
-      if [[ ${package_name} != r8152 && ${package_name} != realtek-r8152 ]] \
-         || [[ ${package_version} != "${version}" ]]; then
-        warn "leaving unverified r8152 source tree: ${source}"
-        continue
-      fi
-      source_rule=${source}/udev/rules.d/50-usb-realtek-net.rules
-      if [[ -f ${udev_rule} && ! -L ${udev_rule} \
-            && -f ${source_rule} && ! -L ${source_rule} ]] \
-         && cmp -s -- "${source_rule}" "${udev_rule}"; then
-        rule_owned=1
-      fi
-      if [[ -z ${prepared_retirements[${source}]:-} ]]; then
-        source_digest=$(r8152_source_tree_sha256 "${source}")
-        prepare_r8152_source_retirement "${source}" "${module}" \
-          "${version}" "${source_digest}"
-      fi
-      retire_r8152_source_tree "${source}" "${module}" "${version}"
-      removed_sources[${source}]=1
-      R8152_PURGE_CHANGED=1
-      note "removed verified DKMS source tree ${source}"
-    done
+  if (( ! ${#installed[@]} )); then
+    note "distro Rust packages: absent"
+    return 0
+  fi
+  sudo dnf -y remove "${installed[@]}"
+  for pkg in "${installed[@]}"; do
+    ! rpm -q --quiet -- "${pkg}" 2>/dev/null \
+      || die "distro package ${pkg} is still installed"
   done
+  note "distro Rust packages purged in favor of rustup: ${installed[*]}"
+}
 
-  # A marker lets a future 7.2+ run safely clean a setup-owned source tree even
-  # if its DKMS registration was removed out of band first.
-  for source in "${source_root}"/r8152-* "${source_root}"/realtek-r8152-*; do
-    [[ -e ${source} || -L ${source} ]] || continue
-    [[ -z ${removed_sources[${source}]:-} ]] || continue
-    [[ -d ${source} && ! -L ${source} \
-       && -f ${source}/.lan-ipxe-managed ]] || continue
-    grep -Fxq 'managed-by=lan-ipxe/setup-fedora-workstation.sh' \
-      "${source}/.lan-ipxe-managed" || continue
-    marker_module=$(sed -n 's/^dkms-module=//p' \
-      "${source}/.lan-ipxe-managed" | tail -1)
-    marker_version=$(sed -n 's/^version=//p' \
-      "${source}/.lan-ipxe-managed" | tail -1)
-    [[ ${marker_module} == r8152 || ${marker_module} == realtek-r8152 ]] \
-      || continue
-    [[ ${marker_version} =~ ^[0-9][0-9A-Za-z._+~-]*$ \
-       && ${source} == "${source_root}/${marker_module}-${marker_version}" ]] \
-      || continue
-    retirement_guard=${source_root}/.${marker_module}-${marker_version}.lan-ipxe-retirement-v1.guard
-    if [[ -e ${retirement_guard} || -L ${retirement_guard} ]]; then
-      if r8152_retirement_guard_is_valid "${retirement_guard}" \
-           "${marker_module}" "${marker_version}"; then
-        source_rule=${source}/udev/rules.d/50-usb-realtek-net.rules
-        if [[ -f ${udev_rule} && ! -L ${udev_rule} \
-              && -f ${source_rule} && ! -L ${source_rule} ]] \
-           && cmp -s -- "${source_rule}" "${udev_rule}"; then
-          rule_owned=1
-        fi
-        recover_r8152_source_retirement "${source}" "${marker_module}" \
-          "${marker_version}" 0
-        R8152_PURGE_CHANGED=1
+install_rustup_toolchain() {
+  local rustup=${CARGO_HOME:-${HOME}/.cargo}/bin/rustup
+  if [[ ! -x ${rustup} ]]; then
+    command -v rustup-init >/dev/null \
+      || die "rustup-init is unavailable; the rustup package did not provide it"
+    rustup-init -y --no-modify-path --default-toolchain stable --profile minimal
+    [[ -x ${rustup} ]] || die "rustup-init did not produce ${rustup}"
+    note "rustup: stable toolchain installed"
+  elif (( NO_UPGRADE )) && "${rustup}" toolchain list 2>/dev/null | grep -q '^stable'; then
+    note "rustup: stable toolchain kept at its current version (--no-upgrade)"
+  else
+    "${rustup}" toolchain install stable --profile minimal --no-self-update
+  fi
+  "${rustup}" default >/dev/null 2>&1 || "${rustup}" default stable
+  "${rustup}" component add --toolchain stable "${RUST_COMPONENTS[@]}"
+}
+
+#--- Profile selection, dry-run plan, and read-only check -------------------
+SELECTED_PKGS=()
+SELECTED_FLATPAKS=()
+SELECTED_SERVICES=()
+SELECTED_REPOS=()
+SELECTED_TOOLS=()
+MANAGED_FILES=()
+RUST_COMPONENTS=(rustfmt clippy rust-analyzer)
+DISTRO_RUST_PKGS=(rust cargo clippy rustfmt rust-analyzer rust-std-static rust-src
+  rust-gdb rust-lldb rust-debugger-common rust-doc)
+select_profile() {
+  SELECTED_PKGS=("${PKGS[@]}")
+  SELECTED_FLATPAKS=("${FLATPAKS[@]}")
+  SELECTED_SERVICES=("${SERVICES[@]}")
+  SELECTED_REPOS=(code claude-code google-chrome sing-box rpmfusion-free rpmfusion-nonfree)
+  local copr
+  for copr in "${COPRS[@]}"; do
+    SELECTED_REPOS+=("copr:copr.fedorainfracloud.org:${copr/\//:}")
+  done
+  SELECTED_TOOLS=(antigravity agy opencode codex zed speedtest)
+  MANAGED_FILES=(
+    "etc/yum.repos.d/vscode.repo|/etc/yum.repos.d/vscode.repo"
+    "etc/yum.repos.d/claude-code.repo|/etc/yum.repos.d/claude-code.repo"
+    "etc/yum.repos.d/google-chrome.repo|/etc/yum.repos.d/google-chrome.repo"
+    "bashrc|${HOME}/.bashrc"
+    "vimrc|${HOME}/.vimrc"
+    "etc/locale.conf|/etc/locale.conf"
+    "etc/sysctl.d/99-inotify.conf|/etc/sysctl.d/99-inotify.conf"
+    "etc/systemd/zram-generator.conf|/etc/systemd/zram-generator.conf"
+    "etc/bash.bashrc|/etc/profile.d/01-arch-prompt.sh"
+    "etc/dnf/automatic.conf|/etc/dnf/automatic.conf"
+    "etc/dconf/db/gdm.d/10-font-settings|/etc/dconf/db/gdm.d/10-font-settings"
+  )
+  if (( IS_X86_64 )); then
+    SELECTED_PKGS+=("${PKGS_X86_64[@]}")
+    SELECTED_FLATPAKS+=("${FLATPAKS_X86_64[@]}")
+    SELECTED_REPOS+=(rpmfusion-nonfree-nvidia-driver packages-microsoft-com-prod)
+    MANAGED_FILES+=(
+      "etc/yum.repos.d/rpmfusion-nonfree-nvidia-driver.repo|/etc/yum.repos.d/rpmfusion-nonfree-nvidia-driver.repo"
+      "etc/yum.repos.d/microsoft-prod.repo|/etc/yum.repos.d/microsoft-prod.repo"
+    )
+  else
+    # Microsoft's PowerShell RPM is x86_64-only; aarch64 uses the release tarball.
+    SELECTED_TOOLS+=(pwsh)
+  fi
+  if [[ ${PROFILE} == full ]]; then
+    SELECTED_PKGS+=("${PKGS_FULL[@]}")
+    SELECTED_FLATPAKS+=("${FLATPAKS_FULL[@]}")
+    SELECTED_SERVICES+=("${SERVICES_FULL[@]}")
+    SELECTED_TOOLS+=(navidrome owntone)
+    if (( IS_X86_64 )); then
+      SELECTED_PKGS+=("${PKGS_FULL_X86_64[@]}")
+      SELECTED_SERVICES+=("${SERVICES_FULL_X86_64[@]}")
+      SELECTED_REPOS+=(rpmfusion-nonfree-steam PlexTv)
+      MANAGED_FILES+=(
+        "etc/yum.repos.d/rpmfusion-nonfree-steam.repo|/etc/yum.repos.d/rpmfusion-nonfree-steam.repo"
+        "etc/yum.repos.d/plex.repo|/etc/yum.repos.d/plex.repo"
+      )
+    fi
+  fi
+}
+
+print_plan() {
+  local entry
+  printf 'Profile: %s; mode: dry-run (offline; no sudo, network, or writes)\n' "${PROFILE}"
+  printf 'Architecture: %s; upgrades: %s\n' "${ARCH}" \
+    "$( (( NO_UPGRADE )) && echo 'skipped (--no-upgrade)' || echo 'dnf upgrade --refresh + flatpak update')"
+  printf 'PLAN: retire legacy Antigravity 1.x repo/package/settings and VSCodium\n'
+  printf 'PLAN: enable %d repositories:\n' "${#SELECTED_REPOS[@]}"
+  printf '  %s\n' "${SELECTED_REPOS[@]}"
+  printf 'PLAN: CA-bundle symlinks /etc/ssl/certs/ca-certificates.crt, /etc/pki/tls/certs/ca-bundle.crt\n'
+  printf 'PLAN: dnf install %d entries:\n' "${#SELECTED_PKGS[@]}"
+  printf '  %s\n' "${SELECTED_PKGS[@]}"
+  printf 'PLAN: native vendor tools (%s):\n' \
+    "$( (( NO_UPGRADE )) && echo 'missing only' || echo 'latest verified release')"
+  printf '  %s\n' "${SELECTED_TOOLS[@]}"
+  printf 'PLAN: rustup stable toolchain (minimal) + %s; purge installed distro rust packages\n' \
+    "${RUST_COMPONENTS[*]}"
+  printf 'PLAN: flathub + %d flatpaks:\n' "${#SELECTED_FLATPAKS[@]}"
+  printf '  %s\n' "${SELECTED_FLATPAKS[@]}"
+  printf 'PLAN: managed files:\n'
+  for entry in "${MANAGED_FILES[@]}"; do
+    printf '  %s -> %s\n' "files/${entry%%|*}" "${entry#*|}"
+  done
+  printf 'PLAN: enable %d services:\n' "${#SELECTED_SERVICES[@]}"
+  printf '  %s\n' "${SELECTED_SERVICES[@]}"
+  printf 'PLAN: graphical.target default, cockpit.socket, dnf5-automatic.timer\n'
+  printf 'PLAN: publish ~/.config/monitors.xml to GDM when present; dconf update\n'
+}
+
+CHECK_DRIFT=0
+check_report() {
+  printf '%-8s %s\n' "$1" "$2"
+  [[ $1 != DRIFT ]] || CHECK_DRIFT=1
+}
+
+package_present() {
+  rpm -q --quiet -- "$1" 2>/dev/null || rpm -q --quiet --whatprovides -- "$1" 2>/dev/null
+}
+
+check_state() {
+  local entry pkg id unit repo repolist groups='' groups_ok=0 tool src dst
+  local rustup=${CARGO_HOME:-${HOME}/.cargo}/bin/rustup components
+  printf 'Profile: %s; mode: check (read-only)\n' "${PROFILE}"
+  repolist=$(dnf -q repolist --enabled 2>/dev/null) || repolist=''
+  for repo in "${SELECTED_REPOS[@]}"; do
+    if awk -v repo="${repo}" 'NR > 1 && $1 == repo { found = 1 } END { exit !found }' \
+        <<<"${repolist}"; then
+      check_report CURRENT "repo ${repo}"
+    else
+      check_report DRIFT "repo ${repo}"
+    fi
+  done
+  # -C keeps the group query on the local cache: --check never touches the network.
+  if groups=$(dnf -q -C group list --installed 2>/dev/null); then groups_ok=1; fi
+  for pkg in "${SELECTED_PKGS[@]}"; do
+    if [[ ${pkg} == @* ]]; then
+      if (( ! groups_ok )); then
+        check_report NOTE "group ${pkg#@}: unverified (no local dnf cache)"
+      elif awk -v id="${pkg#@}" '$1 == id { found = 1 } END { exit !found }' <<<"${groups}"; then
+        check_report CURRENT "group ${pkg#@}"
       else
-        warn "leaving invalid r8152 source retirement guard: ${retirement_guard}"
+        check_report DRIFT "group ${pkg#@}"
       fi
-      continue
-    fi
-    package_name=$(sed -n 's/^PACKAGE_NAME="\([^"]*\)"/\1/p' \
-      "${source}/dkms.conf" 2>/dev/null | tail -1)
-    package_version=$(sed -n 's/^PACKAGE_VERSION="\([^"]*\)"/\1/p' \
-      "${source}/dkms.conf" 2>/dev/null | tail -1)
-    [[ ${package_name} == "${marker_module}" \
-       && ${package_version} == "${marker_version}" ]] || continue
-    source_rule=${source}/udev/rules.d/50-usb-realtek-net.rules
-    if [[ -f ${udev_rule} && ! -L ${udev_rule} \
-          && -f ${source_rule} && ! -L ${source_rule} ]] \
-       && cmp -s -- "${source_rule}" "${udev_rule}"; then
-      rule_owned=1
-    fi
-    source_digest=$(r8152_source_tree_sha256 "${source}")
-    prepare_r8152_source_retirement "${source}" "${marker_module}" \
-      "${marker_version}" "${source_digest}"
-    retire_r8152_source_tree "${source}" "${marker_module}" "${marker_version}"
-    R8152_PURGE_CHANGED=1
-    note "removed marked DKMS source tree ${source}"
-  done
-
-  # A pre-7.2 run may have stopped while preparing the hidden atomic source
-  # sibling. Limit discovery to the two exact reserved name shapes and remove
-  # only an empty root-owned directory or a schema-valid setup transaction.
-  for source_stage in "${source_root}"/.r8152-*.lan-ipxe-stage \
-      "${source_root}"/.realtek-r8152-*.lan-ipxe-stage; do
-    [[ -e ${source_stage} || -L ${source_stage} ]] || continue
-    stage_name=${source_stage##*/}
-    if [[ ${stage_name} =~ ^\.(r8152|realtek-r8152)-([0-9][0-9A-Za-z._+~-]*)\.lan-ipxe-stage$ ]]; then
-      module=${BASH_REMATCH[1]}
-      version=${BASH_REMATCH[2]}
+    elif package_present "${pkg}"; then
+      check_report CURRENT "package ${pkg}"
     else
-      continue
-    fi
-    if r8152_source_stage_is_recoverable "${source_stage}" "${module}" "${version}"; then
-      cleanup_r8152_source_stage "${source_stage}" "${module}" "${version}"
-      R8152_PURGE_CHANGED=1
-    else
-      warn "leaving unverified r8152 source staging residue: ${source_stage}"
+      check_report DRIFT "package ${pkg}"
     fi
   done
-
-  # Complete a same-version replacement that was interrupted after its DKMS
-  # registration was removed. The external empty guard remains trustworthy
-  # even if recursive deletion partly consumed the retired source tree.
-  for retirement_guard in \
-      "${source_root}"/.r8152-*.lan-ipxe-retirement-v1.guard \
-      "${source_root}"/.realtek-r8152-*.lan-ipxe-retirement-v1.guard; do
-    [[ -e ${retirement_guard} || -L ${retirement_guard} ]] || continue
-    retirement_name=${retirement_guard##*/}
-    if [[ ${retirement_name} =~ ^\.(r8152|realtek-r8152)-([0-9][0-9A-Za-z._+~-]*)\.lan-ipxe-retirement-v1\.guard$ ]]; then
-      module=${BASH_REMATCH[1]}
-      version=${BASH_REMATCH[2]}
+  for tool in "${SELECTED_TOOLS[@]}"; do
+    case ${tool} in
+      navidrome|owntone) id=rpm:${tool} ;;
+      *) id=${tool} ;;
+    esac
+    if tool_present "${id}"; then
+      check_report CURRENT "tool ${tool}"
     else
-      continue
-    fi
-    if r8152_retirement_guard_is_valid "${retirement_guard}" \
-         "${module}" "${version}"; then
-      source=${source_root}/${module}-${version}
-      recover_r8152_source_retirement "${source}" "${module}" "${version}" 0
-      R8152_PURGE_CHANGED=1
-    else
-      warn "leaving invalid r8152 source retirement guard: ${retirement_guard}"
+      check_report DRIFT "tool ${tool}"
     fi
   done
-  for retirement in "${source_root}"/.r8152-*.lan-ipxe-retirement-v1 \
-      "${source_root}"/.realtek-r8152-*.lan-ipxe-retirement-v1; do
-    [[ -e ${retirement} || -L ${retirement} ]] || continue
-    [[ -e ${retirement}.guard || -L ${retirement}.guard ]] \
-      || warn "leaving unguarded r8152 source retirement residue: ${retirement}"
-  done
-
-  if (( rule_owned )); then
-    sudo rm -f -- "${udev_rule}"
-    if (( marker_owned )); then
-      sudo rm -f -- "${udev_marker}"
-    fi
-    sudo udevadm control --reload-rules
-    R8152_PURGE_CHANGED=1
-    note "removed the setup-managed r8152 udev rule and reloaded udev"
-  elif (( marker_owned )) && [[ ! -e ${udev_rule} && ! -L ${udev_rule} ]]; then
-    sudo rm -f -- "${udev_marker}"
-    R8152_PURGE_CHANGED=1
-    note "removed the stale r8152 udev ownership marker"
-  elif (( marker_owned )); then
-    warn "leaving modified or unsafe r8152 udev rule in place: ${udev_rule}"
-  fi
-
-  if (( ! R8152_PURGE_CHANGED && ! marker_owned )); then
-    note "setup-owned out-of-tree r8152 state: already absent"
-  fi
-}
-
-# Once the newly resolved driver has been installed and verified, retire every
-# other r8152/realtek-r8152 registration. This handles the previous script's
-# incorrect r8152 registration name without risking a gap in NIC support.
-R8152_SUPERSEDED_CHANGED=0
-remove_superseded_r8152_dkms() {
-  local current_module=$1 current_version=$2
-  local source_root=${3:-${R8152_SOURCE_ROOT}}
-  local status remaining line module version entry source package_name package_version
-  local source_digest retirement_guard retirement_name registered_flag prepared
-  local -a registrations=()
-  local -A seen=()
-  R8152_SUPERSEDED_CHANGED=0
-  status=$(dkms status 2>/dev/null) \
-    || die "could not query DKMS registrations before retiring superseded r8152 versions"
-  while IFS= read -r line; do
-    if [[ ${line} =~ ^(r8152|realtek-r8152)/([^,:[:space:]]+) ]]; then
-      module=${BASH_REMATCH[1]}
-      version=${BASH_REMATCH[2]}
-      [[ ${version} =~ ^[0-9][0-9A-Za-z._+~-]*$ ]] \
-        || die "refusing unsafe r8152 DKMS version from status: ${version}"
-      entry=${module}/${version}
-      [[ ${entry} == "${current_module}/${current_version}" \
-         || -n ${seen[${entry}]:-} ]] && continue
-      seen[${entry}]=1
-      registrations+=("${entry}")
-    fi
-  done <<<"${status}"
-
-  for entry in "${registrations[@]}"; do
-    module=${entry%%/*}
-    version=${entry#*/}
-    prepared=0
-    source=${source_root}/${module}-${version}
-    if [[ -e ${source} || -L ${source} ]]; then
-      if [[ ! -d ${source} || -L ${source} ]]; then
-        warn "leaving unsafe superseded r8152 source path: ${source}"
+  if [[ -x ${rustup} ]] && "${rustup}" default >/dev/null 2>&1; then
+    components=$("${rustup}" component list --installed --toolchain stable 2>/dev/null) || components=''
+    for id in "${RUST_COMPONENTS[@]}"; do
+      if grep -q "^${id}" <<<"${components}"; then
+        check_report CURRENT "rustup component ${id}"
       else
-        package_name=$(sed -n 's/^PACKAGE_NAME="\([^"]*\)"/\1/p' \
-          "${source}/dkms.conf" 2>/dev/null | tail -1)
-        package_version=$(sed -n 's/^PACKAGE_VERSION="\([^"]*\)"/\1/p' \
-          "${source}/dkms.conf" 2>/dev/null | tail -1)
-        if [[ ( ${package_name} == r8152 || ${package_name} == realtek-r8152 ) \
-              && ${package_version} == "${version}" ]]; then
-          recover_r8152_source_retirement "${source}" "${module}" "${version}" 1
-          source_digest=$(r8152_source_tree_sha256 "${source}")
-          prepare_r8152_source_retirement "${source}" "${module}" \
-            "${version}" "${source_digest}"
-          prepared=1
-        else
-          warn "leaving unverified superseded r8152 source tree: ${source}"
-        fi
+        check_report DRIFT "rustup component ${id}"
       fi
-    fi
-    sudo dkms remove -m "${module}" -v "${version}" --all \
-      || die "could not remove superseded DKMS registration ${entry}"
-    if (( prepared )); then
-      retire_r8152_source_tree "${source}" "${module}" "${version}"
-      note "removed superseded DKMS source tree ${source}"
-    fi
-    R8152_SUPERSEDED_CHANGED=1
-    note "removed superseded DKMS registration ${entry}"
-  done
-
-  remaining=$(dkms status 2>/dev/null) \
-    || die "could not verify r8152 DKMS registrations after migration"
-  while IFS= read -r line; do
-    if [[ ${line} =~ ^(r8152|realtek-r8152)/([^,:[:space:]]+) ]] \
-       && [[ ${BASH_REMATCH[1]}/${BASH_REMATCH[2]} != \
-             "${current_module}/${current_version}" ]]; then
-      die "superseded r8152 DKMS registration remains: ${line}"
-    fi
-  done <<<"${remaining}"
-
-  for retirement_guard in \
-      "${source_root}"/.r8152-*.lan-ipxe-retirement-v1.guard \
-      "${source_root}"/.realtek-r8152-*.lan-ipxe-retirement-v1.guard; do
-    [[ -e ${retirement_guard} || -L ${retirement_guard} ]] || continue
-    retirement_name=${retirement_guard##*/}
-    [[ ${retirement_name} =~ ^\.(r8152|realtek-r8152)-([0-9][0-9A-Za-z._+~-]*)\.lan-ipxe-retirement-v1\.guard$ ]] \
-      || continue
-    module=${BASH_REMATCH[1]}
-    version=${BASH_REMATCH[2]}
-    if ! r8152_retirement_guard_is_valid "${retirement_guard}" \
-         "${module}" "${version}"; then
-      warn "leaving invalid r8152 source retirement guard: ${retirement_guard}"
-      continue
-    fi
-    registered_flag=0
-    [[ ${module}/${version} != "${current_module}/${current_version}" ]] \
-      || registered_flag=1
-    source=${source_root}/${module}-${version}
-    recover_r8152_source_retirement "${source}" "${module}" "${version}" \
-      "${registered_flag}"
-    (( registered_flag )) || R8152_SUPERSEDED_CHANGED=1
-  done
-}
-
-# Hash a source tree independently of ownership, mtimes and setup markers.
-# This makes the marker sensitive to path, file type/mode and content while
-# remaining stable after the tree is copied beneath /usr/src.
-r8152_source_tree_sha256() {
-  local tree=$1 digest
-  [[ -d ${tree} && ! -L ${tree} ]] \
-    || die "cannot hash unsafe or missing r8152 source tree: ${tree}"
-  digest=$(tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
-      --format=gnu --exclude='./.git' --exclude='./.lan-ipxe-managed' \
-      --exclude='./.lan-ipxe-transaction' \
-      --exclude='./.lan-ipxe-retirement-authorized' \
-      -cf - -C "${tree}" . | sha256sum) \
-    || die "could not calculate the normalized r8152 source-tree digest"
-  digest=${digest%% *}
-  [[ ${digest} =~ ^[[:xdigit:]]{64}$ ]] \
-    || die "normalized r8152 source-tree digest is invalid"
-  printf '%s\n' "${digest,,}"
-}
-
-# A fixed hidden sibling makes interrupted copies discoverable without a glob.
-# Non-empty residue is removable only when both it and its exact transaction
-# marker have the ownership/mode established below. An empty root-owned 0755
-# directory covers interruption between mkdir and the first marker write.
-r8152_source_stage_has_valid_marker() {
-  local stage=$1 module=$2 version=$3
-  local transaction_marker=${stage}/.lan-ipxe-transaction
-  local -a marker_lines=()
-  [[ -d ${stage} && ! -L ${stage} \
-        && $(stat -c '%u:%g:%a' -- "${stage}" 2>/dev/null) == 0:0:755 \
-        && -f ${transaction_marker} && ! -L ${transaction_marker} \
-        && $(stat -c '%u:%g:%a' -- "${transaction_marker}" 2>/dev/null) == 0:0:644 \
-        && ${stage##*/} == ".${module}-${version}.lan-ipxe-stage" ]] \
-    || return 1
-  mapfile -t marker_lines <"${transaction_marker}" || return 1
-  [[ ${#marker_lines[@]} == 7 \
-        && ${marker_lines[0]} == 'managed-by=lan-ipxe/setup-fedora-workstation.sh' \
-        && ${marker_lines[1]} == 'transaction=r8152-source-install-v1' \
-        && ${marker_lines[2]} == "dkms-module=${module}" \
-        && ${marker_lines[3]} == "version=${version}" \
-        && ${marker_lines[4]} =~ ^release-tag=[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$ \
-        && ${marker_lines[5]} =~ ^source-commit=[[:xdigit:]]{40}$ \
-        && ${marker_lines[6]} =~ ^source-tree-sha256=[[:xdigit:]]{64}$ ]]
-}
-
-r8152_source_stage_is_recoverable() {
-  local stage=$1 module=$2 version=$3 first_entry
-  [[ ( ${module} == r8152 || ${module} == realtek-r8152 ) \
-        && ${version} =~ ^[0-9][0-9A-Za-z._+~-]*$ \
-        && -d ${stage} && ! -L ${stage} \
-        && ${stage##*/} == ".${module}-${version}.lan-ipxe-stage" \
-        && $(stat -c '%u:%g:%a' -- "${stage}" 2>/dev/null) == 0:0:755 ]] \
-    || return 1
-  first_entry=$(find "${stage}" -mindepth 1 -maxdepth 1 -print -quit) \
-    || return 1
-  [[ -z ${first_entry} ]] \
-    || r8152_source_stage_has_valid_marker "${stage}" "${module}" "${version}"
-}
-
-cleanup_r8152_source_stage() {
-  local stage=$1 module=$2 version=$3
-  [[ ! -e ${stage} && ! -L ${stage} ]] && return 0
-  r8152_source_stage_is_recoverable "${stage}" "${module}" "${version}" \
-    || die "refusing unsafe r8152 source staging path: ${stage}"
-  sudo rm -rf -- "${stage}" \
-    || die "could not remove interrupted r8152 source staging tree"
-  [[ ! -e ${stage} && ! -L ${stage} ]] \
-    || die "r8152 source staging residue remains: ${stage}"
-  note "removed interrupted r8152 source staging residue ${stage}"
-}
-
-# Keep the retirement guard outside the tree being deleted. If deletion is
-# interrupted, the surviving guard still proves that the fixed hidden sibling
-# is setup-owned and safe to finish deleting on the next run.
-r8152_retirement_guard_is_valid() {
-  local guard=$1 module=$2 version=$3 first_entry
-  [[ ( ${module} == r8152 || ${module} == realtek-r8152 ) \
-        && ${version} =~ ^[0-9][0-9A-Za-z._+~-]*$ \
-        && -d ${guard} && ! -L ${guard} \
-        && ${guard##*/} == ".${module}-${version}.lan-ipxe-retirement-v1.guard" \
-        && $(stat -c '%u:%g:%a' -- "${guard}" 2>/dev/null) == 0:0:700 ]] \
-    || return 1
-  first_entry=$(find "${guard}" -mindepth 1 -maxdepth 1 -print -quit) \
-    || return 1
-  [[ -z ${first_entry} ]]
-}
-
-r8152_retirement_authorization_is_valid() {
-  local source=$1 module=$2 version=$3
-  local authorization=${source}/.lan-ipxe-retirement-authorized
-  local recorded_digest
-  local -a marker_lines=()
-  [[ -d ${source} && ! -L ${source} \
-        && ${source##*/} == "${module}-${version}" \
-        && -f ${authorization} && ! -L ${authorization} \
-        && $(stat -c '%u:%g:%a' -- "${authorization}" 2>/dev/null) == 0:0:644 ]] \
-    || return 1
-  mapfile -t marker_lines <"${authorization}" || return 1
-  [[ ${#marker_lines[@]} == 5 \
-        && ${marker_lines[0]} == 'managed-by=lan-ipxe/setup-fedora-workstation.sh' \
-        && ${marker_lines[1]} == 'transaction=r8152-source-retirement-v1' \
-        && ${marker_lines[2]} == "dkms-module=${module}" \
-        && ${marker_lines[3]} == "version=${version}" \
-        && ${marker_lines[4]} =~ ^source-tree-sha256=[[:xdigit:]]{64}$ ]] \
-    || return 1
-  recorded_digest=${marker_lines[4]#source-tree-sha256=}
-  [[ $(r8152_source_tree_sha256 "${source}") == "${recorded_digest,,}" ]]
-}
-
-prepare_r8152_source_retirement() {
-  local source=$1 module=$2 version=$3 source_digest=$4
-  local retirement=${source%/*}/.${module}-${version}.lan-ipxe-retirement-v1
-  local guard=${retirement}.guard
-  local authorization=${source}/.lan-ipxe-retirement-authorized
-  local authorization_source
-  [[ ! -e ${retirement} && ! -L ${retirement} \
-        && ! -e ${guard} && ! -L ${guard} ]] \
-    || die "r8152 source retirement transaction is already present"
-  [[ ${source_digest} =~ ^[[:xdigit:]]{64}$ \
-        && $(r8152_source_tree_sha256 "${source}") == "${source_digest}" ]] \
-    || die "r8152 source changed before retirement authorization"
-  [[ ! -e ${authorization} && ! -L ${authorization} ]] \
-    || die "r8152 source already contains a retirement authorization"
-  sudo mkdir -m 0700 -- "${guard}" \
-    || die "could not establish the r8152 source retirement guard"
-  r8152_retirement_guard_is_valid "${guard}" "${module}" "${version}" \
-    || die "r8152 source retirement guard validation failed"
-  authorization_source=$(mktemp "${WORK_DIR:-/tmp}/r8152-retirement-marker.XXXXXX") \
-    || die "could not create the r8152 source retirement marker"
-  printf '%s\n' \
-    'managed-by=lan-ipxe/setup-fedora-workstation.sh' \
-    'transaction=r8152-source-retirement-v1' \
-    "dkms-module=${module}" \
-    "version=${version}" \
-    "source-tree-sha256=${source_digest}" \
-    >"${authorization_source}"
-  sudo install -o root -g root -m 0644 -- "${authorization_source}" \
-    "${authorization}" \
-    || die "could not authorize the r8152 source retirement"
-  rm -f -- "${authorization_source}"
-  r8152_retirement_authorization_is_valid "${source}" "${module}" "${version}" \
-    || die "r8152 source retirement authorization validation failed"
-}
-
-R8152_RETIREMENT_RECOVERED=0
-recover_r8152_source_retirement() {
-  local source=$1 module=$2 version=$3 registered=$4
-  local retirement=${source%/*}/.${module}-${version}.lan-ipxe-retirement-v1
-  local guard=${retirement}.guard
-  local authorization=${source}/.lan-ipxe-retirement-authorized
-  R8152_RETIREMENT_RECOVERED=0
-  if [[ ! -e ${guard} && ! -L ${guard} ]]; then
-    [[ ! -e ${retirement} && ! -L ${retirement} ]] \
-      || die "refusing unguarded r8152 source retirement residue: ${retirement}"
-    if [[ -e ${authorization} || -L ${authorization} ]]; then
-      (( registered )) \
-        && r8152_retirement_authorization_is_valid \
-          "${source}" "${module}" "${version}" \
-        || die "refusing unguarded r8152 source retirement authorization"
-      sudo rm -f -- "${authorization}" \
-        || die "could not clear an orphaned r8152 retirement authorization"
-    fi
-    return 0
-  fi
-  r8152_retirement_guard_is_valid "${guard}" "${module}" "${version}" \
-    || die "refusing an invalid r8152 source retirement guard: ${guard}"
-
-  if [[ -e ${retirement} || -L ${retirement} ]]; then
-    (( ! registered )) \
-      || die "r8152 source was retired while its DKMS registration remains"
-    [[ -d ${retirement} && ! -L ${retirement} \
-          && ! -e ${source} && ! -L ${source} ]] \
-      || die "refusing unsafe r8152 source retirement state"
-    sudo rm -rf -- "${retirement}" \
-      || die "could not finish deleting the retired r8152 source tree"
-    [[ ! -e ${retirement} && ! -L ${retirement} ]] \
-      || die "retired r8152 source residue remains"
-    R8152_RETIREMENT_RECOVERED=1
-  elif (( registered )); then
-    [[ -d ${source} && ! -L ${source} ]] \
-      || die "guarded r8152 registration has no safe source tree"
-    if [[ -e ${authorization} || -L ${authorization} ]]; then
-      sudo rm -f -- "${authorization}" \
-        || die "could not clear the canceled r8152 retirement authorization"
-    fi
-  elif [[ -e ${source} || -L ${source} ]]; then
-    [[ -d ${source} && ! -L ${source} ]] \
-      || die "refusing unsafe guarded r8152 source path: ${source}"
-    r8152_retirement_authorization_is_valid "${source}" "${module}" "${version}" \
-      || die "refusing to retire a changed or unauthorized r8152 source tree"
-    sudo mv -T -- "${source}" "${retirement}" \
-      || die "could not resume retiring the unregistered r8152 source tree"
-    sudo rm -rf -- "${retirement}" \
-      || die "could not finish deleting the retired r8152 source tree"
-    [[ ! -e ${source} && ! -L ${source} \
-          && ! -e ${retirement} && ! -L ${retirement} ]] \
-      || die "r8152 source retirement recovery did not finish"
-    R8152_RETIREMENT_RECOVERED=1
-  fi
-  sudo rmdir -- "${guard}" \
-    || die "could not clear the r8152 source retirement guard"
-  [[ ! -e ${guard} && ! -L ${guard} ]] \
-    || die "r8152 source retirement guard remains"
-}
-
-retire_r8152_source_tree() {
-  local source=$1 module=$2 version=$3
-  local retirement=${source%/*}/.${module}-${version}.lan-ipxe-retirement-v1
-  local guard=${retirement}.guard
-  [[ -d ${source} && ! -L ${source} \
-        && ! -e ${retirement} && ! -L ${retirement} ]] \
-    || die "refusing unsafe r8152 source retirement state"
-  r8152_retirement_guard_is_valid "${guard}" "${module}" "${version}" \
-    || die "refusing to retire r8152 source without its valid guard"
-  r8152_retirement_authorization_is_valid "${source}" "${module}" "${version}" \
-    || die "refusing to retire a changed or unauthorized r8152 source tree"
-  sudo mv -T -- "${source}" "${retirement}" \
-    || die "could not atomically retire the r8152 source tree"
-  sudo rm -rf -- "${retirement}" \
-    || die "could not delete the retired r8152 source tree"
-  [[ ! -e ${source} && ! -L ${source} \
-        && ! -e ${retirement} && ! -L ${retirement} ]] \
-    || die "retired r8152 source tree remains"
-  sudo rmdir -- "${guard}" \
-    || die "could not clear the r8152 source retirement guard"
-  [[ ! -e ${guard} && ! -L ${guard} ]] \
-    || die "r8152 source retirement guard remains"
-}
-
-R8152_SOURCE_CHANGED=0
-R8152_SOURCE_REPLACED=0
-R8152_SOURCE_REPLACED_KERNELS=()
-ensure_r8152_source_registration() {
-  local module=$1 version=$2 staged_source=$3 expected_digest=$4
-  local release_tag=$5 release_commit=$6
-  local source_root=${7:-${R8152_SOURCE_ROOT}}
-  local source=${source_root}/${module}-${version}
-  local source_stage=${source_root}/.${module}-${version}.lan-ipxe-stage
-  local status line status_tail registered_kernel
-  local package_name package_version installed_digest
-  local marker=${source}/.lan-ipxe-managed marker_source
-  local transaction_marker=${source_stage}/.lan-ipxe-transaction
-  local transaction_marker_source
-  local marker_module marker_version marker_tag marker_commit marker_digest
-  local registered=0 marker_managed=0 replace_source=0 need_source_install=0
-  local -A seen_kernels=()
-  R8152_SOURCE_CHANGED=0
-  R8152_SOURCE_REPLACED=0
-  R8152_SOURCE_REPLACED_KERNELS=()
-
-  [[ ${module} == r8152 || ${module} == realtek-r8152 ]] \
-    || die "refusing unsupported r8152 DKMS module name: ${module}"
-  [[ ${version} =~ ^[0-9][0-9A-Za-z._+~-]*$ \
-     && ${release_tag} =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$ \
-     && ${release_commit} =~ ^[[:xdigit:]]{40}$ \
-     && ${expected_digest} =~ ^[[:xdigit:]]{64}$ ]] \
-    || die "invalid resolved r8152 source identity"
-  [[ $(r8152_source_tree_sha256 "${staged_source}") == "${expected_digest}" ]] \
-    || die "staged r8152 source-tree digest changed before registration"
-  [[ ! -e ${staged_source}/.lan-ipxe-managed \
-        && ! -L ${staged_source}/.lan-ipxe-managed \
-        && ! -e ${staged_source}/.lan-ipxe-transaction \
-        && ! -L ${staged_source}/.lan-ipxe-transaction \
-        && ! -e ${staged_source}/.lan-ipxe-retirement-authorized \
-        && ! -L ${staged_source}/.lan-ipxe-retirement-authorized ]] \
-    || die "resolved r8152 source unexpectedly contains a setup marker"
-  [[ -d ${source_root} && ! -L ${source_root} ]] \
-    || die "refusing unsafe r8152 source root: ${source_root}"
-
-  marker_source=${WORK_DIR}/r8152-source-marker
-  printf '%s\n' \
-    'managed-by=lan-ipxe/setup-fedora-workstation.sh' \
-    "dkms-module=${module}" \
-    "version=${version}" \
-    "release-tag=${release_tag}" \
-    "source-commit=${release_commit}" \
-    "source-tree-sha256=${expected_digest}" \
-    >"${marker_source}"
-  transaction_marker_source=${WORK_DIR}/r8152-source-transaction-marker
-  printf '%s\n' \
-    'managed-by=lan-ipxe/setup-fedora-workstation.sh' \
-    'transaction=r8152-source-install-v1' \
-    "dkms-module=${module}" \
-    "version=${version}" \
-    "release-tag=${release_tag}" \
-    "source-commit=${release_commit}" \
-    "source-tree-sha256=${expected_digest}" \
-    >"${transaction_marker_source}"
-  cleanup_r8152_source_stage "${source_stage}" "${module}" "${version}"
-
-  status=$(dkms status -m "${module}" -v "${version}" 2>/dev/null) \
-    || die "could not query ${module}/${version} DKMS registration state"
-  if grep -F "${module}/${version}" <<<"${status}" >/dev/null; then
-    registered=1
-  fi
-  recover_r8152_source_retirement "${source}" "${module}" "${version}" \
-    "${registered}"
-  if (( R8152_RETIREMENT_RECOVERED )); then
-    replace_source=1
-    R8152_SOURCE_CHANGED=1
-    R8152_SOURCE_REPLACED=1
-    note "${module}/${version}: recovered an interrupted source retirement"
-  fi
-  if [[ -d ${source} && ! -L ${source} && -f ${marker} && ! -L ${marker} ]] \
-     && grep -Fxq 'managed-by=lan-ipxe/setup-fedora-workstation.sh' "${marker}"; then
-    marker_module=$(sed -n 's/^dkms-module=//p' "${marker}" | tail -1)
-    marker_version=$(sed -n 's/^version=//p' "${marker}" | tail -1)
-    marker_tag=$(sed -n 's/^release-tag=//p' "${marker}" | tail -1)
-    marker_commit=$(sed -n 's/^source-commit=//p' "${marker}" | tail -1)
-    marker_digest=$(sed -n 's/^source-tree-sha256=//p' "${marker}" | tail -1)
-    if [[ ${marker_module} == "${module}" \
-          && ${marker_version} == "${version}" \
-          && ${marker_tag} =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$ \
-          && ${marker_commit} =~ ^[[:xdigit:]]{40}$ \
-          && ${marker_digest} =~ ^[[:xdigit:]]{64}$ ]]; then
-      marker_managed=1
-    fi
-  fi
-
-  if (( registered )); then
-    [[ -d ${source} && ! -L ${source} ]] \
-      || die "registered ${module}/${version} has an unsafe or missing source tree: ${source}"
-    package_name=$(sed -n 's/^PACKAGE_NAME="\([^"]*\)"/\1/p' \
-      "${source}/dkms.conf" 2>/dev/null | tail -1)
-    package_version=$(sed -n 's/^PACKAGE_VERSION="\([^"]*\)"/\1/p' \
-      "${source}/dkms.conf" 2>/dev/null | tail -1)
-    [[ ${package_name} == "${module}" && ${package_version} == "${version}" ]] \
-      || die "registered ${module}/${version} source identity is invalid"
-    installed_digest=$(r8152_source_tree_sha256 "${source}")
-    if (( marker_managed )) \
-       && [[ ${marker_tag} == "${release_tag}" \
-          && ${marker_commit} == "${release_commit}" \
-          && ${marker_digest} == "${expected_digest}" \
-          && ${installed_digest} == "${expected_digest}" ]]; then
-      note "${module}/${version}: source tag, commit and tree digest verified"
-      return 0
-    fi
-    if (( ! marker_managed )) && [[ ${installed_digest} == "${expected_digest}" ]]; then
-      note "${module}/${version}: adopting the verified existing source tree"
-    else
-      replace_source=1
-      need_source_install=1
-      while IFS= read -r line; do
-        [[ ${line} == "${module}/${version}"* && ${line} == *,* ]] || continue
-        status_tail=${line#*,}
-        status_tail=${status_tail#"${status_tail%%[![:space:]]*}"}
-        registered_kernel=${status_tail%%,*}
-        registered_kernel=${registered_kernel%%[[:space:]]*}
-        if [[ ${registered_kernel} =~ ^[0-9][0-9A-Za-z._+~-]*$ \
-              && -z ${seen_kernels[${registered_kernel}]:-} ]]; then
-          seen_kernels[${registered_kernel}]=1
-          R8152_SOURCE_REPLACED_KERNELS+=("${registered_kernel}")
-        fi
-      done <<<"${status}"
-      R8152_SOURCE_CHANGED=1
-      R8152_SOURCE_REPLACED=1
-      note "${module}/${version}: preparing source from a different release commit"
-    fi
-  fi
-
-  if (( ! registered )); then
-    if [[ -e ${source} || -L ${source} ]]; then
-      [[ -d ${source} && ! -L ${source} ]] \
-        || die "refusing unsafe unregistered r8152 source path: ${source}"
-      package_name=$(sed -n 's/^PACKAGE_NAME="\([^"]*\)"/\1/p' \
-        "${source}/dkms.conf" 2>/dev/null | tail -1)
-      package_version=$(sed -n 's/^PACKAGE_VERSION="\([^"]*\)"/\1/p' \
-        "${source}/dkms.conf" 2>/dev/null | tail -1)
-      installed_digest=$(r8152_source_tree_sha256 "${source}")
-      if [[ ${package_name} != "${module}" || ${package_version} != "${version}" \
-            || ( ${marker_managed} == 0 && ${installed_digest} != "${expected_digest}" ) ]]; then
-        die "${source} exists without a matching registration and cannot be safely replaced"
-      fi
-      replace_source=1
-      R8152_SOURCE_CHANGED=1
-      R8152_SOURCE_REPLACED=1
-    fi
-    need_source_install=1
-  fi
-
-  if (( need_source_install )); then
-    # Finish the complete, verified replacement before disturbing the current
-    # registration or its source tree.
-    sudo install -d -o root -g root -m 0755 -- "${source_stage}" \
-      || die "could not create r8152 source staging directory"
-    [[ $(stat -c '%u:%g:%a' -- "${source_stage}" 2>/dev/null) == 0:0:755 ]] \
-      || die "r8152 source staging directory has unsafe ownership or mode"
-    sudo install -o root -g root -m 0644 -- "${transaction_marker_source}" \
-      "${transaction_marker}" \
-      || die "could not establish the r8152 source transaction marker"
-    r8152_source_stage_has_valid_marker "${source_stage}" "${module}" "${version}" \
-      && cmp -s -- "${transaction_marker_source}" "${transaction_marker}" \
-      || die "r8152 source transaction marker validation failed"
-    if ! sudo cp -a --no-preserve=ownership -- "${staged_source}/." "${source_stage}/"; then
-      cleanup_r8152_source_stage "${source_stage}" "${module}" "${version}"
-      die "failed to install the resolved r8152 source tree"
-    fi
-    [[ ! -e ${source_stage}/.lan-ipxe-retirement-authorized \
-          && ! -L ${source_stage}/.lan-ipxe-retirement-authorized ]] \
-      || die "staged r8152 source contains a retirement authorization"
-    sudo install -o root -g root -m 0644 -- "${marker_source}" \
-      "${source_stage}/.lan-ipxe-managed" \
-      || die "could not install the r8152 source ownership marker"
-    sudo chown -R root:root -- "${source_stage}" \
-      || die "could not set ownership on the staged r8152 source tree"
-    r8152_source_stage_has_valid_marker "${source_stage}" "${module}" "${version}" \
-      && cmp -s -- "${transaction_marker_source}" "${transaction_marker}" \
-      || die "staged r8152 source lost its transaction identity"
-    [[ $(r8152_source_tree_sha256 "${source_stage}") == "${expected_digest}" ]] \
-      || die "staged r8152 source-tree digest mismatch"
-
-    if [[ -e ${source} || -L ${source} ]]; then
-      prepare_r8152_source_retirement "${source}" "${module}" "${version}" \
-        "${installed_digest}"
-    fi
-    if (( registered )); then
-      sudo dkms remove -m "${module}" -v "${version}" --all \
-        || die "could not remove stale ${module}/${version} before source replacement"
-      if dkms status -m "${module}" -v "${version}" 2>/dev/null \
-           | grep -F "${module}/${version}" >/dev/null; then
-        die "stale ${module}/${version} registration remains after removal"
-      fi
-      registered=0
-    fi
-    if [[ -e ${source} || -L ${source} ]]; then
-      retire_r8152_source_tree "${source}" "${module}" "${version}"
-      note "${module}/${version}: retired the superseded source tree"
-    fi
-    [[ ! -e ${source} && ! -L ${source} ]] \
-      || die "r8152 source path appeared while staging: ${source}"
-    sudo mv -T -- "${source_stage}" "${source}" \
-      || die "could not atomically activate the r8152 source tree"
-    [[ -d ${source} && ! -L ${source} \
-          && $(r8152_source_tree_sha256 "${source}") == "${expected_digest}" ]] \
-      || die "activated r8152 source-tree digest mismatch"
-    sudo rm -f -- "${source}/.lan-ipxe-transaction" \
-      || die "could not finish the r8152 source installation transaction"
-    [[ ! -e ${source}/.lan-ipxe-transaction \
-          && ! -L ${source}/.lan-ipxe-transaction ]] \
-      || die "r8152 source transaction marker remains after activation"
-    sudo dkms add -m "${module}" -v "${version}" \
-      || die "failed to register ${module} ${version} with DKMS"
-    R8152_SOURCE_CHANGED=1
-    note "registered ${module} ${version} from ${release_tag} (${release_commit})"
-  fi
-
-  put_file -s "${marker_source}" "${marker}"
-  (( replace_source == 0 )) || note "${module}/${version}: replacement source registered"
-}
-
-# select_dkms_kernel <running-kernel> <modules-root> <boot-root>: prefer the
-# running kernel when it has usable headers and a boot image; otherwise choose
-# the newest installed kernel of the same flavour that has both. Sets DKMS_KERNEL.
-DKMS_KERNEL=
-select_dkms_kernel() {
-  local running_kernel=$1 modules_root=$2 boot_root=$3
-  local kernel_tree candidate_kernel sorted_kernels
-  local running_flavour='' candidate_flavour=''
-  local kernel_candidates=()
-  DKMS_KERNEL=${running_kernel}
-  [[ ${running_kernel} != *+* ]] || running_flavour=${running_kernel#*+}
-  if [[ -f ${modules_root}/${DKMS_KERNEL}/build/Makefile \
-        && -s ${boot_root}/vmlinuz-${DKMS_KERNEL} ]]; then
-    return 0
-  fi
-  for kernel_tree in "${modules_root}"/*; do
-    [[ -d ${kernel_tree} ]] || continue
-    candidate_kernel=${kernel_tree#"${modules_root}"/}
-    candidate_flavour=
-    [[ ${candidate_kernel} != *+* ]] || candidate_flavour=${candidate_kernel#*+}
-    [[ ${candidate_flavour} == "${running_flavour}" ]] || continue
-    [[ -f ${kernel_tree}/build/Makefile \
-       && -s ${boot_root}/vmlinuz-${candidate_kernel} ]] || continue
-    kernel_candidates+=("${candidate_kernel}")
-  done
-  (( ${#kernel_candidates[@]} )) \
-    || die "no installed kernel has both usable headers and a boot image"
-  sorted_kernels=$(printf '%s\n' "${kernel_candidates[@]}" | sort -V) \
-    || die "could not sort installed kernel/header candidates"
-  mapfile -t kernel_candidates <<<"${sorted_kernels}"
-  DKMS_KERNEL=${kernel_candidates[${#kernel_candidates[@]} - 1]}
-}
-
-R8152_KERNEL_REBOOT_REQUIRED=0
-R8152_SECURE_BOOT_WARNING=0
-R8152_PURGE_REBOOT_REQUIRED=0
-R8152_LOADED_OUT_OF_TREE=0
-install_r8152_dkms() {
-  local running_kernel=$1
-  local actual_r8152_commit repo_ver repo_module source_stage source_digest target_kernel
-  local kernel_tree kernel_package
-  local rule_sha udev_marker_source r8152_changed=0 udev_rule_changed=0
-  local -a target_kernels=()
-  local -A seen_target_kernels=()
-
-  if [[ ! -f /usr/lib/modules/${running_kernel}/build/Makefile \
-        || ! -s /boot/vmlinuz-${running_kernel} ]]; then
-    note "installing headers for running kernel ${running_kernel}"
-    if ! sudo dnf -y install "kernel-devel-uname-r = ${running_kernel}" \
-       || [[ ! -f /usr/lib/modules/${running_kernel}/build/Makefile \
-             || ! -s /boot/vmlinuz-${running_kernel} ]]; then
-      kernel_package=$(rpm -qf --qf '%{NAME}\n' "/boot/vmlinuz-${running_kernel}") \
-        || die "could not identify the running kernel's RPM"
-      [[ ${kernel_package} == kernel*-core && ${kernel_package} != *$'\n'* ]] \
-        || die "unexpected running-kernel package: ${kernel_package}"
-      kernel_package=${kernel_package%-core}
-      warn "Headers for ${running_kernel} are no longer available; installing the newest ${kernel_package} and its headers instead."
-      sudo dnf -y --refresh install "${kernel_package}" "${kernel_package}-devel"
-    fi
-  fi
-  select_dkms_kernel "${running_kernel}" /usr/lib/modules /boot
-  if [[ ${DKMS_KERNEL} != "${running_kernel}" ]]; then
-    R8152_KERNEL_REBOOT_REQUIRED=1
-    warn "Building r8152 for installed kernel ${DKMS_KERNEL}; reboot into that kernel after setup (currently running ${running_kernel})."
-  fi
-
-  git init -q "${WORK_DIR}/r8152"
-  git -C "${WORK_DIR}/r8152" remote add origin "${R8152_REPO}"
-  git -C "${WORK_DIR}/r8152" fetch -q --depth 1 origin "${R8152_COMMIT}"
-  git -C "${WORK_DIR}/r8152" checkout -q --detach FETCH_HEAD
-  actual_r8152_commit=$(git -C "${WORK_DIR}/r8152" rev-parse HEAD) \
-    || die "could not identify the fetched r8152 revision"
-  [[ ${actual_r8152_commit} == "${R8152_COMMIT}" ]] \
-    || die "r8152 revision mismatch (expected ${R8152_COMMIT}, got ${actual_r8152_commit})"
-  repo_module=$(sed -n 's/^PACKAGE_NAME="\(.*\)"/\1/p' \
-    "${WORK_DIR}/r8152/dkms.conf")
-  repo_ver=$(sed -n 's/^PACKAGE_VERSION="\(.*\)"/\1/p' \
-    "${WORK_DIR}/r8152/dkms.conf")
-  [[ ${repo_module} == r8152 || ${repo_module} == realtek-r8152 ]] \
-    || die "the resolved r8152 dkms.conf has an unexpected PACKAGE_NAME"
-  [[ ${repo_ver} =~ ^[0-9][0-9A-Za-z._+~-]*$ ]] \
-    || die "the resolved r8152 dkms.conf has an invalid PACKAGE_VERSION"
-  note "verified upstream release ${R8152_TAG} at ${R8152_COMMIT}"
-
-  source_stage=${WORK_DIR}/r8152-source-stage
-  mkdir -p "${source_stage}"
-  if ! git -C "${WORK_DIR}/r8152" archive --format=tar HEAD \
-       | tar -xf - -C "${source_stage}"; then
-    die "failed to stage the resolved r8152 source tree"
-  fi
-  source_digest=$(r8152_source_tree_sha256 "${source_stage}")
-  ensure_r8152_source_registration "${repo_module}" "${repo_ver}" \
-    "${source_stage}" "${source_digest}" "${R8152_TAG}" "${R8152_COMMIT}"
-  (( ! R8152_SOURCE_CHANGED )) || r8152_changed=1
-
-  target_kernels+=("${DKMS_KERNEL}")
-  seen_target_kernels[${DKMS_KERNEL}]=1
-  # A recovered retirement no longer has the old `dkms status` lines. Rebuild
-  # every usable installed kernel after any source replacement so crash
-  # recovery cannot silently omit a previously registered boot image.
-  if (( R8152_SOURCE_REPLACED )); then
-    for kernel_tree in /usr/lib/modules/*; do
-      [[ -d ${kernel_tree} ]] || continue
-      target_kernel=${kernel_tree##*/}
-      [[ -f ${kernel_tree}/build/Makefile \
-         && -s /boot/vmlinuz-${target_kernel} \
-         && -z ${seen_target_kernels[${target_kernel}]:-} ]] || continue
-      seen_target_kernels[${target_kernel}]=1
-      target_kernels+=("${target_kernel}")
     done
+  else
+    check_report DRIFT "rustup stable toolchain (${rustup})"
   fi
-  for target_kernel in "${R8152_SOURCE_REPLACED_KERNELS[@]}"; do
-    [[ -z ${seen_target_kernels[${target_kernel}]:-} ]] || continue
-    if [[ -f /usr/lib/modules/${target_kernel}/build/Makefile \
-          && -s /boot/vmlinuz-${target_kernel} ]]; then
-      seen_target_kernels[${target_kernel}]=1
-      target_kernels+=("${target_kernel}")
+  for pkg in "${DISTRO_RUST_PKGS[@]}"; do
+    ! rpm -q --quiet -- "${pkg}" 2>/dev/null \
+      || check_report DRIFT "distro package ${pkg}: installed (purged in favor of rustup)"
+  done
+  for id in "${SELECTED_FLATPAKS[@]}"; do
+    if flatpak info --system "${id}" >/dev/null 2>&1; then
+      check_report CURRENT "flatpak ${id}"
     else
-      warn "not rebuilding replaced r8152 registration for unavailable kernel ${target_kernel}"
+      check_report DRIFT "flatpak ${id}"
     fi
   done
-  for target_kernel in "${target_kernels[@]}"; do
-    if ! dkms status -m "${repo_module}" -v "${repo_ver}" -k "${target_kernel}" 2>/dev/null \
-         | grep -F ': installed' >/dev/null; then
-      note "building ${repo_module} ${repo_ver} for ${target_kernel}"
-      sudo dkms install -m "${repo_module}" -v "${repo_ver}" -k "${target_kernel}"
-      r8152_changed=1
+  for entry in "${MANAGED_FILES[@]}"; do
+    src=${FILES}/${entry%%|*} dst=${entry#*|}
+    if cmp -s -- "${src}" "${dst}"; then
+      check_report CURRENT "file ${dst}"
     else
-      note "${repo_module} ${repo_ver}: installed for ${target_kernel}"
+      check_report DRIFT "file ${dst}"
     fi
   done
-  for target_kernel in "${target_kernels[@]}"; do
-    dkms status -m "${repo_module}" -v "${repo_ver}" -k "${target_kernel}" 2>/dev/null \
-      | grep -F ': installed' >/dev/null \
-      || die "DKMS did not report ${repo_module} ${repo_ver} installed for ${target_kernel}"
-  done
-
-  remove_superseded_r8152_dkms "${repo_module}" "${repo_ver}"
-  if (( R8152_SUPERSEDED_CHANGED )); then
-    dkms status -m "${repo_module}" -v "${repo_ver}" -k "${DKMS_KERNEL}" 2>/dev/null \
-      | grep -F ': installed' >/dev/null \
-      || die "current ${repo_module} ${repo_ver} was disturbed while retiring superseded registrations"
-    r8152_changed=1
-  fi
-
-  put_file -s "${WORK_DIR}/r8152/udev/rules.d/50-usb-realtek-net.rules" \
-    "${R8152_UDEV_RULE}"
-  udev_rule_changed=${PUT_FILE_CHANGED}
-  rule_sha=$(sha256sum -- "${WORK_DIR}/r8152/udev/rules.d/50-usb-realtek-net.rules") \
-    || die "could not hash the verified r8152 udev rule"
-  rule_sha=${rule_sha%% *}
-  udev_marker_source=${WORK_DIR}/r8152-udev-marker
-  printf '%s\n' \
-    'managed-by=lan-ipxe/setup-fedora-workstation.sh' \
-    "rule-sha256=${rule_sha}" \
-    >"${udev_marker_source}"
-  put_file -s "${udev_marker_source}" "${R8152_UDEV_MARKER}"
-  if (( udev_rule_changed )); then
-    sudo udevadm control --reload-rules
-    note "udev rules reloaded"
-  fi
-  if (( R8152_SUPERSEDED_CHANGED || R8152_SOURCE_REPLACED )); then
-    sudo dracut --force --regenerate-all
-    note "regenerated all installed-kernel initramfs images after replacing r8152 registrations"
-  elif (( r8152_changed )); then
-    sudo dracut --force "/boot/initramfs-${DKMS_KERNEL}.img" "${DKMS_KERNEL}"
-  fi
-
-  if mokutil --sb-state 2>/dev/null | grep -Fi 'SecureBoot enabled' >/dev/null; then
-    if [[ -f /var/lib/dkms/mok.pub ]] \
-       && sudo mokutil --test-key /var/lib/dkms/mok.pub >/dev/null 2>&1; then
-      note "Secure Boot: DKMS MOK is enrolled"
+  for dst in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt; do
+    if [[ -L ${dst} && $(readlink -- "${dst}") == "${CA_BUNDLE}" ]]; then
+      check_report CURRENT "symlink ${dst}"
     else
-      R8152_SECURE_BOOT_WARNING=1
-      warn "Secure Boot is enabled but the DKMS MOK is not enrolled; enroll /var/lib/dkms/mok.pub before expecting r8152 to load."
+      check_report DRIFT "symlink ${dst}"
     fi
+  done
+  for unit in "${SELECTED_SERVICES[@]}" cockpit.socket dnf5-automatic.timer; do
+    if systemctl is-enabled --quiet "${unit}" 2>/dev/null; then
+      check_report CURRENT "unit ${unit}"
+    else
+      check_report DRIFT "unit ${unit}"
+    fi
+  done
+  if [[ $(systemctl get-default 2>/dev/null) == graphical.target ]]; then
+    check_report CURRENT "default target graphical.target"
+  else
+    check_report DRIFT "default target graphical.target"
   fi
+  if (( CHECK_DRIFT )); then
+    printf 'Result: drift found\n'
+    return 2
+  fi
+  printf 'Result: converged\n'
 }
 
-R8152_INITRAMFS_REBUILT=0
-# shellcheck disable=SC2120
-reconcile_r8152_initramfs() {
-  local modules_root=${1:-/usr/lib/modules}
-  local boot_root=${2:-/boot}
-  local kernel_tree kernel image contents
-  local needs_rebuild=${R8152_PURGE_MODULE_CHANGED}
-  local -a installed_kernels=()
-  R8152_INITRAMFS_REBUILT=0
-
-  for kernel_tree in "${modules_root}"/*; do
-    [[ -d ${kernel_tree} ]] || continue
-    kernel=${kernel_tree#"${modules_root}"/}
-    [[ ${kernel} =~ ^[0-9][0-9A-Za-z._+~-]*$ \
-       && -s ${boot_root}/vmlinuz-${kernel} ]] || continue
-    installed_kernels+=("${kernel}")
-    image=${boot_root}/initramfs-${kernel}.img
-    if ! sudo test -s "${image}"; then
-      needs_rebuild=1
-      continue
-    fi
-    if ! contents=$(sudo lsinitrd "${image}" 2>/dev/null); then
-      needs_rebuild=1
-      continue
-    fi
-    if grep -Eq 'modules/[^/[:space:]]+/(extra|updates|weak-updates)(/[^[:space:]]*)*/(realtek-)?r8152[.]ko([.]|$)' \
-         <<<"${contents}"; then
-      needs_rebuild=1
-    fi
-  done
-  (( ${#installed_kernels[@]} )) \
-    || die "no installed Fedora kernels with boot images were found"
-
-  if (( needs_rebuild )); then
-    sudo dracut --force --regenerate-all
-    R8152_INITRAMFS_REBUILT=1
-  fi
-
-  for kernel in "${installed_kernels[@]}"; do
-    image=${boot_root}/initramfs-${kernel}.img
-    sudo test -s "${image}" \
-      || die "dracut did not produce ${image} while reconciling r8152"
-    contents=$(sudo lsinitrd "${image}" 2>/dev/null) \
-      || die "could not inspect ${image} after reconciling r8152"
-    if grep -Eq 'modules/[^/[:space:]]+/(extra|updates|weak-updates)(/[^[:space:]]*)*/(realtek-)?r8152[.]ko([.]|$)' \
-         <<<"${contents}"; then
-      die "${image} still contains an out-of-tree r8152 module after reconciliation"
-    fi
-  done
-}
-
-manage_r8152_driver() {
-  local running_kernel=$1
-  local sysfs_root=${2:-${R8152_SYSFS_ROOT}}
-  if kernel_version_at_least "${running_kernel}" "${R8152_IN_TREE_KERNEL_MIN}"; then
-    note "kernel ${running_kernel} is ${R8152_IN_TREE_KERNEL_MIN}+; using its in-tree r8152 driver"
-    purge_r8152_dkms "${R8152_SOURCE_ROOT}" "${R8152_UDEV_RULE}" \
-      "${R8152_UDEV_MARKER}"
-    reconcile_r8152_initramfs /usr/lib/modules /boot
-    if (( R8152_PURGE_MODULE_CHANGED || R8152_INITRAMFS_REBUILT )); then
-      R8152_PURGE_REBOOT_REQUIRED=1
-      note "installed-kernel initramfs images contain no out-of-tree r8152 module"
-    fi
-    if [[ -r ${sysfs_root}/module/r8152/taint ]] \
-       && grep -Fq 'O' "${sysfs_root}/module/r8152/taint"; then
-      R8152_LOADED_OUT_OF_TREE=1
-      R8152_PURGE_REBOOT_REQUIRED=1
-      warn "The loaded r8152 module is marked out-of-tree; reboot to switch kernel ${running_kernel} to its in-tree driver."
-    fi
-    return 0
-  fi
-
-  resolve_r8152_release
-  note "resolved latest stable upstream ${R8152_TAG} (${R8152_COMMIT})"
-  install_r8152_dkms "${running_kernel}"
-}
+select_profile
+if [[ ${MODE} == dry-run ]]; then
+  print_plan
+  exit 0
+fi
 
 #--- Preflight --------------------------------------------------------------
 [[ ${EUID} -ne 0 ]] || die "Run as your normal user, not root (sudo is used where needed)."
 [[ -f /etc/fedora-release ]] || die "This script is for Fedora."
 [[ -d ${FILES} ]] || die "Payload directory not found: ${FILES}"
+if [[ ${MODE} == check ]]; then
+  command -v rpm >/dev/null || die "rpm is required."
+  check_status=0
+  check_state || check_status=$?
+  exit "${check_status}"
+fi
 command -v sudo >/dev/null || die "sudo is required."
 command -v dnf  >/dev/null || die "dnf is required."
 command -v sha256sum >/dev/null || die "sha256sum is required."
@@ -2382,9 +1538,11 @@ FEDORA_VERSION=$(rpm -E %fedora)
 [[ ${FEDORA_VERSION} =~ ^[0-9]+$ ]] || die "could not determine the Fedora release number"
 (( FEDORA_VERSION >= FEDORA_MIN_VERSION )) \
   || die "Fedora ${FEDORA_MIN_VERSION}+ is required (found ${FEDORA_VERSION})."
+RPMFUSION_FREE_URL=${RPMFUSION_FREE_URL_BASE}${FEDORA_VERSION}.noarch.rpm
+RPMFUSION_NONFREE_URL=${RPMFUSION_NONFREE_URL_BASE}${FEDORA_VERSION}.noarch.rpm
 DNF_VERSION_OUTPUT=$(dnf --version 2>/dev/null) || die "could not query the DNF version"
 [[ ${DNF_VERSION_OUTPUT} == dnf5\ version* ]] || die "DNF5 is required."
-if [[ ${ARCH} == x86_64 ]]; then IS_X86_64=1; X86_64_EXTRAS=on; else IS_X86_64=0; X86_64_EXTRAS=off; fi
+if (( IS_X86_64 )); then X86_64_EXTRAS=on; else X86_64_EXTRAS=off; fi
 case ${ARCH} in
   x86_64)
     SPEEDTEST_ARCHIVE_SHA256=${SPEEDTEST_ARCHIVE_SHA256_X86_64}
@@ -2416,7 +1574,7 @@ case ${ARCH} in
     die "Antigravity, OpenCode, Codex, and Zed support only x86_64 and aarch64 (found ${ARCH})."
     ;;
 esac
-log "Fedora ${FEDORA_VERSION} on ${ARCH} (x86_64-only extras: ${X86_64_EXTRAS})"
+log "Fedora ${FEDORA_VERSION} on ${ARCH} (profile: ${PROFILE}; x86_64-only extras: ${X86_64_EXTRAS}$( (( NO_UPGRADE )) && echo '; --no-upgrade'))"
 
 WORK_DIR=$(mktemp -d)
 SUDO_KEEPALIVE=
@@ -2487,14 +1645,17 @@ ensure_symlink -s "${CA_BUNDLE}" /etc/pki/tls/certs/ca-bundle.crt
 
 #--- 1b. Repositories, continued (x86_64 repo files overwrite the disabled
 #        ones RPM Fusion ships, so they come after that install) ------------
-log "Repositories (Chrome, x86_64 extras, Microsoft, Plex, sing-box)"
+log "Repositories (Chrome, x86_64 extras, Microsoft, full-profile Steam/Plex, sing-box)"
 put_file -s "${FILES}/etc/yum.repos.d/google-chrome.repo" /etc/yum.repos.d/google-chrome.repo
 import_rpm_key "${GOOGLE_KEY_URL}" linux-packages-keymaster@google.com
 if (( IS_X86_64 )); then
-  for repo in rpmfusion-nonfree-nvidia-driver rpmfusion-nonfree-steam; do
-    put_file -s "${FILES}/etc/yum.repos.d/${repo}.repo" "/etc/yum.repos.d/${repo}.repo"
-  done
+  put_file -s "${FILES}/etc/yum.repos.d/rpmfusion-nonfree-nvidia-driver.repo" \
+    /etc/yum.repos.d/rpmfusion-nonfree-nvidia-driver.repo
   put_file -s "${FILES}/etc/yum.repos.d/microsoft-prod.repo" /etc/yum.repos.d/microsoft-prod.repo
+fi
+if (( IS_X86_64 )) && [[ ${PROFILE} == full ]]; then
+  put_file -s "${FILES}/etc/yum.repos.d/rpmfusion-nonfree-steam.repo" \
+    /etc/yum.repos.d/rpmfusion-nonfree-steam.repo
   # Plex publishes x86_64 RPMs only; the key signs both metadata and packages.
   import_rpm_key "${PLEX_KEY_URL}" "Plex Inc." \
     "${PLEX_KEY_FINGERPRINT}" "${PLEX_KEY_FILE}"
@@ -2516,17 +1677,18 @@ else
 fi
 
 #--- 3. Packages ------------------------------------------------------------
-log "Applying all available DNF package updates"
-sudo dnf -y upgrade --refresh
-
-if (( IS_X86_64 )); then
-  PKGS+=("${PKGS_X86_64[@]}")
+if (( NO_UPGRADE )); then
+  log "Skipping DNF package updates (--no-upgrade)"
+else
+  log "Applying all available DNF package updates"
+  sudo dnf -y upgrade --refresh
 fi
-log "Package set (${#PKGS[@]} entries)"
+
+log "Package set (${PROFILE}: ${#SELECTED_PKGS[@]} entries)"
 # DNF handles installed packages and partially installed groups itself. Keep
 # queries/transactions in the same root cache, with prompts answered and output
 # visible: an unprivileged, captured `group list` can wait on unseen key prompts.
-sudo dnf -y install "${PKGS[@]}"
+sudo dnf -y install "${SELECTED_PKGS[@]}"
 locale -a | grep -Fxi 'en_US.utf8' >/dev/null \
   || die "glibc-langpack-en was installed, but the en_US.UTF-8 locale is unavailable"
 for required_command in base64 git jq od sha512sum; do
@@ -2534,43 +1696,54 @@ for required_command in base64 git jq od sha512sum; do
     || die "release resolution requires ${required_command}"
 done
 
-log "Navidrome (verified official release RPM)"
-install_navidrome
+if [[ ${PROFILE} == full ]]; then
+  log "Navidrome (verified official release RPM)"
+  keep_installed rpm:navidrome || install_navidrome
 
-log "OwnTone (verified upstream release, built as an RPM)"
-install_owntone
+  log "OwnTone (verified upstream release, built as an RPM)"
+  keep_installed rpm:owntone || install_owntone
+fi
 
 #--- 4. Native developer tools ---------------------------------------------
 if [[ ${ARCH} == aarch64 ]]; then
   log "PowerShell (verified native ARM64 release)"
-  install_powershell_arm64
+  keep_installed pwsh || install_powershell_arm64
 fi
-log "Resolving latest verified native developer-tool releases"
-resolve_native_tool_releases
+# --no-upgrade resolves upstream releases only when a tool is still missing.
+if (( ! NO_UPGRADE )) || ! tool_present antigravity || ! tool_present agy \
+    || ! tool_present opencode || ! tool_present zed; then
+  log "Resolving latest verified native developer-tool releases"
+  resolve_native_tool_releases
+fi
 
 log "Antigravity 2.0+ desktop + CLI"
-install_antigravity_desktop
-install_antigravity_cli
+keep_installed antigravity || install_antigravity_desktop
+keep_installed agy || install_antigravity_cli
 
 log "OpenCode CLI (verified native release)"
-install_opencode_cli
+keep_installed opencode || install_opencode_cli
 
 # OpenAI's supported standalone installer resolves the current native release
 # and validates its published checksums before activating it under ~/.local.
 log "Codex CLI (official standalone release)"
-install_codex_cli
+keep_installed codex || install_codex_cli
 
 # Fedora has no first-party Zed RPM. Install Zed's official release archive
 # only after checking the digest published with the immutable GitHub asset.
 log "Zed (verified official native release)"
-install_zed
+keep_installed zed || install_zed
 
 for command_name in agy antigravity claude code codex opencode zed; do
   PATH="${HOME}/.local/bin:${PATH}" command -v "${command_name}" >/dev/null \
     || die "expected workstation command is unavailable: ${command_name}"
 done
 
-#--- 5. speedtest CLI -------------------------------------------------------
+#--- 5. Rust (rustup only) --------------------------------------------------
+log "Rust via rustup (stable + ${RUST_COMPONENTS[*]})"
+purge_distro_rust
+install_rustup_toolchain
+
+#--- 6. speedtest CLI -------------------------------------------------------
 log "Ookla speedtest CLI"
 if [[ -z ${SPEEDTEST_ARCHIVE_SHA256} ]]; then
   warn "Ookla publishes no ${ARCH} archive; skipping speedtest CLI"
@@ -2605,24 +1778,16 @@ else
   fi
 fi
 
-#--- 6. Realtek r8152 DKMS driver -------------------------------------------
-# Resolve upstream's latest stable release, bind its tag to one commit, and
-# perform the small DKMS workflow directly instead of executing a mutable
-# master-branch helper as root. Kernel 7.2 and newer carries the required
-# driver in-tree, so that path performs only a bounded purge and never queries
-# the upstream release API.
-log "Realtek r8152 USB NIC driver (DKMS)"
-manage_r8152_driver "${KERNEL}"
-
 #--- 7. Flatpaks ------------------------------------------------------------
 log "Flatpaks"
 sudo flatpak remote-add --if-not-exists --system flathub https://flathub.org/repo/flathub.flatpakrepo
-flatpak_install "${FLATPAKS[@]}"
-if (( IS_X86_64 )); then
-  flatpak_install "${FLATPAKS_X86_64[@]}"
+flatpak_install "${SELECTED_FLATPAKS[@]}"
+if (( NO_UPGRADE )); then
+  note "Flatpak updates skipped (--no-upgrade)"
+else
+  sudo flatpak update -y --system --noninteractive
+  note "all installed system Flatpaks checked for updates"
 fi
-sudo flatpak update -y --system --noninteractive
-note "all installed system Flatpaks checked for updates"
 
 #--- 8. Dotfiles and system config ------------------------------------------
 log "Dotfiles"
@@ -2643,10 +1808,7 @@ put_file -s "${FILES}/etc/bash.bashrc" /etc/profile.d/01-arch-prompt.sh
 # Enabled only, not started: they come up on the next boot (starting gdm
 # from inside a session would tear that session down)
 log "Services"
-if (( IS_X86_64 )); then
-  SERVICES+=("${SERVICES_X86_64[@]}")
-fi
-for unit in "${SERVICES[@]}"; do
+for unit in "${SELECTED_SERVICES[@]}"; do
   enable_unit "${unit}"
 done
 if [[ $(systemctl get-default) == graphical.target ]]; then
@@ -2679,14 +1841,4 @@ if (( PUT_FILE_CHANGED )) || [[ ! -f /etc/dconf/db/gdm ]]; then
   sudo restorecon -R /etc/dconf || die "failed to restore SELinux labels under /etc/dconf"
   note "dconf database updated"
 fi
-
 log "Done. Newly enabled services, zram and the default target take effect on the next boot."
-if (( R8152_SECURE_BOOT_WARNING )); then
-  warn "r8152 will remain unavailable under Secure Boot until the DKMS MOK is enrolled and the host is rebooted."
-fi
-if (( R8152_KERNEL_REBOOT_REQUIRED )); then
-  warn "Reboot into ${DKMS_KERNEL} to use r8152; headers for the running kernel ${KERNEL} were unavailable."
-fi
-if (( R8152_PURGE_REBOOT_REQUIRED && ! R8152_LOADED_OUT_OF_TREE )); then
-  warn "Reboot to finish switching from the removed out-of-tree r8152 module to the kernel ${KERNEL} in-tree driver."
-fi

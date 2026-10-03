@@ -843,6 +843,26 @@ class Workstation:
             self.command(['/usr/bin/tar', '-xzf', archive, '-C', folder, 'speedtest'], mutate=True)
             self.file(path, (folder / 'speedtest').read_bytes(), 0o755)
 
+    def purge_distro_rust(self):
+        # rustup is the only Rust source on every platform; Homebrew's rust
+        # formula would shadow rustup's keg-only proxies on PATH.
+        if not self.formula_installed('rust'):
+            return
+        if self.preview:
+            self.emit('DRIFT', 'formula rust', 'purged in favor of rustup'); return
+        self.command([self.brew, 'uninstall', '--formula', 'rust'], mutate=True, capture=False)
+        if self.formula_installed('rust'):
+            raise RuntimeError('Homebrew rust formula is still installed')
+        self.emit('CHANGED', 'formula rust', 'purged in favor of rustup')
+
+    def brew_cleanup(self):
+        # Install-time cleanup is disabled for quiet, predictable package steps;
+        # prune downloads and superseded kegs explicitly so small disks don't
+        # accumulate the whole run's bottles and cask installers.
+        if self.preview or not self.updated:
+            return
+        self.command([self.brew, 'cleanup', '--prune=all'], mutate=True, capture=False, check=False)
+
     def rust(self):
         root = self.home / '.rustup'
         toolchain = root / 'toolchains/stable-aarch64-apple-darwin'
@@ -1197,9 +1217,12 @@ class Workstation:
         names = self.manifest['formulae']['core'] + (self.manifest['formulae']['full'] if self.args.profile == 'full' else [])
         for name in names:
             self.attempt('formula ' + name, self.package, name)
+        self.brew_cleanup()
+        self.attempt('Distro Rust', self.purge_distro_rust)
         self.attempt('Rust', self.rust)
         for app in self.selected_apps():
             self.attempt(app['name'], self.application, app)
+        self.brew_cleanup()
         for name in ('codex', 'claude'):
             self.attempt(name, self.native_cli, name)
         for cli in self.manifest['feed_clis']:
@@ -1210,6 +1233,7 @@ class Workstation:
         if self.args.profile == 'full':
             self.attempt('Android full', self.android)
             self.attempt('SteamCMD', self.package, 'steamcmd', 'cask')
+            self.brew_cleanup()
         self.attempt('Shell configuration', self.shell)
         self.attempt('Editor configuration', self.editor)
         self.attempt('Desktop configuration', self.desktop)

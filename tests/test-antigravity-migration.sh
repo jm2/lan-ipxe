@@ -83,7 +83,7 @@ test_arch_yay_devel_updates() (
     "${REPO_ROOT}/setup-arch-workstation.sh")
   init_line=$(awk '$0 == "  yay -Y --gendb" { print NR }' \
     "${REPO_ROOT}/setup-arch-workstation.sh")
-  update_line=$(awk '$0 == "yay -Sua --devel" { print NR }' \
+  update_line=$(awk '$0 ~ /^ *yay -Sua --devel$/ { print NR }' \
     "${REPO_ROOT}/setup-arch-workstation.sh")
   [[ ${guard_line} =~ ^[0-9]+$ && ${init_line} =~ ^[0-9]+$ && ${update_line} =~ ^[0-9]+$ ]] \
     || fail 'Arch setup does not conditionally initialize Yay and request devel updates exactly once'
@@ -272,9 +272,7 @@ test_fedora_release_sources() (
   [[ ${ANTIGRAVITY_DESKTOP_MANIFEST_BASE} == https://* \
      && ${ANTIGRAVITY_CLI_MANIFEST_BASE} == https://* \
      && ${OPENCODE_RELEASE_API} == https://api.github.com/repos/anomalyco/opencode/releases/latest \
-     && ${ZED_RELEASE_API} == https://api.github.com/repos/zed-industries/zed/releases/latest \
-     && ${R8152_RELEASE_API} == https://api.github.com/repos/awesometic/realtek-r8152-dkms/releases/latest \
-     && -z ${R8152_TAG} && -z ${R8152_COMMIT} ]] \
+     && ${ZED_RELEASE_API} == https://api.github.com/repos/zed-industries/zed/releases/latest ]] \
     || fail 'Fedora latest-release metadata sources are missing or non-HTTPS'
   [[ ${SPEEDTEST_VERSION} == 1.2.0 \
      && ${SPEEDTEST_ARCHIVE_SHA256_X86_64} =~ ^[[:xdigit:]]{64}$ \
@@ -519,27 +517,6 @@ test_fedora_antigravity_rollout_parsing() (
     || fail 'Fedora rejected an Antigravity manifest with an explicit rollout'
   [[ ${parsed##*$'\t'} == 25 ]] \
     || fail 'Fedora did not preserve an explicit Antigravity rollout'
-)
-
-test_fedora_r8152_release_resolution() (
-  load_helpers setup-fedora-workstation.sh
-  fetch_release_document() {
-    [[ $1 == "${R8152_RELEASE_API}" ]] \
-      || fail "r8152 resolver requested an unexpected URL: $1"
-    printf '%s\n' \
-      '{"draft":false,"prerelease":false,"tag_name":"9.8.7-6"}'
-  }
-  git() {
-    [[ $* == "ls-remote --exit-code --tags ${R8152_REPO} refs/tags/9.8.7-6 refs/tags/9.8.7-6^{}" ]] \
-      || fail "unexpected r8152 tag-resolution command: $*"
-    printf '%s\t%s\n' \
-      aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa refs/tags/9.8.7-6 \
-      bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 'refs/tags/9.8.7-6^{}'
-  }
-  resolve_r8152_release
-  [[ ${R8152_TAG} == 9.8.7-6 \
-     && ${R8152_COMMIT} == bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ]] \
-    || fail 'Fedora did not bind the latest r8152 release to its peeled commit'
 )
 
 test_fedora_github_metadata_rejection() {
@@ -810,16 +787,16 @@ test_fedora_converged_zed() (
 
 test_fedora_media_servers() (
   load_helpers setup-fedora-workstation.sh
-  array_contains plexmediaserver "${PKGS_X86_64[@]}" \
-    || fail 'Fedora x86_64 package set omits Plex Media Server'
-  ! array_contains plexmediaserver "${PKGS[@]}" \
+  array_contains plexmediaserver "${PKGS_FULL_X86_64[@]}" \
+    || fail 'Fedora full x86_64 package set omits Plex Media Server'
+  ! array_contains plexmediaserver "${PKGS[@]}" "${PKGS_FULL[@]}" \
     || fail 'Plex Media Server is requested on architectures Plex does not publish'
-  array_contains plexmediaserver.service "${SERVICES_X86_64[@]}" \
-    || fail 'Fedora x86_64 service set omits Plex Media Server'
-  array_contains navidrome.service "${SERVICES[@]}" \
-    || fail 'Fedora service set omits Navidrome'
-  array_contains owntone.service "${SERVICES[@]}" \
-    || fail 'Fedora service set omits OwnTone'
+  array_contains plexmediaserver.service "${SERVICES_FULL_X86_64[@]}" \
+    || fail 'Fedora full x86_64 service set omits Plex Media Server'
+  array_contains navidrome.service "${SERVICES_FULL[@]}" \
+    || fail 'Fedora full service set omits Navidrome'
+  array_contains owntone.service "${SERVICES_FULL[@]}" \
+    || fail 'Fedora full service set omits OwnTone'
   local spec=${REPO_ROOT}/files/rpm/owntone.spec
   [[ ${OWNTONE_RELEASE_API} == https://api.github.com/repos/owntone/owntone-server/releases/latest \
      && ${OWNTONE_SPEC} == "${FILES}/rpm/owntone.spec" && -f ${spec} ]] \
@@ -1335,8 +1312,6 @@ main() {
   printf 'PASS Fedora offline latest-release resolution and digest binding\n'
   test_fedora_antigravity_rollout_parsing
   printf 'PASS Fedora optional/explicit Antigravity rollout parsing\n'
-  test_fedora_r8152_release_resolution
-  printf 'PASS Fedora latest r8152 release-to-commit binding\n'
   for scenario in draft prerelease duplicate bad-digest off-origin unprefixed-tag; do
     test_fedora_github_metadata_rejection "${scenario}"
   done

@@ -10,17 +10,31 @@
 # AUR builds (makepkg/yay) refuse to run as root, which is why the script
 # itself must not.
 #
+# Profiles: core (the default) is the full developer workstation - every
+# toolchain, editor, agent, browser and admin tool. full adds games (Steam,
+# Lutris, the lib32 graphics stack and [multilib], game AUR packages) and
+# desktop media extras (Brasero, Video Downloader, MakeMKV).
+#
+# Modes: --dry-run prints the selected plan offline (no sudo, network, pacman
+# or writes; works on any host). --check reports CURRENT/DRIFT read-only, no
+# sudo or network (exit 0 converged, 2 drift, 1 error). Without either, the
+# plan is applied.
+#
 # Safe to re-run: every step checks state first, config files are rewritten
 # only when their content, type, mode, or ownership differs, and the follow-ups that only a
 # real change needs (grub-mkconfig, sysctl reload, dconf update) run only
 # then. Package steps install only what is missing, so a converged system is
 # a fast no-op - with one deliberate exception: the official-repo step is a
 # full `pacman -Syu` (partial upgrades are unsupported on Arch), so a re-run
-# also applies pending updates.
+# also applies pending updates. --no-upgrade skips that sync/upgrade and the
+# AUR/rustup updates; it requires existing sync databases and risks a partial
+# upgrade, so use it only for short offline-ish reruns.
 #
 # What it does, in order:
-#   1. enables [multilib] in /etc/pacman.conf
-#   2. pacman -Syu, then installs the official-repo package set
+#   1. full only: enables [multilib] in /etc/pacman.conf (core leaves it as is)
+#   2. pacman -Syu, replaces jre-openjdk and distro rust with jdk-openjdk and
+#      rustup, then installs the official-repo package set and the per-user
+#      rustup stable toolchain (rustfmt, clippy, rust-analyzer)
 #   3. installs dotfiles (~/.bashrc, ~/.vimrc) and system config from files/:
 #      /etc/default/grub (+ grub-mkconfig), /etc/bash.bashrc, /etc/locale.conf,
 #      locale generation, the inotify sysctl limit, zram, the daily
@@ -30,23 +44,26 @@
 #   6. publishes ~/.config/monitors.xml to GDM and applies the GDM font setting
 #   7. bootstraps yay (yay-bin from the AUR), interactively reviews/updates
 #      installed AUR packages (including VCS/devel packages), and installs the
-#      requested AUR set; r8152-dkms is included only below kernel 7.2 and is
-#      purged on 7.2+ in favor of the in-tree driver
+#      requested AUR set
 
 set -euo pipefail
 
 #--- Config -----------------------------------------------------------------
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 FILES=${SCRIPT_DIR}/files
-KERNEL=$(uname -r)
-R8152_IN_TREE_KERNEL_MIN=7.2
-R8152_MODULE_TAINT_FILE=/sys/module/r8152/taint
 YAY_AUR_URL=https://aur.archlinux.org/yay-bin.git
 YAY_VCS_DB=${XDG_CACHE_HOME:-${HOME}/.cache}/yay/vcs.json
+RUST_COMPONENTS=(rustfmt clippy rust-analyzer)
+RUST_TOOLCHAIN=stable-x86_64-unknown-linux-gnu
+# Arch's rust split packages all pin the rust package version, which rustup's
+# unversioned provides cannot satisfy, so they leave together; the standalone
+# rust-analyzer package goes too because rustup ships that component.
+RUST_DISTRO_PKGS=(rust rust-src rust-musl rust-wasm rust-aarch64-gnu
+                  rust-aarch64-musl lib32-rust-libs rust-analyzer)
 
-# Official repositories (groups are fine: gnome, gnome-circle, gnome-extra,
-# vulkan-devel are expanded before the installed-check)
-PKGS_OFFICIAL=(
+# Official repositories, core profile (groups are fine: gnome, gnome-circle,
+# gnome-extra, vulkan-devel are expanded before the installed-check)
+PKGS_OFFICIAL_CORE=(
   archlinux-appstream-data
   base-devel
   bash-completion
@@ -55,7 +72,6 @@ PKGS_OFFICIAL=(
   bluez
   bluez-utils
   boost
-  brasero
   cantarell-fonts
   ccache
   cdrtools
@@ -104,19 +120,6 @@ PKGS_OFFICIAL=(
   htop
   jdk-openjdk
   less
-  lib32-libva-intel-driver
-  lib32-vulkan-asahi
-  lib32-vulkan-broadcom
-  lib32-vulkan-dzn
-  lib32-vulkan-freedreno
-  lib32-vulkan-gfxstream
-  lib32-vulkan-intel
-  lib32-vulkan-nouveau
-  lib32-vulkan-panfrost
-  lib32-vulkan-powervr
-  lib32-vulkan-radeon
-  lib32-vulkan-swrast
-  lib32-vulkan-virtio
   libgtop # Optional upstream, required by the System Monitor shell extension.
   libmpc
   libpulse
@@ -130,7 +133,6 @@ PKGS_OFFICIAL=(
   linux-lts-headers
   lldb
   llvm
-  lutris
   lvm2
   maven
   mesa-utils
@@ -145,10 +147,6 @@ PKGS_OFFICIAL=(
   nvidia-open
   nvidia-open-lts
   nvidia-utils
-  # These are co-installable split backend libraries with disjoint files; both
-  # depend on the base ollama package (verified in current Arch metadata).
-  ollama-cuda
-  ollama-vulkan
   opencl-mesa
   opencode
   openai-codex
@@ -163,17 +161,16 @@ PKGS_OFFICIAL=(
   rpm-tools
   rsync
   ruby
-  rust
+  # Rust comes only from rustup; the toolchain is installed per user below.
+  rustup
   screen
   seahorse
   sof-firmware
-  steam
   sudo
   system-config-printer
   texinfo
   tree
   unarchiver
-  video-downloader
   vim
   vlc
   vulkan-devel
@@ -188,9 +185,34 @@ PKGS_OFFICIAL=(
   zram-generator
 )
 
-# AUR (via yay)
-PKGS_AUR=(
-  airshipper
+# Official repositories added by the full profile: games, the 32-bit graphics
+# stack that exists for Steam/Wine (needs [multilib]), and desktop media apps
+PKGS_OFFICIAL_FULL=(
+  brasero
+  lib32-libva-intel-driver
+  lib32-vulkan-asahi
+  lib32-vulkan-broadcom
+  lib32-vulkan-dzn
+  lib32-vulkan-freedreno
+  lib32-vulkan-gfxstream
+  lib32-vulkan-intel
+  lib32-vulkan-nouveau
+  lib32-vulkan-panfrost
+  lib32-vulkan-powervr
+  lib32-vulkan-radeon
+  lib32-vulkan-swrast
+  lib32-vulkan-virtio
+  lutris
+  # Local LLM runtime, not a toolchain: ollama-cuda pulls in CUDA (~6.4 GB with
+  # it). The split backends are co-installable and depend on the base ollama.
+  ollama-cuda
+  ollama-vulkan
+  steam
+  video-downloader
+)
+
+# AUR (via yay), core profile
+PKGS_AUR_CORE=(
   android-ndk
   android-sdk-build-tools
   android-sdk-cmdline-tools-latest
@@ -199,39 +221,45 @@ PKGS_AUR=(
   antigravity
   antigravity-cli
   balun-bin
-  bugdom
-  bugdom2
   claude-code
-  cro-mag-rally-net
   downgrade
-  dxvk-bin
   gnome-icon-theme
   gnome-icon-theme-symbolic
   gnome-shell-extension-dash-to-dock
   google-chrome
   hfsutils
-  lgogdownloader
   lineageos-devel
+  mstflint
+  ookla-speedtest-bin
+  payload-dumper-go-bin
+  powershell-bin
+  sit-git
+  tributary-bin
+  ventoy-bin
+)
+
+# AUR packages added by the full profile: games, game launchers/compat tools,
+# and desktop media
+PKGS_AUR_FULL=(
+  airshipper
+  bugdom
+  bugdom2
+  cro-mag-rally-net
+  dxvk-bin
+  lgogdownloader
   luxtorpeda-bin
   maelstrom
   makemkv
   maniadrive
   mightymike
-  mstflint
   nanosaur
   nanosaur2
-  ookla-speedtest-bin
   openarena
   ottomatic
-  payload-dumper-go-bin
-  powershell-bin
-  sit-git
   steamcmd
   tremulous-grangerhub-bin
-  tributary-bin
   tuxracer
   unigine-heaven
-  ventoy-bin
 )
 
 SERVICES=(
@@ -247,6 +275,21 @@ SERVICES=(
   sshd.service
 )
 
+# Config payloads as owner|source under files/|destination|mode. --check and
+# --dry-run read this list; the apply steps below install each entry with
+# put_file next to the follow-up its change requires.
+MANAGED_FILES=(
+  "user|bashrc|${HOME}/.bashrc|0644"
+  "user|vimrc|${HOME}/.vimrc|0644"
+  "root|grub|/etc/default/grub|0644"
+  "root|etc/bash.bashrc|/etc/bash.bashrc|0644"
+  "root|etc/locale.conf|/etc/locale.conf|0644"
+  "root|etc/sysctl.d/99-inotify.conf|/etc/sysctl.d/99-inotify.conf|0644"
+  "root|etc/systemd/zram-generator.conf|/etc/systemd/zram-generator.conf|0644"
+  "root|etc/cron.daily/pacman-update|/etc/cron.daily/pacman-update|0755"
+  "root|etc/dconf/db/gdm.d/10-font-settings|/etc/dconf/db/gdm.d/10-font-settings|0644"
+)
+
 log()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
 warn() { printf '\033[1;33m==> WARNING:\033[0m %s\n' "$*"; }
@@ -254,20 +297,68 @@ die()  { printf '\033[1;31m==> ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() {
   cat <<USAGE
-Usage: ${0##*/} [-h|--help]
+Usage: ${0##*/} [--profile core|full] [--check | --dry-run] [--no-upgrade]
+       ${0##*/} -h|--help
 
-Idempotent Arch Linux workstation setup: official + AUR package sets, dotfiles
-and system config from files/, services, GDM settings. Run as your normal
-user (sudo is used for the privileged steps); safe to re-run at any time.
+Idempotent Arch Linux workstation setup: official + AUR package sets, the
+rustup toolchain, dotfiles and system config from files/, services, GDM
+settings. Run as your normal user (sudo is used for the privileged steps);
+safe to re-run at any time.
+
+  --profile core   developer workstation: every toolchain, editor, agent,
+                   browser and admin tool (default)
+  --profile full   core plus games, [multilib]/lib32 and desktop media extras
+  --dry-run        print the selected plan offline and exit 0; no sudo,
+                   network, pacman or writes
+  --check          report CURRENT/DRIFT read-only without sudo or network;
+                   exit 0 converged, 2 drift, 1 error
+  --no-upgrade     skip pacman -Syu and AUR/rustup updates; install missing
+                   packages from the existing sync databases (refused when a
+                   repository database is missing; risks a partial upgrade)
 USAGE
 }
 
+PROFILE=core
+MODE=apply
+NO_UPGRADE=0
 while (( $# )); do
   case $1 in
     -h|--help) usage; exit 0 ;;
-    *)         usage >&2; die "Unknown option: $1" ;;
+    --profile)
+      (( $# >= 2 )) || { usage >&2; die "--profile requires core or full"; }
+      case $2 in
+        core|full) PROFILE=$2 ;;
+        *) usage >&2; die "Invalid profile: $2 (expected core or full)" ;;
+      esac
+      shift
+      ;;
+    --check|--dry-run)
+      [[ ${MODE} == apply ]] || { usage >&2; die "--check and --dry-run are mutually exclusive"; }
+      MODE=${1#--}
+      ;;
+    --no-upgrade) NO_UPGRADE=1 ;;
+    *) usage >&2; die "Unknown option: $1" ;;
   esac
+  shift
 done
+
+# select_profile <core|full>: rebuild PKGS_OFFICIAL and PKGS_AUR from the core
+# lists plus, for full, the game/media extras. Safe to call repeatedly.
+PKGS_OFFICIAL=()
+PKGS_AUR=()
+select_profile() {
+  case $1 in
+    core|full) ;;
+    *) die "Invalid profile: $1" ;;
+  esac
+  PKGS_OFFICIAL=("${PKGS_OFFICIAL_CORE[@]}")
+  PKGS_AUR=("${PKGS_AUR_CORE[@]}")
+  if [[ $1 == full ]]; then
+    PKGS_OFFICIAL+=("${PKGS_OFFICIAL_FULL[@]}")
+    PKGS_AUR+=("${PKGS_AUR_FULL[@]}")
+  fi
+}
+select_profile "${PROFILE}"
 
 #--- Helpers ----------------------------------------------------------------
 # put_file [-s] <src> <dst> [mode]
@@ -332,7 +423,7 @@ enable_unit() {
 
 # expand_groups <name>...: populate WANTED_PKGS, expanding pacman groups and
 # de-duplicating their members. Operational pacman errors are fatal.
-declare -A IS_GROUP=()
+declare -gA IS_GROUP=()
 WANTED_PKGS=()
 expand_groups() {
   local p member output
@@ -465,145 +556,317 @@ verify_antigravity_arch() {
   note "Antigravity ${version} + CLI: verified; legacy IDE absent"
 }
 
-# Compare the numeric major/minor components and deliberately ignore Arch's
-# patch, release, and flavour suffixes (for example 7.2.1-arch1-1 or
-# 7.2.1-1-lts), which do not change the 7.2 cutoff.
-kernel_version_at_least() {
-  local running=$1 minimum=$2
-  local running_major running_minor minimum_major minimum_minor
-  [[ ${running} =~ ^([0-9]+)\.([0-9]+)([.-]|$) ]] \
-    || die "could not parse running kernel version: ${running}"
-  running_major=${BASH_REMATCH[1]}
-  running_minor=${BASH_REMATCH[2]}
-  [[ ${minimum} =~ ^([0-9]+)\.([0-9]+)$ ]] \
-    || die "invalid kernel-version cutoff: ${minimum}"
-  minimum_major=${BASH_REMATCH[1]}
-  minimum_minor=${BASH_REMATCH[2]}
-  (( 10#${running_major} > 10#${minimum_major} \
-     || (10#${running_major} == 10#${minimum_major} \
-         && 10#${running_minor} >= 10#${minimum_minor}) ))
-}
-
-R8152_ARCH_PURGE_CHANGED=0
-R8152_USE_IN_TREE=0
-R8152_ARCH_REBOOT_REQUIRED=0
-
-# A loaded external module survives removal from pacman, DKMS, and the
-# initramfs until reboot. Linux exposes the out-of-tree taint as a literal O;
-# the optional path makes this small state check testable without touching
-# sysfs.
-r8152_loaded_out_of_tree() {
-  local taint_file=${R8152_MODULE_TAINT_FILE} taint
-  [[ -e ${taint_file} ]] || return 1
-  [[ -r ${taint_file} ]] \
-    || die "could not read loaded r8152 module taint state: ${taint_file}"
-  taint=$(<"${taint_file}")
-  [[ ${taint} == *O* ]]
-}
-
-purge_r8152_arch() {
-  local status remaining line module version entry
-  local -a registrations=()
-  local -A seen=()
-  R8152_ARCH_PURGE_CHANGED=0
-
-  # Capture and remove exact registrations while dkms and the package source
-  # are still present. Pacman's removal hook should make this redundant during
-  # an ordinary uninstall, but explicit reconciliation also handles interrupted
-  # or manually altered installations.
-  if command -v dkms >/dev/null; then
-    status=$(dkms status 2>/dev/null) \
-      || die "could not query DKMS registrations before purging r8152"
-    while IFS= read -r line; do
-      if [[ ${line} =~ ^(r8152|realtek-r8152)/([^,:[:space:]]+) ]]; then
-        module=${BASH_REMATCH[1]}
-        version=${BASH_REMATCH[2]}
-        [[ ${version} =~ ^[0-9][0-9A-Za-z._+~-]*$ ]] \
-          || die "refusing unsafe r8152 DKMS version from status: ${version}"
-        entry=${module}/${version}
-        [[ -n ${seen[${entry}]:-} ]] && continue
-        seen[${entry}]=1
-        registrations+=("${entry}")
-      fi
-    done <<<"${status}"
-    for entry in "${registrations[@]}"; do
-      module=${entry%%/*}
-      version=${entry#*/}
-      sudo dkms remove -m "${module}" -v "${version}" --all \
-        || die "could not remove stale DKMS registration ${entry}"
-      R8152_ARCH_PURGE_CHANGED=1
-      note "removed stale DKMS registration ${entry}"
-    done
-    remaining=$(dkms status 2>/dev/null) \
-      || die "could not query DKMS registrations after purging r8152"
-    while IFS= read -r line; do
-      [[ ${line} =~ ^(r8152|realtek-r8152)/ ]] \
-        && die "an r8152 DKMS registration remains after removal: ${line}"
-    done <<<"${remaining}"
-  fi
-
-  if pacman -Q r8152-dkms &>/dev/null; then
-    sudo pacman -Rns --noconfirm r8152-dkms \
-      || die "could not remove r8152-dkms on a kernel with in-tree support"
-    ! pacman -Q r8152-dkms &>/dev/null \
-      || die "r8152-dkms is still installed"
-    R8152_ARCH_PURGE_CHANGED=1
-    note "r8152-dkms: removed (kernel ${R8152_IN_TREE_KERNEL_MIN}+ provides the driver)"
-  else
-    note "r8152-dkms package: absent"
-  fi
-  (( ! R8152_ARCH_PURGE_CHANGED )) || R8152_ARCH_REBOOT_REQUIRED=1
-}
-
-# Rebuild the desired AUR catalog from a neutral state so repeated calls in
-# tests or sourced use cannot retain an r8152 decision made for another kernel.
-configure_r8152_arch() {
-  local running_kernel=$1 package
-  local -a filtered=()
-  for package in "${PKGS_AUR[@]}"; do
-    [[ ${package} == r8152-dkms ]] || filtered+=("${package}")
-  done
-  PKGS_AUR=("${filtered[@]}")
-  R8152_USE_IN_TREE=0
-
-  if kernel_version_at_least "${running_kernel}" "${R8152_IN_TREE_KERNEL_MIN}"; then
-    R8152_USE_IN_TREE=1
-    note "kernel ${running_kernel} is ${R8152_IN_TREE_KERNEL_MIN}+; using its in-tree r8152 driver"
-    purge_r8152_arch
-    if r8152_loaded_out_of_tree; then
-      R8152_ARCH_REBOOT_REQUIRED=1
-      note "an out-of-tree r8152 module is still loaded; reboot required to activate the in-tree driver"
+# Rust comes only from rustup. rustup conflicts with Arch's rust package, so
+# a non-interactive transaction cannot swap them; remove the distro toolchain
+# (and its version-pinned split packages) and install rustup immediately so
+# cargo/rustc are absent only for the length of this step.
+installed_rust_distro_pkgs() {
+  local package
+  INSTALLED_RUST_DISTRO_PKGS=()
+  for package in "${RUST_DISTRO_PKGS[@]}"; do
+    if pacman -Q "${package}" &>/dev/null; then
+      INSTALLED_RUST_DISTRO_PKGS+=("${package}")
     fi
+  done
+}
+
+transition_rust_to_rustup_arch() {
+  installed_rust_distro_pkgs
+  if (( ! ${#INSTALLED_RUST_DISTRO_PKGS[@]} )); then
+    note "distro Rust packages: absent"
+    return 0
+  fi
+  sudo pacman -Rdd --noconfirm "${INSTALLED_RUST_DISTRO_PKGS[@]}" \
+    || die "could not remove distro Rust before installing rustup: ${INSTALLED_RUST_DISTRO_PKGS[*]}"
+  ! pacman -Q rust &>/dev/null || die "rust is still installed"
+  sudo pacman -S --needed --noconfirm rustup \
+    || die "could not install rustup after removing distro Rust"
+  pacman -Q rustup &>/dev/null || die "rustup was not installed after the Rust transition"
+  note "distro Rust replaced by rustup: ${INSTALLED_RUST_DISTRO_PKGS[*]}"
+}
+
+# rustup_state: read the per-user rustup state from disk without running
+# rustup (which may auto-install toolchains). Sets RUSTUP_DEFAULT_SET,
+# RUSTUP_TOOLCHAIN_PRESENT and RUSTUP_MISSING_COMPONENTS.
+rustup_state() {
+  local home=${RUSTUP_HOME:-${HOME}/.rustup} component components=''
+  local toolchain=${home}/toolchains/${RUST_TOOLCHAIN}
+  RUSTUP_DEFAULT_SET=0
+  RUSTUP_TOOLCHAIN_PRESENT=0
+  RUSTUP_MISSING_COMPONENTS=()
+  if [[ -f ${home}/settings.toml ]] \
+     && grep -Eq '^[[:space:]]*default_toolchain[[:space:]]*=' "${home}/settings.toml"; then
+    RUSTUP_DEFAULT_SET=1
+  fi
+  [[ -d ${toolchain} ]] && RUSTUP_TOOLCHAIN_PRESENT=1
+  if [[ -f ${toolchain}/lib/rustlib/components ]]; then
+    components=$(<"${toolchain}/lib/rustlib/components")
+  fi
+  for component in "${RUST_COMPONENTS[@]}"; do
+    grep -Eq "^${component}(-|$)" <<<"${components}" \
+      || RUSTUP_MISSING_COMPONENTS+=("${component}")
+  done
+}
+
+# Per-user stable toolchain. Existing project overrides and a non-stable
+# default are preserved; only an unset default becomes stable.
+configure_rustup_toolchain() {
+  command -v rustup >/dev/null || die "rustup is not installed"
+  rustup_state
+  if (( ! RUSTUP_TOOLCHAIN_PRESENT || ! NO_UPGRADE )); then
+    rustup toolchain install stable --profile minimal --no-self-update \
+      || die "could not install/update the rustup stable toolchain"
+  fi
+  rustup_state
+  if (( ${#RUSTUP_MISSING_COMPONENTS[@]} )); then
+    rustup component add --toolchain stable "${RUSTUP_MISSING_COMPONENTS[@]}" \
+      || die "could not add Rust components: ${RUSTUP_MISSING_COMPONENTS[*]}"
+  fi
+  if (( ! RUSTUP_DEFAULT_SET )); then
+    rustup default stable || die "could not set the rustup default toolchain"
+  fi
+  rustup_state
+  (( RUSTUP_TOOLCHAIN_PRESENT && RUSTUP_DEFAULT_SET && ! ${#RUSTUP_MISSING_COMPONENTS[@]} )) \
+    || die "rustup stable toolchain is incomplete"
+  note "rustup stable + ${RUST_COMPONENTS[*]}: present"
+}
+
+# microcode_package: print the microcode package for this CPU, if any.
+microcode_package() {
+  local vendor
+  vendor=$(awk -F ': ' '/^vendor_id/{print $2; exit}' /proc/cpuinfo 2>/dev/null) || vendor=
+  case ${vendor} in
+    AuthenticAMD) printf 'amd-ucode\n' ;;
+    GenuineIntel) printf 'intel-ucode\n' ;;
+  esac
+}
+
+# sync_dbs_present: succeed only when every configured repository already has
+# a sync database, which --no-upgrade needs to install without syncing.
+sync_dbs_present() {
+  local db_path repo repos
+  db_path=$(pacman-conf DBPath 2>/dev/null) || db_path=/var/lib/pacman/
+  repos=$(pacman-conf --repo-list 2>/dev/null) || die "could not read /etc/pacman.conf"
+  while IFS= read -r repo; do
+    [[ -z ${repo} || -s ${db_path%/}/sync/${repo}.db ]] || return 1
+  done <<<"${repos}"
+}
+
+#--- Check / dry-run --------------------------------------------------------
+CHECK_DRIFT=0
+CHECK_CURRENT=0
+report() {
+  local status=$1
+  shift
+  printf '%-8s %s\n' "${status}" "$*"
+  case ${status} in
+    DRIFT)   CHECK_DRIFT=$((CHECK_DRIFT + 1)) ;;
+    CURRENT) CHECK_CURRENT=$((CHECK_CURRENT + 1)) ;;
+  esac
+}
+
+# check_managed_file <user|root> <src> <dst> <mode>: the read-only mirror of
+# put_file's convergence test.
+check_managed_file() {
+  local owner=$1 src=$2 dst=$3 mode=$4 uid=${EUID} gid expected_mode
+  gid=$(id -g) || die "could not determine the current user's primary group"
+  if [[ ${owner} == root ]]; then uid=0; gid=0; fi
+  expected_mode=$(printf '%o' "$((8#${mode}))")
+  if [[ -f ${dst} && ! -L ${dst} ]] && cmp -s -- "${src}" "${dst}" \
+     && [[ $(stat -c '%a:%u:%g' -- "${dst}") == "${expected_mode}:${uid}:${gid}" ]]; then
+    report CURRENT "${dst}"
   else
-    PKGS_AUR+=(r8152-dkms)
-    note "kernel ${running_kernel} predates ${R8152_IN_TREE_KERNEL_MIN}; r8152-dkms added to the AUR set"
+    report DRIFT "${dst}: differs from files/${src#"${FILES}"/} (content, type, mode or owner)"
   fi
 }
 
-initramfs_has_out_of_tree_r8152() {
-  local image=$1 _kernel=$2 contents
-  contents=$(sudo lsinitrd "${image}" 2>/dev/null) \
-    || die "could not inspect ${image} while reconciling r8152"
-  grep -E 'modules/[^/[:space:]]+/(extra|updates|weak-updates)(/[^[:space:]]*)*/(realtek-)?r8152[.]ko([.]|$)' \
-    <<<"${contents}" >/dev/null
+# check_packages <label> <name>...: report every missing package (pacman -T
+# against the local database; groups expanded from the existing sync DBs).
+check_packages() {
+  local label=$1 package
+  shift
+  expand_groups "$@"
+  find_missing_pkgs "${WANTED_PKGS[@]}"
+  for package in "${MISSING_PKGS[@]}"; do
+    report DRIFT "${label} package ${package}: not installed"
+  done
+  (( ${#MISSING_PKGS[@]} )) \
+    || report CURRENT "${label} packages (${#WANTED_PKGS[@]})"
+}
+
+# check_system_state: locale, vi link and GRUB config (split out for tests).
+check_system_state() {
+  if grep -Eq '^[[:space:]]*en_US\.UTF-8[[:space:]]+UTF-8([[:space:]]|$)' /etc/locale.gen 2>/dev/null \
+     && locale -a 2>/dev/null | grep -Fxi 'en_US.utf8' >/dev/null; then
+    report CURRENT "en_US.UTF-8 locale"
+  else
+    report DRIFT "en_US.UTF-8 locale: not enabled/generated"
+  fi
+  if [[ -L /usr/bin/vi && $(readlink -f -- /usr/bin/vi) == $(readlink -f -- /usr/bin/vim) ]]; then
+    report CURRENT "/usr/bin/vi -> vim"
+  else
+    report DRIFT "/usr/bin/vi: not a link to vim"
+  fi
+  if [[ -s /boot/grub/grub.cfg ]]; then
+    report CURRENT "/boot/grub/grub.cfg: present"
+  else
+    report DRIFT "/boot/grub/grub.cfg: missing"
+  fi
+}
+
+run_check() {
+  local repo_list group_output group package_line version comparison entry
+  local owner src dst mode unit
+  CHECK_DRIFT=0
+  CHECK_CURRENT=0
+  printf 'Profile: %s; mode: check (read-only)\n' "${PROFILE}"
+
+  repo_list=$(pacman-conf --repo-list 2>/dev/null) || die "could not read /etc/pacman.conf"
+  if grep -qx multilib <<<"${repo_list}"; then
+    report CURRENT "[multilib]: enabled"
+  elif [[ ${PROFILE} == full ]]; then
+    report DRIFT "[multilib]: disabled (required by the full profile)"
+  else
+    report CURRENT "[multilib]: not required by the core profile"
+  fi
+
+  pacman -Q antigravity-ide &>/dev/null \
+    && report DRIFT "legacy antigravity-ide: installed (will be removed)"
+  if package_line=$(pacman -Q antigravity 2>/dev/null); then
+    version=${package_line#* }
+    comparison=$(vercmp "${version}" 2.0.0) \
+      || die "could not compare the installed Antigravity version"
+    (( comparison >= 0 )) \
+      || report DRIFT "legacy Antigravity ${version}: installed (2.0+ required)"
+  fi
+  pacman -Q vscodium-bin &>/dev/null \
+    && report DRIFT "vscodium-bin: installed (replaced by code)"
+  pacman -Q jre-openjdk &>/dev/null \
+    && report DRIFT "jre-openjdk: installed (replaced by jdk-openjdk)"
+  installed_rust_distro_pkgs
+  (( ${#INSTALLED_RUST_DISTRO_PKGS[@]} )) \
+    && report DRIFT "distro Rust: ${INSTALLED_RUST_DISTRO_PKGS[*]} installed (replaced by rustup)"
+  pacman -Q mkinitcpio &>/dev/null \
+    && report DRIFT "mkinitcpio: installed (replaced by dracut)"
+
+  # pacman -Sg reads only the existing sync databases; it never downloads.
+  IS_GROUP=()
+  group_output=$(pacman -Sg) || die "could not enumerate pacman groups"
+  while read -r group _; do
+    [[ -n ${group} ]] && IS_GROUP[${group}]=1
+  done <<<"${group_output}"
+  check_packages official "${PKGS_OFFICIAL[@]}"
+  check_packages AUR "${PKGS_AUR[@]}"
+
+  rustup_state
+  if (( RUSTUP_TOOLCHAIN_PRESENT && RUSTUP_DEFAULT_SET && ! ${#RUSTUP_MISSING_COMPONENTS[@]} )); then
+    report CURRENT "rustup stable + ${RUST_COMPONENTS[*]}"
+  else
+    (( RUSTUP_TOOLCHAIN_PRESENT )) || report DRIFT "rustup: stable toolchain not installed"
+    (( RUSTUP_DEFAULT_SET )) || report DRIFT "rustup: no default toolchain"
+    (( ! ${#RUSTUP_MISSING_COMPONENTS[@]} )) \
+      || report DRIFT "rustup: missing components ${RUSTUP_MISSING_COMPONENTS[*]}"
+  fi
+
+  for entry in "${MANAGED_FILES[@]}"; do
+    IFS='|' read -r owner src dst mode <<<"${entry}"
+    check_managed_file "${owner}" "${FILES}/${src}" "${dst}" "${mode}"
+  done
+  if [[ -f ${HOME}/.config/monitors.xml ]]; then
+    check_managed_file root "${HOME}/.config/monitors.xml" /etc/xdg/monitors.xml 0644
+  fi
+  check_system_state
+
+  for unit in "${SERVICES[@]}" cockpit.socket; do
+    if systemctl is-enabled --quiet "${unit}" 2>/dev/null; then
+      report CURRENT "${unit}: enabled"
+    else
+      report DRIFT "${unit}: not enabled"
+    fi
+  done
+  report NOTE "initramfs images are validated only on apply (inspection needs sudo)"
+
+  printf '\nResult: %s current, %s drift\n' "${CHECK_CURRENT}" "${CHECK_DRIFT}"
+  (( CHECK_DRIFT == 0 )) || return 2
+}
+
+# print_plan: the offline --dry-run plan. Reads only this script's lists and
+# /proc/cpuinfo, so it also runs on non-Arch hosts.
+print_plan() {
+  local entry owner src dst mode microcode package count
+  printf 'Profile: %s; mode: dry-run (offline, nothing is changed)\n' "${PROFILE}"
+  if [[ ${PROFILE} == full ]]; then
+    printf 'PLAN: enable [multilib] in /etc/pacman.conf if disabled (backup /etc/pacman.conf.pre-workstation)\n'
+  else
+    printf 'PLAN: [multilib] not required by core; left as configured\n'
+  fi
+  printf 'PLAN: remove legacy antigravity-ide / Antigravity < 2.0 and vscodium-bin if installed\n'
+  if (( NO_UPGRADE )); then
+    printf 'PLAN: --no-upgrade: skip pacman -Syu; refuse unless every repository sync DB exists\n'
+  else
+    printf 'PLAN: sudo pacman -Syu --noconfirm\n'
+  fi
+  printf 'PLAN: replace jre-openjdk with jdk-openjdk if installed\n'
+  printf 'PLAN: replace distro Rust (%s) with rustup if installed\n' "${RUST_DISTRO_PKGS[*]}"
+  microcode=$(microcode_package)
+  count=${#PKGS_OFFICIAL[@]}
+  if [[ -n ${microcode} ]]; then count=$((count + 1)); fi
+  printf 'PLAN: install missing official packages (%s entries; groups expanded on the host):\n' \
+    "${count}"
+  for package in "${PKGS_OFFICIAL[@]}" ${microcode:+"${microcode}"}; do
+    printf '  %s\n' "${package}"
+  done
+  printf 'PLAN: rustup stable toolchain + %s; default stable if unset%s\n' \
+    "${RUST_COMPONENTS[*]}" "$( (( NO_UPGRADE )) && printf '; no update' )"
+  printf 'PLAN: managed files (installed when content, mode or owner differs):\n'
+  for entry in "${MANAGED_FILES[@]}"; do
+    IFS='|' read -r owner src dst mode <<<"${entry}"
+    printf '  files/%s -> %s (%s, %s)\n' "${src}" "${dst}" "${mode}" "${owner}"
+  done
+  printf '  ~/.config/monitors.xml -> /etc/xdg/monitors.xml (if present)\n'
+  printf 'PLAN: en_US.UTF-8 in /etc/locale.gen + locale-gen; /usr/bin/vi -> vim\n'
+  printf 'PLAN: dracut images regenerated/validated when boot packages change; remove mkinitcpio; grub-mkconfig when needed\n'
+  printf 'PLAN: enable services:\n'
+  for package in "${SERVICES[@]}"; do
+    printf '  %s\n' "${package}"
+  done
+  printf '  cockpit.socket (enable --now)\n'
+  printf 'PLAN: dconf update for the GDM database when its font setting changes\n'
+  printf 'PLAN: bootstrap yay-bin from the AUR if needed (interactive PKGBUILD review)\n'
+  if (( NO_UPGRADE )); then
+    printf 'PLAN: --no-upgrade: skip yay -Sua --devel\n'
+  else
+    printf 'PLAN: yay -Sua --devel (interactive review)\n'
+  fi
+  printf 'PLAN: install missing AUR packages (%s):\n' "${#PKGS_AUR[@]}"
+  for package in "${PKGS_AUR[@]}"; do
+    printf '  %s\n' "${package}"
+  done
+  printf 'PLAN: verify Antigravity 2.x + CLI and the claude code codex opencode zed cargo rustc commands\n'
 }
 
 #--- Preflight --------------------------------------------------------------
+if [[ ${MODE} == dry-run ]]; then
+  print_plan
+  exit 0
+fi
+
 [[ ${EUID} -ne 0 ]] || die "Run as your normal user, not root (AUR builds refuse to run as root; sudo is used where needed)."
 [[ -f /etc/arch-release ]] || die "This script is for Arch Linux."
 [[ $(uname -m) == x86_64 ]] || die "This package set targets Arch Linux x86_64."
 [[ -d ${FILES} ]] || die "Payload directory not found: ${FILES}"
-command -v sudo >/dev/null || die "sudo is required."
 command -v pacman-conf >/dev/null || die "pacman-conf is required."
+command -v cmp >/dev/null || die "cmp (diffutils) is required."
 pacman -Q pacman &>/dev/null || die "the local pacman database is not readable."
 [[ -f /etc/pacman.conf ]] || die "/etc/pacman.conf is missing."
 [[ -d /boot/grub ]] || die "This setup targets an existing GRUB installation; /boot/grub is missing."
 
-case $(awk -F ': ' '/^vendor_id/{print $2; exit}' /proc/cpuinfo) in
-  AuthenticAMD) PKGS_OFFICIAL+=(amd-ucode) ;;
-  GenuineIntel) PKGS_OFFICIAL+=(intel-ucode) ;;
-  *)            warn "CPU vendor not recognized; no microcode package will be selected" ;;
-esac
+MICROCODE=$(microcode_package)
+if [[ -n ${MICROCODE} ]]; then
+  PKGS_OFFICIAL+=("${MICROCODE}")
+else
+  warn "CPU vendor not recognized; no microcode package will be selected"
+fi
 
 WORK_DIR=$(mktemp -d)
 cleanup() {
@@ -611,22 +874,29 @@ cleanup() {
 }
 trap cleanup EXIT
 
+if [[ ${MODE} == check ]]; then
+  run_check
+  exit 0
+fi
+
+command -v sudo >/dev/null || die "sudo is required."
+log "Profile: ${PROFILE}$( (( NO_UPGRADE )) && printf ' (--no-upgrade)' )"
 log "Authenticating sudo"
 sudo -v || die "sudo authentication failed"
-
-log "Realtek r8152 kernel/DKMS selection"
-configure_r8152_arch "${KERNEL}"
 
 log "Retired workstation packages"
 purge_legacy_antigravity_arch
 purge_replaced_editor_arch
 
 #--- 1. [multilib] ----------------------------------------------------------
-# Must be enabled before any lib32-* / steam package can be installed
+# Must be enabled before any lib32-* / steam package can be installed. Only the
+# full profile needs it; core leaves an already-enabled repository alone.
 log "[multilib] repository"
 repo_list=$(pacman-conf --repo-list 2>/dev/null) || die "could not read /etc/pacman.conf"
 if grep -qx multilib <<<"${repo_list}"; then
   note "enabled"
+elif [[ ${PROFILE} != full ]]; then
+  note "not required by the core profile; left disabled"
 else
   cp -- /etc/pacman.conf "${WORK_DIR}/pacman.conf"
   sed -Ei \
@@ -663,10 +933,17 @@ boot_package_state() {
 BOOT_STATE_BEFORE=$(boot_package_state)
 
 #--- 2. Official packages ---------------------------------------------------
-log "Syncing databases and applying updates (pacman -Syu)"
-sudo pacman -Syu --noconfirm
+if (( NO_UPGRADE )); then
+  sync_dbs_present \
+    || die "--no-upgrade needs an existing sync database for every enabled repository (a newly enabled [multilib] has none); rerun without --no-upgrade"
+  warn "--no-upgrade: skipping pacman -Syu. Installing against stale sync databases is a partial upgrade (unsupported on Arch) and can fail on rotated mirror files."
+else
+  log "Syncing databases and applying updates (pacman -Syu)"
+  sudo pacman -Syu --noconfirm
+fi
 
 transition_openjdk_runtime_arch
+transition_rust_to_rustup_arch
 
 log "Official package set (${#PKGS_OFFICIAL[@]} entries)"
 group_output=$(pacman -Sg) || die "could not enumerate pacman groups"
@@ -681,6 +958,9 @@ if (( ${#MISSING_PKGS[@]} )); then
 else
   note "all ${#WANTED_PKGS[@]} packages present"
 fi
+
+log "Rust (rustup stable toolchain)"
+configure_rustup_toolchain
 
 #--- 3. Dotfiles and system config ------------------------------------------
 log "Dotfiles"
@@ -735,7 +1015,7 @@ command -v dracut >/dev/null || die "dracut was not installed"
 command -v lsinitrd >/dev/null || die "lsinitrd was not installed"
 
 BOOT_STATE_AFTER=$(boot_package_state)
-DRACUT_REBUILD=${R8152_ARCH_PURGE_CHANGED}
+DRACUT_REBUILD=0
 [[ ${BOOT_STATE_BEFORE} == "${BOOT_STATE_AFTER}" ]] || DRACUT_REBUILD=1
 pacman -Q mkinitcpio &>/dev/null && DRACUT_REBUILD=1
 
@@ -750,10 +1030,6 @@ for pkgbase_file in /usr/lib/modules/*/pkgbase; do
   if ! sudo test -s "${image}" \
      || ! sudo lsinitrd "${image}" 2>/dev/null | grep -F "modules/${kver}/" >/dev/null; then
     DRACUT_REBUILD=1
-  elif (( R8152_USE_IN_TREE )) \
-     && initramfs_has_out_of_tree_r8152 "${image}" "${kver}"; then
-    DRACUT_REBUILD=1
-    R8152_ARCH_REBOOT_REQUIRED=1
   fi
 done
 (( kernel_count )) || die "no installed kernels with /usr/lib/modules/*/pkgbase were found"
@@ -775,10 +1051,6 @@ for pkgbase_file in /usr/lib/modules/*/pkgbase; do
   sudo test -s "${image}" || die "dracut did not produce ${image}"
   sudo lsinitrd "${image}" 2>/dev/null | grep -F "modules/${kver}/" >/dev/null \
     || die "${image} does not contain modules for ${kver}"
-  if (( R8152_USE_IN_TREE )) \
-     && initramfs_has_out_of_tree_r8152 "${image}" "${kver}"; then
-    die "${image} still contains an out-of-tree r8152 module after regeneration"
-  fi
 done
 
 log "mkinitcpio"
@@ -856,8 +1128,12 @@ if [[ ! -f ${YAY_VCS_DB} ]]; then
   yay -Y --gendb
 fi
 
-log "Updating installed AUR packages (including VCS/devel packages)"
-yay -Sua --devel
+if (( NO_UPGRADE )); then
+  note "--no-upgrade: installed AUR packages are not updated"
+else
+  log "Updating installed AUR packages (including VCS/devel packages)"
+  yay -Sua --devel
+fi
 
 log "AUR package set (${#PKGS_AUR[@]} entries)"
 find_missing_pkgs "${PKGS_AUR[@]}"
@@ -873,9 +1149,10 @@ for command_name in claude code codex opencode zed; do
   command -v "${command_name}" >/dev/null \
     || die "expected workstation command is unavailable: ${command_name}"
 done
+for command_name in cargo rustc; do
+  command -v "${command_name}" >/dev/null \
+    || die "rustup did not provide ${command_name}"
+done
 ! pacman -Q vscodium-bin &>/dev/null || die "VSCodium is still installed"
 
 log "Done. Kernel/initramfs/GRUB changes and newly enabled services take effect on the next boot."
-if (( R8152_ARCH_REBOOT_REQUIRED )); then
-  warn "Reboot to finish switching from the removed out-of-tree r8152 module to the kernel ${KERNEL} in-tree driver."
-fi

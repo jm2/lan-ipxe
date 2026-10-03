@@ -292,6 +292,27 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(set(self.home.rglob('*')), before)
         self.assertFalse(self.obj.state.exists())
 
+    def test_distro_rust_formula_is_purged_and_cache_pruned(self):
+        calls = []
+        def command(argv, **kwargs):
+            calls.append([str(a) for a in argv])
+            if argv[1:3] == ['uninstall', '--formula']:
+                self.obj.formula_installed = lambda name: False
+            return subprocess.CompletedProcess(argv, 0, '', '')
+        self.obj.command = command
+        self.obj.formula_installed = lambda name: name == 'rust'
+        self.obj.preview = True
+        self.obj.purge_distro_rust()
+        self.obj.brew_cleanup()
+        self.assertEqual(calls, [])
+        self.assertEqual(self.obj.events[-1]['status'], 'DRIFT')
+        self.obj.preview = False
+        self.obj.updated = True
+        self.obj.purge_distro_rust()
+        self.obj.brew_cleanup()
+        self.assertEqual([c[1:] for c in calls], [['uninstall', '--formula', 'rust'], ['cleanup', '--prune=all']])
+        self.assertEqual(self.obj.events[-1]['status'], 'CHANGED')
+
     def test_data_report_is_informational_and_uses_no_writes(self):
         before = set(self.home.rglob('*'))
         self.obj.game_report()

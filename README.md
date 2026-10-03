@@ -185,10 +185,24 @@ and [package comparison](docs/macos-package-parity.md) for ownership, exclusions
 manual steps and validation limits. Initial validation uses mocked tests and
 read-only previews; a clean-machine installation smoke test remains outstanding.
 
-Fedora and Arch install Balun alongside Tributary (`balun` from `jmsqrd/balun`
-COPR on Fedora, `balun-bin` from the AUR on Arch). Both also install Cockpit with
-file management, package updates, Podman containers, and storage/LVM support,
-and start `cockpit.socket` for access at `https://localhost:9090`.
+Every workstation script takes the same profile and mode options (PowerShell spells
+them `-Profile`, `-Check`, `-DryRun`, `-NoUpgrade`):
+
+- `--profile core|full` — core (the default) installs every developer toolchain,
+  editor, AI agent, and everyday app; full adds games and media servers/apps.
+  Switching a machine from full to core removes nothing.
+- `--dry-run` — offline, read-only plan for the selected profile (no sudo, network, or
+  writes); exits 0.
+- `--check` — read-only state report (`CURRENT`/`DRIFT`); exits 0 when converged, 2 on
+  drift, 1 on error.
+- `--no-upgrade` — install what is missing without upgrading what is already
+  installed. On Arch this refuses without existing sync databases and warns that it is
+  a partial upgrade.
+
+Every platform installs Balun alongside Tributary in core (`balun` from the
+`jmsqrd/balun` COPR on Fedora, `balun-bin` from the AUR on Arch, release apps on macOS
+and Windows). Fedora and Arch also install Cockpit with file management, package
+updates, Podman containers, and storage/LVM support, and start `cockpit.socket` for access at `https://localhost:9090`.
 
 - `setup-arch-workstation.sh` — run as your normal user; sudo is used for the
   privileged steps (AUR builds refuse to run as root). Requires an existing GRUB
@@ -202,27 +216,31 @@ and start `cockpit.socket` for access at `https://localhost:9090`.
   Claude Code and the native Antigravity 2.0+ desktop/CLI. The script removes VSCodium,
   Antigravity IDE, and any installed Antigravity 1.x package before installing their
   replacements. The package selection intentionally includes Intel/AMD graphics
-  support and NVIDIA open modules for both `linux` and `linux-lts`. It installs the
-  AUR `r8152-dkms` package only below kernel 7.2; on 7.2+ it purges that out-of-tree
-  driver, regenerates the initramfs, and reports when a loaded out-of-tree module
-  requires a reboot to activate the in-tree driver. GNOME uses Vitals for sensors,
+  support and NVIDIA open modules for both `linux` and `linux-lts`. Rust comes only
+  from rustup: an installed distro `rust` (and its split packages) is replaced by
+  `rustup`, and each user gets the stable toolchain with rustfmt, clippy, and
+  rust-analyzer. `[multilib]` is enabled only by the full profile, which adds Steam,
+  Lutris, the lib32 graphics stack, and the AUR games. GNOME uses Vitals for sensors,
   Dash to Dock from the AUR, and the bundled System Monitor extension with `libgtop`.
 - `setup-fedora-workstation.sh` — run as your normal user; Fedora 41+ (dnf5). Adds the
   signed third-party repos (`files/etc/yum.repos.d/`, the Tributary/Balun coprs, RPM Fusion,
-  Microsoft VS Code, Chrome, Claude Code, sing-box; PowerShell/NVIDIA/Steam/Plex repos on
-  x86_64), installs the dnf and flatpak sets (plus the x86_64-only 32-bit/Steam
-  extras), applies available DNF/Flatpak updates, and installs Zed plus native AI tools.
+  Microsoft VS Code, Chrome, Claude Code, sing-box; PowerShell/NVIDIA repos on x86_64,
+  plus the Steam/Plex repos in the full profile), installs the dnf and flatpak sets,
+  applies available DNF/Flatpak updates, and installs Zed plus native AI tools. Rust
+  comes only from rustup (`rustup-init` per user, stable with rustfmt, clippy, and
+  rust-analyzer); installed distro Rust packages are purged first.
   Both x86_64 and aarch64 are supported, including Fedora Asahi's 16K kernel variant.
   DNF reconciles the package/group set directly with visible output and automatic
   confirmation; there is no separate user-cache group query to block on hidden
   repository-key prompts. Chrome and GitHub CLI are installed on both architectures;
   ARM64 PowerShell uses Microsoft's checksum-verified release archive.
-  Media servers: Plex Media Server comes from Plex's signed repository (x86_64 only;
-  Plex publishes no aarch64 RPM), Navidrome from its latest GitHub release RPM, and
+  Media servers (full profile only): Plex Media Server comes from Plex's signed
+  repository (x86_64 only; Plex publishes no aarch64 RPM), Navidrome from its latest GitHub release RPM, and
   OwnTone from its latest release tarball, built unprivileged into an RPM with
   `files/rpm/owntone.spec`. Navidrome and OwnTone downloads are checked against the
   SHA-256 digests GitHub publishes, and both are skipped when the installed version is
-  already current. All three services are enabled.
+  already current, and their services are enabled. Full also adds Lutris, Steam with its
+  i686 libraries (x86_64), the io.jor.* game Flatpaks, and desktop media apps.
   Installs `dnf5-plugin-automatic` and enables `dnf5-automatic.timer` immediately,
   with the controller setup's `apply_updates = yes` and `reboot = when-needed`
   policy in `/etc/dnf/automatic.conf`.
@@ -232,15 +250,11 @@ and start `cockpit.socket` for access at `https://localhost:9090`.
   repository. The abandoned unsigned Antigravity 1.x RPM/repository, its exact
   script-managed IDE settings, and VSCodium are removed, while customized settings or
   repo files are preserved (and retired repos disabled). The script also installs a
-  deliberately fixed, checksum-pinned Ookla speedtest CLI. Below kernel 7.2 it resolves
-  the latest stable r8152 USB NIC driver release to one upstream commit per run and
-  installs it via DKMS; on 7.2+ it purges the out-of-tree driver, reconciles every
-  installed-kernel initramfs, and reports when a loaded out-of-tree module requires a
-  reboot to activate the in-tree driver. The script then applies dotfiles, zram policy,
-  services, and GDM settings. Secure Boot hosts are warned when the DKMS MOK still
-  needs enrollment.
+  deliberately fixed, checksum-pinned Ookla speedtest CLI, then applies dotfiles, zram
+  policy, services, and GDM settings.
 - `setup-win11-workstation.ps1` — run from an elevated PowerShell (5.1 is enough):
-  `powershell -ExecutionPolicy Bypass -File .\setup-win11-workstation.ps1`. Sets up
+  `powershell -ExecutionPolicy Bypass -File .\setup-win11-workstation.ps1`
+  (`-Check`/`-DryRun` also run unelevated). Sets up
   OpenSSH Server via `enable-openssh-win11.ps1`, then installs the winget package set.
   Every managed package is checked for upgrades on every run unless explicitly marked
   presence-only; the deliberately fixed Speedtest CLI is currently the only such
@@ -252,11 +266,15 @@ and start `cockpit.socket` for access at `https://localhost:9090`.
   "reboot required" results count as success, and any other failure is reported at the
   end (exit code 1) without stopping the run. `-HyperV`
   additionally enables the supported Windows optional feature on Pro, Enterprise, or
-  Education; Windows 11 Home is rejected.
+  Education; Windows 11 Home is rejected. Rust comes only from `Rustlang.Rustup`
+  (legacy Rust MSI packages are removed). Balun has no WinGet package yet, so it
+  installs from its SHA-256-verified GitHub release (silent Inno Setup) and switches to
+  `jm2.Balun` automatically once that ID resolves. Full adds Steam, GOG Galaxy, the
+  SuperTux games, benchmarks, Plex, iTunes, HDHomeRun, MakeMKV, and Google Drive.
 
 Missing package-set entries are installed and existing Arch/AUR packages are updated.
 Config files are rewritten only when their content, type, mode, or ownership differs;
-follow-ups (`grub-mkconfig`, `sysctl`, `dconf update`, DKMS/dracut builds) run only when
+follow-ups (`grub-mkconfig`, `sysctl`, `dconf update`, dracut builds) run only when
 their inputs or validation require them. Workstation zram uses zstd, priority 100, and
 `min(RAM, 8 GiB)`. Linux systemd services are enabled, not started, and come up on the
 next boot. The Windows OpenSSH helper starts `sshd` immediately and opens Microsoft's
