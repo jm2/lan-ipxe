@@ -72,7 +72,7 @@ Core parity is default. Full contains the additional heavy developer and optiona
 | `openssh-server` (F) | core/opt-in | Homebrew SSH clients; Apple sshd only with --with-sharing |
 | `libicu` (F) | dependency | Homebrew icu4c dependency of the selected GTK/media stack |
 | `gdb` (A/F) | exception | Apple LLDB; GDB requires additional Darwin debugger signing/privileges |
-| `fuse-libs` (F) | exception | Do not install a macFUSE system extension or change security policy merely for Linux FUSE parity |
+| `fuse` (F), `fuse-libs` (F) | exception | Do not install a macFUSE system extension or change security policy merely for Linux FUSE parity |
 | `chromium` (A/F), `makemkv` (A) | exception | Homebrew cask disabled; retain installed copies (Chrome/Firefox supply browser parity) |
 | `lineageos-devel` (A), `mstflint` (A), `schedtool` (F) | exception | Linux ROM build/scheduler/firmware tooling lacks an established supported Mac use case |
 | `dxvk-bin` (A), `lutris` (A/F), `luxtorpeda-bin` (A) | exception | Linux/Wine gaming integration is outside the approved native Mac setup; no compatibility-prefix migration |

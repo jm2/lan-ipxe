@@ -169,6 +169,7 @@ PKGS=(
   ffmpeg-free-devel
   flatpak
   flex
+  fuse
   fuse-libs
   gcc
   gdb
