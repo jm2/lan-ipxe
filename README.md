@@ -247,7 +247,10 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   Antigravity 2.0+ and its CLI, OpenCode, and Zed resolve the latest stable native
   artifacts and their published checksums on each run; Codex uses OpenAI's
   checksum-verifying current-release installer; Claude Code uses Anthropic's signed RPM
-  repository. The abandoned unsigned Antigravity 1.x RPM/repository, its exact
+  repository. The Antigravity AppImage under `/opt/Antigravity` is owned by the
+  desktop user so the app can update itself in place; reruns keep a self-updated
+  image that is at least the manifest version, and install its bundled launcher icon.
+  The abandoned unsigned Antigravity 1.x RPM/repository, its exact
   script-managed IDE settings, and VSCodium are removed, while customized settings or
   repo files are preserved (and retired repos disabled). The script also installs a
   deliberately fixed, checksum-pinned Ookla speedtest CLI, then applies dotfiles, zram

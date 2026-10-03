@@ -612,7 +612,7 @@ test_fedora_converged_native_installs() (
   local bin_dir=${TEST_ROOT}/converged/bin
   local installed_image=${install_dir}/Antigravity.AppImage
   local image_sha cli_sha
-  local link_calls=0 desktop_calls=0
+  local link_calls=0 desktop_calls=0 icon_calls=0
   ANTIGRAVITY_VERSION=2.90.1
   ANTIGRAVITY_DESKTOP_URL=https://storage.googleapis.com/antigravity-public/releases/2.90.1-123/linux-x64/Antigravity.AppImage
   ANTIGRAVITY_CLI_VERSION=3.4.5
@@ -657,10 +657,15 @@ test_fedora_converged_native_installs() (
       || fail "unexpected Antigravity desktop-file arguments: $*"
     (( desktop_calls += 1 ))
   }
+  install_antigravity_icon() {
+    [[ $* == "${installed_image}" ]] || fail "unexpected Antigravity icon arguments: $*"
+    (( icon_calls += 1 ))
+  }
   install_antigravity_desktop "${install_dir}"
   install_antigravity_cli "${bin_dir}"
   (( link_calls == 1 )) || fail 'converged desktop did not reconcile its command link'
   (( desktop_calls == 1 )) || fail 'converged desktop did not reconcile its launcher'
+  (( icon_calls == 1 )) || fail 'converged desktop did not reconcile its icon'
 )
 
 test_fedora_future_major_downgrade_guard() (
@@ -670,7 +675,7 @@ test_fedora_future_major_downgrade_guard() (
   local install_dir=${TEST_ROOT}/future-major-downgrade/Antigravity
   local installed_image=${install_dir}/Antigravity.AppImage
   local current_version=3.91.0 current_sha current_size log
-  local link_calls=0 desktop_calls=0
+  local link_calls=0 desktop_calls=0 icon_calls=0
   ANTIGRAVITY_VERSION=3.90.1
   ANTIGRAVITY_DESKTOP_URL=https://storage.googleapis.com/antigravity-public/releases/3.90.1-123/linux-x64/Antigravity.AppImage
   ANTIGRAVITY_DESKTOP_SHA512=$(printf 'a%.0s' {1..128})
@@ -703,11 +708,144 @@ test_fedora_future_major_downgrade_guard() (
       || fail "unexpected future-major desktop-file arguments: $*"
     (( desktop_calls += 1 ))
   }
+  install_antigravity_icon() {
+    [[ $* == "${installed_image}" ]] || fail "unexpected future-major icon arguments: $*"
+    (( icon_calls += 1 ))
+  }
   install_antigravity_desktop "${install_dir}" >"${log}"
   grep -Fq "Antigravity ${current_version} is newer than the current manifest ${ANTIGRAVITY_VERSION}; preserving it" \
     "${log}" || fail 'future-major downgrade preservation was not reported clearly'
   (( link_calls == 1 )) || fail 'future-major downgrade guard did not reconcile its command link'
   (( desktop_calls == 1 )) || fail 'future-major downgrade guard did not reconcile its launcher'
+  (( icon_calls == 1 )) || fail 'future-major downgrade guard did not reconcile its icon'
+)
+
+# Writes a managed install whose marker records a different image than the one
+# on disk, which is exactly what electron-updater leaves behind after it runs.
+write_self_updated_antigravity() {
+  local install_dir=$1 installed_image=$1/Antigravity.AppImage
+  install -d "${install_dir}"
+  printf '#!/usr/bin/env sh\nexit 0\n' >"${installed_image}"
+  chmod 0755 "${installed_image}"
+  printf '%s\n' \
+    'managed-by=lan-ipxe/setup-fedora-workstation.sh' \
+    'version=2.12.2' \
+    'source-url=https://storage.googleapis.com/antigravity-public/releases/2.12.2-1/linux-x64/Antigravity.AppImage' \
+    'image-size=1' \
+    "image-sha512=$(printf 'f%.0s' {1..128})" \
+    >"${install_dir}/.lan-ipxe-release"
+}
+
+test_fedora_self_updated_desktop_preserved() (
+  load_helpers setup-fedora-workstation.sh
+  select_fedora_artifacts x86_64
+  local root=${TEST_ROOT}/self-updated
+  local install_dir=${root}/Antigravity log=${root}/install.log
+  local installed_image=${install_dir}/Antigravity.AppImage
+  local finish_calls=0
+  WORK_DIR=${root}/work
+  ANTIGRAVITY_VERSION=2.19.1
+  ANTIGRAVITY_DESKTOP_URL=https://storage.googleapis.com/antigravity-public/releases/2.19.1-123/linux-x64/Antigravity.AppImage
+  ANTIGRAVITY_DESKTOP_SHA512=$(printf 'a%.0s' {1..128})
+  ANTIGRAVITY_DESKTOP_SIZE=123456
+  ANTIGRAVITY_COMMAND_LINK=${root}/antigravity-link
+  install -d "${WORK_DIR}"
+  write_self_updated_antigravity "${install_dir}"
+  antigravity_appimage_version() {
+    [[ $1 == "${installed_image}" ]] || fail "unexpected version-probe arguments: $*"
+    printf '2.20.0\n'
+  }
+  curl() { fail 'a self-updated Antigravity newer than the manifest was re-downloaded'; }
+  sudo() { fail "a self-updated Antigravity reconcile invoked sudo: $*"; }
+  finish_antigravity_desktop() {
+    [[ $* == "${install_dir}" ]] || fail "unexpected finish arguments: $*"
+    (( finish_calls += 1 ))
+  }
+  install_antigravity_desktop "${install_dir}" >"${log}"
+  grep -Fq 'Antigravity 2.20.0: updated in place by the app (manifest 2.19.1); preserving it' \
+    "${log}" || fail 'self-updated Antigravity preservation was not reported'
+  (( finish_calls == 1 )) || fail 'self-updated Antigravity did not reconcile its launcher'
+)
+
+test_fedora_stale_self_updated_desktop_replaced() {
+  local root=${TEST_ROOT}/stale-self-updated rc=0
+  (
+    load_helpers setup-fedora-workstation.sh
+    select_fedora_artifacts x86_64
+    WORK_DIR=${root}/work
+    ANTIGRAVITY_VERSION=2.19.1
+    ANTIGRAVITY_DESKTOP_URL=https://storage.googleapis.com/antigravity-public/releases/2.19.1-123/linux-x64/Antigravity.AppImage
+    ANTIGRAVITY_DESKTOP_SHA512=$(printf 'a%.0s' {1..128})
+    ANTIGRAVITY_DESKTOP_SIZE=123456
+    ANTIGRAVITY_COMMAND_LINK=${root}/antigravity-link
+    install -d "${WORK_DIR}"
+    write_self_updated_antigravity "${root}/Antigravity"
+    antigravity_appimage_version() { printf '2.15.0\n'; }
+    curl() { : >"${root}/downloaded"; return 1; }
+    install_antigravity_desktop "${root}/Antigravity"
+  ) >/dev/null 2>&1 || rc=$?
+  [[ ${rc} == 1 && -e ${root}/downloaded ]] \
+    || fail 'a self-updated Antigravity older than the manifest was not replaced'
+}
+
+test_fedora_desktop_owner_handoff() (
+  load_helpers setup-fedora-workstation.sh
+  local install_dir=${TEST_ROOT}/owner-handoff/Antigravity chown_calls=0
+  install -d "${install_dir}"
+  : >"${install_dir}/Antigravity.AppImage"
+  sudo() { fail "an already user-owned Antigravity install invoked sudo: $*"; }
+  ensure_antigravity_owner "${install_dir}" >/dev/null
+  id() {
+    case $1 in
+      -u|-g) printf '%s\n' "$(( $(command id "$1") + 4242 ))" ;;
+      *) command id "$@" ;;
+    esac
+  }
+  sudo() {
+    [[ $* == "chown -R -- $(( $(command id -u) + 4242 )):$(( $(command id -g) + 4242 )) ${install_dir}" ]] \
+      || fail "unexpected Antigravity ownership handoff: $*"
+    (( chown_calls += 1 ))
+  }
+  ensure_antigravity_owner "${install_dir}" >/dev/null
+  (( chown_calls == 1 )) || fail 'a foreign-owned Antigravity install was not handed to the user'
+)
+
+test_fedora_appimage_icon_and_version() (
+  load_helpers setup-fedora-workstation.sh
+  local root=${TEST_ROOT}/appimage-extract image icon_source='' icon_dest=''
+  WORK_DIR=${root}/work
+  ANTIGRAVITY_ICON_FILE=${root}/icons/hicolor/512x512/apps/antigravity.png
+  image=${root}/Antigravity.AppImage
+  install -d "${WORK_DIR}"
+  # Minimal stand-in for the AppImage runtime's single-member extraction.
+  cat >"${image}" <<'EOF'
+#!/usr/bin/env sh
+[ "$1" = --appimage-extract ] || exit 1
+mkdir -p "squashfs-root/$(dirname "$2")"
+case $2 in
+  antigravity.desktop) printf '[Desktop Entry]\nX-AppImage-Version=2.19.1\n' >"squashfs-root/$2" ;;
+  */antigravity.png) printf 'png' >"squashfs-root/$2" ;;
+  *) exit 1 ;;
+esac
+EOF
+  chmod 0755 "${image}"
+  [[ $(antigravity_appimage_version "${image}") == 2.19.1 ]] \
+    || fail 'the embedded Antigravity AppImage version was not read'
+  sudo() { fail "an unchanged icon refreshed the icon cache: $*"; }
+  put_file() {
+    [[ $1 == -s ]] || fail "the Antigravity icon was not installed system-wide: $*"
+    icon_source=$(cat -- "$2")
+    icon_dest=$3
+    # Read by the sourced install_antigravity_icon.
+    # shellcheck disable=SC2034
+    PUT_FILE_CHANGED=0
+  }
+  install_antigravity_icon "${image}" >/dev/null
+  [[ ${icon_source} == png && ${icon_dest} == "${ANTIGRAVITY_ICON_FILE}" ]] \
+    || fail 'the bundled Antigravity icon was not installed under the launcher icon name'
+  [[ $(command grep -c '^Icon=antigravity$' \
+      "${REPO_ROOT}/files/usr/share/applications/antigravity.desktop") == 1 ]] \
+    || fail 'the Antigravity launcher does not reference the bundled icon'
 )
 
 test_fedora_converged_opencode() (
@@ -1324,6 +1462,13 @@ main() {
   printf 'PASS Fedora verified native desktop/CLI convergence\n'
   test_fedora_future_major_downgrade_guard
   printf 'PASS Fedora future-major desktop downgrade preservation\n'
+  test_fedora_self_updated_desktop_preserved
+  test_fedora_stale_self_updated_desktop_replaced
+  printf 'PASS Fedora self-updated desktop preservation/replacement\n'
+  test_fedora_desktop_owner_handoff
+  printf 'PASS Fedora user-owned desktop install for in-app updates\n'
+  test_fedora_appimage_icon_and_version
+  printf 'PASS Fedora bundled launcher icon and embedded version extraction\n'
   test_fedora_converged_opencode
   printf 'PASS Fedora verified native OpenCode convergence\n'
   test_fedora_converged_zed

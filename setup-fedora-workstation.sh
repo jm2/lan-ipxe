@@ -90,6 +90,7 @@ LEGACY_VSCODIUM_REPO_SHA256=0796014003d89b1c1dcd5f38d8c54e54cead5862039d7a574c28
 ANTIGRAVITY_INSTALL_DIR=/opt/Antigravity
 ANTIGRAVITY_COMMAND_LINK=/usr/local/bin/antigravity
 ANTIGRAVITY_DESKTOP_FILE=/usr/share/applications/antigravity.desktop
+ANTIGRAVITY_ICON_FILE=/usr/share/icons/hicolor/512x512/apps/antigravity.png
 ANTIGRAVITY_VERSION=
 ANTIGRAVITY_DESKTOP_URL=
 ANTIGRAVITY_DESKTOP_SHA512=
@@ -810,6 +811,70 @@ resolve_native_tool_releases() {
   note "resolved Antigravity ${ANTIGRAVITY_VERSION}, Antigravity CLI ${ANTIGRAVITY_CLI_VERSION}, OpenCode ${OPENCODE_VERSION}, and Zed ${ZED_VERSION}"
 }
 
+# antigravity_appimage_extract <image> <member> <dir>: extracts one AppImage
+# member to <dir>/squashfs-root/<member> without FUSE; fails if it is absent.
+antigravity_appimage_extract() {
+  local image=$1 member=$2 dir=$3
+  rm -rf -- "${dir}"
+  install -d -- "${dir}"
+  ( cd -- "${dir}" && "${image}" --appimage-extract "${member}" ) >/dev/null 2>&1 \
+    && [[ -f ${dir}/squashfs-root/${member} && ! -L ${dir}/squashfs-root/${member} ]]
+}
+
+# Prints the X-AppImage-Version embedded in an Antigravity AppImage. Unlike the
+# release marker, it stays accurate after the app updates itself in place.
+antigravity_appimage_version() {
+  local dir=${WORK_DIR}/antigravity-version version
+  antigravity_appimage_extract "$1" antigravity.desktop "${dir}" || return 1
+  version=$(sed -n 's/^X-AppImage-Version=//p' \
+    "${dir}/squashfs-root/antigravity.desktop" | tail -1)
+  rm -rf -- "${dir}"
+  [[ -n ${version} ]] || return 1
+  printf '%s\n' "${version}"
+}
+
+# electron-updater replaces the AppImage by unlinking it and moving the new
+# image into the same directory, so the desktop user must own the install.
+ensure_antigravity_owner() {
+  local install_dir=$1 uid gid
+  uid=$(id -u) || die "could not determine the current user"
+  gid=$(id -g) || die "could not determine the current user's primary group"
+  if [[ -n $(find "${install_dir}" \( ! -uid "${uid}" -o ! -gid "${gid}" \) \
+               -print -quit) ]]; then
+    sudo chown -R -- "${uid}:${gid}" "${install_dir}" \
+      || die "could not hand ${install_dir} to UID ${uid} for in-app updates"
+    note "${install_dir}: owned by UID ${uid} so Antigravity can update itself"
+  fi
+}
+
+# Installs the icon bundled in the AppImage under the name the launcher uses.
+install_antigravity_icon() {
+  local image=$1 dir=${WORK_DIR}/antigravity-icon
+  local member=usr/share/icons/hicolor/512x512/apps/antigravity.png
+  local theme_dir=${ANTIGRAVITY_ICON_FILE%/*/*/*}
+  if ! antigravity_appimage_extract "${image}" "${member}" "${dir}"; then
+    warn "could not extract the Antigravity icon from ${image}; the launcher icon may be generic"
+    return 0
+  fi
+  put_file -s "${dir}/squashfs-root/${member}" "${ANTIGRAVITY_ICON_FILE}"
+  rm -rf -- "${dir}"
+  if (( PUT_FILE_CHANGED )) && [[ -f ${theme_dir}/index.theme ]] \
+     && command -v gtk-update-icon-cache >/dev/null; then
+    sudo gtk-update-icon-cache -q -t -f -- "${theme_dir}" \
+      || warn "could not refresh the icon cache in ${theme_dir}"
+  fi
+}
+
+# Shared tail of every successful desktop install or reconcile.
+finish_antigravity_desktop() {
+  local install_dir=$1
+  ensure_antigravity_owner "${install_dir}"
+  ensure_symlink -s "${install_dir}/Antigravity.AppImage" "${ANTIGRAVITY_COMMAND_LINK}"
+  put_file -s "${FILES}/usr/share/applications/antigravity.desktop" \
+    "${ANTIGRAVITY_DESKTOP_FILE}"
+  install_antigravity_icon "${install_dir}/Antigravity.AppImage"
+}
+
 # Optional install root keeps artifact/convergence tests unprivileged.
 # shellcheck disable=SC2120
 install_antigravity_desktop() {
@@ -821,7 +886,7 @@ install_antigravity_desktop() {
   local stage=${install_dir}.lan-ipxe-stage.$$
   local backup=${install_dir}.lan-ipxe-backup.$$
   local current_sha='' current_size='' current_version='' expected_current_sha=''
-  local image_sha='' image_size=''
+  local image_sha='' image_size='' self_updated=0 owner='' group=''
 
   [[ ! -e ${ANTIGRAVITY_COMMAND_LINK} || -L ${ANTIGRAVITY_COMMAND_LINK} ]] \
     || die "refusing to replace unmanaged path: ${ANTIGRAVITY_COMMAND_LINK}"
@@ -832,27 +897,32 @@ install_antigravity_desktop() {
     current_sha=${current_sha%% *}
     current_size=$(stat -c '%s' -- "${installed_image}") \
       || die "could not read the size of ${installed_image}"
-    current_version=$(sed -n 's/^version=//p' "${marker}" | tail -1)
     expected_current_sha=$(sed -n 's/^image-sha512=//p' "${marker}" | tail -1)
-    if [[ ${current_sha} == "${expected_current_sha}" \
-          && ${current_version} == "${ANTIGRAVITY_VERSION}" \
+    if [[ ${current_sha} == "${expected_current_sha}" ]]; then
+      current_version=$(sed -n 's/^version=//p' "${marker}" | tail -1)
+    elif current_version=$(antigravity_appimage_version "${installed_image}"); then
+      # The app replaced the image this script installed with its own update.
+      self_updated=1
+    else
+      current_version=''
+    fi
+    if [[ ${current_version} == "${ANTIGRAVITY_VERSION}" \
           && ${current_sha} == "${ANTIGRAVITY_DESKTOP_SHA512}" \
           && ${current_size} == "${ANTIGRAVITY_DESKTOP_SIZE}" ]]; then
       note "Antigravity ${ANTIGRAVITY_VERSION}: present and verified"
-      ensure_symlink -s "${installed_image}" "${ANTIGRAVITY_COMMAND_LINK}"
-      put_file -s "${FILES}/usr/share/applications/antigravity.desktop" \
-        "${ANTIGRAVITY_DESKTOP_FILE}"
+      finish_antigravity_desktop "${install_dir}"
       return 0
     fi
-    if [[ ${current_sha} == "${expected_current_sha}" \
-          && ${current_version} != "${ANTIGRAVITY_VERSION}" ]] \
+    if [[ -n ${current_version} && ${current_version} != "${ANTIGRAVITY_VERSION}" ]] \
        && is_supported_antigravity_desktop_version "${current_version}" \
        && printf '%s\n%s\n' "${ANTIGRAVITY_VERSION}" "${current_version}" \
           | LC_ALL=C sort -V -C; then
-      warn "Antigravity ${current_version} is newer than the current manifest ${ANTIGRAVITY_VERSION}; preserving it to avoid a downgrade"
-      ensure_symlink -s "${installed_image}" "${ANTIGRAVITY_COMMAND_LINK}"
-      put_file -s "${FILES}/usr/share/applications/antigravity.desktop" \
-        "${ANTIGRAVITY_DESKTOP_FILE}"
+      if (( self_updated )); then
+        note "Antigravity ${current_version}: updated in place by the app (manifest ${ANTIGRAVITY_VERSION}); preserving it"
+      else
+        warn "Antigravity ${current_version} is newer than the current manifest ${ANTIGRAVITY_VERSION}; preserving it to avoid a downgrade"
+      fi
+      finish_antigravity_desktop "${install_dir}"
       return 0
     fi
   fi
@@ -879,8 +949,11 @@ install_antigravity_desktop() {
 
   [[ ! -e ${stage} && ! -L ${stage} && ! -e ${backup} && ! -L ${backup} ]] \
     || die "stale Antigravity staging path exists beside ${install_dir}"
-  sudo install -d -o root -g root -m 0755 -- "${stage}"
-  sudo install -o root -g root -m 0755 -- "${image}" \
+  # User-owned so the app's own updater can replace the AppImage in place.
+  owner=$(id -un) || die "could not determine the current user"
+  group=$(id -gn) || die "could not determine the current user's primary group"
+  sudo install -d -o "${owner}" -g "${group}" -m 0755 -- "${stage}"
+  sudo install -o "${owner}" -g "${group}" -m 0755 -- "${image}" \
     "${stage}/Antigravity.AppImage"
   printf '%s\n' \
     'managed-by=lan-ipxe/setup-fedora-workstation.sh' \
@@ -889,9 +962,8 @@ install_antigravity_desktop() {
     "image-size=${ANTIGRAVITY_DESKTOP_SIZE}" \
     "image-sha512=${ANTIGRAVITY_DESKTOP_SHA512}" \
     >"${marker_source}"
-  sudo install -o root -g root -m 0644 -- "${marker_source}" \
+  sudo install -o "${owner}" -g "${group}" -m 0644 -- "${marker_source}" \
     "${stage}/.lan-ipxe-release"
-  sudo chown -R root:root -- "${stage}"
   if [[ -e ${install_dir} || -L ${install_dir} ]]; then
     sudo mv -- "${install_dir}" "${backup}"
     if ! sudo mv -- "${stage}" "${install_dir}"; then
@@ -908,9 +980,7 @@ install_antigravity_desktop() {
   fi
   "${installed_image}" --appimage-version >/dev/null 2>&1 \
     || die "installed Antigravity AppImage is not runnable"
-  ensure_symlink -s "${installed_image}" "${ANTIGRAVITY_COMMAND_LINK}"
-  put_file -s "${FILES}/usr/share/applications/antigravity.desktop" \
-    "${ANTIGRAVITY_DESKTOP_FILE}"
+  finish_antigravity_desktop "${install_dir}"
   note "Antigravity ${ANTIGRAVITY_VERSION}: installed from the verified latest AppImage"
 }
 
