@@ -672,6 +672,8 @@ remove_replaced_vscodium_fedora() {
 
 # The Claude Code repo file is removed only while it matches the copy this
 # script installed; its signing key goes once no repo file references it.
+# The optional paths are test seams exercised from the migration test script.
+# shellcheck disable=SC2120
 remove_legacy_claude_repo() {
   local path=${1:-${LEGACY_CLAUDE_REPO}} key=${2:-${LEGACY_CLAUDE_KEY_FILE}} sha=
   if [[ -f ${path} && ! -L ${path} ]]; then
