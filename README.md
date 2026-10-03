@@ -209,13 +209,17 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   installation, safely enables `[multilib]`, runs `pacman -Syu`, installs the official
   package set and detected Intel/AMD microcode, installs dotfiles/system config and
   zram policy from `files/`, explicitly generates and validates every dracut image
-  before removing mkinitcpio, then enables services and GDM settings. AUR work is last:
-  a self-bootstrapped `yay` interactively presents PKGBUILD diffs, updates installed
-  AUR packages (including VCS/devel packages), and installs the requested set. Arch's
-  signed repositories provide Code OSS, OpenCode, Codex CLI, and Zed; the AUR supplies
-  Claude Code and the native Antigravity 2.0+ desktop/CLI. The script removes VSCodium,
-  Antigravity IDE, and any installed Antigravity 1.x package before installing their
-  replacements. The package selection intentionally includes Intel/AMD graphics
+  before removing mkinitcpio, then enables services and GDM settings. The AI tools then
+  come from self-updating native installs, as on Fedora: the Antigravity 2.0+ AppImage
+  (user-owned under `/opt/Antigravity`, mounted through `fuse2`) and its CLI from the
+  checksummed vendor manifests, and Claude Code and Codex CLI from their official
+  installers under `~/.local/bin`; reruns keep a copy that updated itself. The
+  `antigravity`, `antigravity-cli`, `claude-code`, and `openai-codex` packages they
+  replace are removed. AUR work is last: a self-bootstrapped `yay` interactively presents
+  PKGBUILD diffs, updates installed AUR packages (including VCS/devel packages), and
+  installs the requested set. Arch's signed repositories provide Code OSS, OpenCode,
+  and Zed. The script removes VSCodium, Antigravity IDE, and any installed Antigravity
+  1.x package before installing their replacements. The package selection intentionally includes Intel/AMD graphics
   support and NVIDIA open modules for both `linux` and `linux-lts`. Rust comes only
   from rustup: an installed distro `rust` (and its split packages) is replaced by
   `rustup`, and each user gets the stable toolchain with rustfmt, clippy, and
@@ -224,8 +228,8 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   Dash to Dock from the AUR, and the bundled System Monitor extension with `libgtop`.
 - `setup-fedora-workstation.sh` — run as your normal user; Fedora 41+ (dnf5). Adds the
   signed third-party repos (`files/etc/yum.repos.d/`, the Tributary/Balun coprs, RPM Fusion,
-  Microsoft VS Code, Chrome, Claude Code, sing-box; PowerShell/NVIDIA repos on x86_64,
-  plus the Steam/Plex repos in the full profile), installs the dnf and flatpak sets,
+  Microsoft VS Code, Chrome, sing-box; the PowerShell repo on x86_64, plus the Steam/Plex
+  repos in the full profile), installs the dnf and flatpak sets,
   applies available DNF/Flatpak updates, and installs Zed plus native AI tools. Rust
   comes only from rustup (`rustup-init` per user, stable with rustfmt, clippy, and
   rust-analyzer); installed distro Rust packages are purged first.
@@ -245,13 +249,15 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   with the controller setup's `apply_updates = yes` and `reboot = when-needed`
   policy in `/etc/dnf/automatic.conf`.
   Antigravity 2.0+ and its CLI, OpenCode, and Zed resolve the latest stable native
-  artifacts and their published checksums on each run; Codex uses OpenAI's
-  checksum-verifying current-release installer; Claude Code uses Anthropic's signed RPM
-  repository. The Antigravity AppImage under `/opt/Antigravity` is owned by the
-  desktop user so the app can update itself in place; reruns keep a self-updated
-  image that is at least the manifest version, and install its bundled launcher icon.
+  artifacts and their published checksums on each run; Codex and Claude Code use
+  OpenAI's and Anthropic's checksum-verifying native installers under `~/.local/bin`.
+  Antigravity, its CLI, Claude Code, and Codex all update themselves in place. The
+  Antigravity AppImage under `/opt/Antigravity` is owned by the desktop user (and
+  needs the `fuse` package's `fusermount`); reruns keep a self-updated AppImage or
+  `agy` that is at least the manifest version, and install the bundled launcher icon.
   The abandoned unsigned Antigravity 1.x RPM/repository, its exact
-  script-managed IDE settings, and VSCodium are removed, while customized settings or
+  script-managed IDE settings, VSCodium, and the retired Claude Code RPM, repository,
+  and signing key are removed (the RPM only after the native `claude` is in place), while customized settings or
   repo files are preserved (and retired repos disabled). The script also installs a
   deliberately fixed, checksum-pinned Ookla speedtest CLI, then applies dotfiles, zram
   policy, services, and GDM settings.
@@ -260,8 +266,11 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   (`-Check`/`-DryRun` also run unelevated). Sets up
   OpenSSH Server via `enable-openssh-win11.ps1`, then installs the winget package set.
   Every managed package is checked for upgrades on every run unless explicitly marked
-  presence-only; the deliberately fixed Speedtest CLI is currently the only such
-  package. The highest stable Python 3 minor-package channel is resolved from WinGet
+  presence-only: the deliberately fixed Speedtest CLI, and the Antigravity app, which
+  updates itself. Claude Code, Codex CLI, and the Antigravity CLI come from each
+  vendor's official per-user `install.ps1` so they update themselves; once a native
+  command runs, the `Anthropic.ClaudeCode`, `OpenAI.Codex`, or `Google.AntigravityCLI`
+  WinGet package it replaces is uninstalled. The highest stable Python 3 minor-package channel is resolved from WinGet
   rather than hard-coded. Antigravity IDE and VSCodium are removed, with
   Microsoft VS Code kept as the supported Windows editor. One `winget export` snapshot
   decides the remaining state; `--include-unknown` keeps versionless registrations from

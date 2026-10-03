@@ -8,7 +8,7 @@ Core parity is default. Full contains the additional heavy developer and optiona
 | --- | --- | --- |
 | `@gnome-desktop` (F), `NetworkManager` (F), `alsa-sof-firmware` (F), `archlinux-appstream-data` (A), `bluez` (A/F), `bluez-tools` (F), `bluez-utils` (A), `chrony` (A/F), `cockpit` (A/F), `cockpit-files` (A/F), `cockpit-packagekit` (A/F), `cockpit-podman` (A/F), `cockpit-storaged` (A/F), `cronie` (A/F), `cups` (A/F), `cups-pk-helper` (A/F), `dkms` (F), `dnf5-plugin-automatic` (F), `downgrade` (A), `dracut` (A/F), `efibootmgr` (A/F), `flatpak` (F), `gnome` (A), `gnome-circle` (A), `gnome-extensions-app` (F), `gnome-extra` (A), `gnome-firmware` (A), `gnome-shell-extension-appindicator` (A/F), `gnome-shell-extension-dash-to-dock` (A/F), `gnome-shell-extension-dash-to-panel` (A), `gnome-shell-extension-desktop-icons-ng` (A), `gnome-shell-extension-freon` (F), `gnome-shell-extension-system-monitor` (F), `gnome-shell-extension-vitals` (A), `gnome-shell-extensions` (A), `gnome-tweaks` (F), `grub` (A), `grub2` (F), `gst-plugin-pipewire` (A), `gst-plugins-ugly` (A), `kernel-headers` (F), `lib32-libva-intel-driver` (A), `lib32-vulkan-asahi` (A), `lib32-vulkan-broadcom` (A), `lib32-vulkan-dzn` (A), `lib32-vulkan-freedreno` (A), `lib32-vulkan-gfxstream` (A), `lib32-vulkan-intel` (A), `lib32-vulkan-nouveau` (A), `lib32-vulkan-panfrost` (A), `lib32-vulkan-powervr` (A), `lib32-vulkan-radeon` (A), `lib32-vulkan-swrast` (A), `lib32-vulkan-virtio` (A), `libva-intel-driver` (A), `libva-intel-media-driver` (F), `libva-nvidia-driver` (A), `linux` (A), `linux-firmware` (A), `linux-headers` (A), `linux-lts` (A), `linux-lts-headers` (A), `lvm2` (A), `mesa-vulkan-drivers` (F), `mesa-vulkan-drivers.i686` (F), `mokutil` (F), `networkmanager` (A), `nvidia-open` (A), `nvidia-open-lts` (A), `nvidia-utils` (A), `opencl-mesa` (A), `pacman-contrib` (A), `pipewire` (A/F), `pipewire-alsa` (A/F), `pipewire-jack` (A), `pipewire-pulse` (A), `pipewire-pulseaudio` (F), `power-profiles-daemon` (A), `sof-firmware` (A), `system-config-printer` (A/F), `udisks2-lvm2` (F), `vulkan-intel` (A), `vulkan-loader.i686` (F), `vulkan-mesa-layers` (A), `vulkan-radeon` (A), `wireplumber` (A/F), `wpa_supplicant` (A/F), `zram-generator` (A/F) | OS-specific | Linux desktop/service/kernel/driver/package-manager integration; macOS supplies its own stack |
 | `glibc-devel.i686` (F), `libgtop` (A), `libstdc++-devel.i686` (F), `libva.i686` (F), `readline-devel.i686` (F), `zlib-ng-compat-devel.i686` (F) | OS-specific | Linux multilib/System Monitor extension dependencies; no Mac multilib or GNOME extension replay |
-| `antigravity` (A), `code` (A/F), `google-chrome` (A), `google-chrome-stable` (F), `vlc` (A/F) | core | Corresponding Homebrew cask; preserve existing native/Store ownership |
+| `code` (A/F), `google-chrome` (A), `google-chrome-stable` (F), `vlc` (A/F) | core | Corresponding Homebrew cask; preserve existing native/Store ownership |
 | `zed` (A) | core | Official signed Apple Silicon DMG and bundled CLI link; avoids Homebrew's hanging completion-generation step |
 | `android-sdk-platform-tools` (A) | core | Google platform-tools archive; same SDK root/owner used by full |
 | `bash-completion` (A/F) | core | Homebrew bash-completion |
@@ -37,7 +37,7 @@ Core parity is default. Full contains the additional heavy developer and optiona
 | `hivex` (A) | core | Homebrew hivex |
 | `htop` (A) | core | Homebrew htop |
 | `ImageMagick` (F) | core | Homebrew imagemagick |
-| `jq` (F) | core | Homebrew jq |
+| `jq` (A/F) | core | Homebrew jq |
 | `less` (A/F) | core | Homebrew less |
 | `libadwaita-devel` (F) | core | Homebrew libadwaita |
 | `lz4` (F) | core | Homebrew lz4 |
@@ -54,6 +54,7 @@ Core parity is default. Full contains the additional heavy developer and optiona
 | `sing-box` (F) | core | Homebrew sing-box |
 | `squashfs-tools` (F) | core | Homebrew squashfs |
 | `texinfo` (A/F) | core | Homebrew texinfo |
+| `tmux` (A/F) | core | Homebrew tmux |
 | `transmission-cli` (F) | core | Homebrew transmission-cli |
 | `tree` (A/F) | core | Homebrew tree |
 | `unar` (F), `unarchiver` (A) | core | Homebrew unar |
@@ -61,7 +62,7 @@ Core parity is default. Full contains the additional heavy developer and optiona
 | `wget` (A/F) | core | Homebrew wget |
 | `yt-dlp` (A) | core | Homebrew yt-dlp |
 | `zip` (F) | core | Homebrew zip |
-| `antigravity-cli` (A), `claude-code` (A/F), `ookla-speedtest-bin` (A), `openai-codex` (A), `powershell` (F), `powershell-bin` (A) | core | Official native CLI; owner-aware reconciliation (Ookla presence-only) |
+| `ookla-speedtest-bin` (A), `powershell` (F), `powershell-bin` (A) | core | Official native CLI; owner-aware reconciliation (Ookla presence-only) |
 | `opencode` (A) | core | opencode.ai `latest` CLI feed (same channel as the OpenCode desktop app) in `~/.opencode/bin`, linked into `~/.local/bin`; OpenCode desktop via the `opencode-desktop` cask |
 | `balun` (F), `balun-bin` (A), `tributary` (F), `tributary-bin` (A) | core | Verified jm2 release app; preserve local source checkouts |
 | `gnome-icon-theme` (A), `gnome-icon-theme-symbolic` (A) | core | adwaita-icon-theme; native desktop appearance managed separately |
@@ -72,7 +73,7 @@ Core parity is default. Full contains the additional heavy developer and optiona
 | `openssh-server` (F) | core/opt-in | Homebrew SSH clients; Apple sshd only with --with-sharing |
 | `libicu` (F) | dependency | Homebrew icu4c dependency of the selected GTK/media stack |
 | `gdb` (A/F) | exception | Apple LLDB; GDB requires additional Darwin debugger signing/privileges |
-| `fuse` (F), `fuse-libs` (F) | exception | Do not install a macFUSE system extension or change security policy merely for Linux FUSE parity |
+| `fuse` (F), `fuse-libs` (F), `fuse2` (A) | exception | Do not install a macFUSE system extension or change security policy merely for Linux FUSE parity |
 | `chromium` (A/F), `makemkv` (A) | exception | Homebrew cask disabled; retain installed copies (Chrome/Firefox supply browser parity) |
 | `lineageos-devel` (A), `mstflint` (A), `schedtool` (F) | exception | Linux ROM build/scheduler/firmware tooling lacks an established supported Mac use case |
 | `dxvk-bin` (A), `lutris` (A/F), `luxtorpeda-bin` (A) | exception | Linux/Wine gaming integration is outside the approved native Mac setup; no compatibility-prefix migration |

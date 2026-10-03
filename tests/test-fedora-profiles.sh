@@ -85,7 +85,7 @@ test_profile_selection() {
       [[ ${out} != *r8152* ]] || fail "${arch}/${profile}: plan still mentions r8152"
 
       # Core developer surface, present in both profiles.
-      for item in balun tributary chromium google-chrome-stable code claude-code \
+      for item in balun tributary chromium google-chrome-stable code \
           clang golang nodejs cockpit-machines cockpit-podman transmission-cli; do
         has_line "${item}" "${pkgs}" || fail "${arch}/${profile}: omits core package ${item}"
       done
@@ -93,8 +93,13 @@ test_profile_selection() {
           copr:copr.fedorainfracloud.org:jmsqrd:tributary; do
         has_line "${item}" "${repos}" || fail "${arch}/${profile}: omits core repo ${item}"
       done
-      for item in antigravity agy opencode codex zed speedtest; do
+      for item in antigravity agy opencode claude codex zed speedtest; do
         has_line "${item}" "${tools}" || fail "${arch}/${profile}: omits tool ${item}"
+      done
+      # Claude Code self-updates natively; its RPM repo and the unused NVIDIA repo are retired.
+      for item in claude-code rpmfusion-nonfree-nvidia-driver; do
+        ! has_line "${item}" "${pkgs}" || fail "${arch}/${profile}: still requests package ${item}"
+        ! has_line "${item}" "${repos}" || fail "${arch}/${profile}: still enables repo ${item}"
       done
       has_line net.nokyan.Resources "${flatpaks}" \
         || fail "${arch}/${profile}: omits the core Resources Flatpak"
@@ -123,8 +128,6 @@ test_profile_selection() {
 
       if [[ ${arch} == x86_64 ]]; then
         has_line powershell "${pkgs}" || fail "x86_64/${profile}: omits the PowerShell RPM"
-        has_line rpmfusion-nonfree-nvidia-driver "${repos}" \
-          || fail "x86_64/${profile}: omits the nvidia repo"
         if [[ ${profile} == full ]]; then
           for item in steam plexmediaserver glibc-devel.i686; do
             has_line "${item}" "${pkgs}" || fail "x86_64/full: omits ${item}"

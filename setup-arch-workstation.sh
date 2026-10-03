@@ -42,7 +42,14 @@
 #   4. generates and validates dracut images before removing mkinitcpio
 #   5. enables the service set (bluetooth, chrony, cronie, cups, gdm, ...)
 #   6. publishes ~/.config/monitors.xml to GDM and applies the GDM font setting
-#   7. bootstraps yay (yay-bin from the AUR), interactively reviews/updates
+#   7. installs the self-updating native AI tools: the Antigravity 2.0+
+#      AppImage (user-owned under /opt/Antigravity so it can update itself,
+#      run through FUSE 2) and its CLI from checksummed vendor manifests, plus
+#      Claude Code and Codex CLI from their official native installers under
+#      ~/.local. Reruns keep a copy that updated itself rather than downgrade
+#      it, and the AUR/pacman antigravity, antigravity-cli, claude-code and
+#      openai-codex packages they replace are removed
+#   8. bootstraps yay (yay-bin from the AUR), interactively reviews/updates
 #      installed AUR packages (including VCS/devel packages), and installs the
 #      requested AUR set
 
@@ -54,6 +61,27 @@ FILES=${SCRIPT_DIR}/files
 YAY_AUR_URL=https://aur.archlinux.org/yay-bin.git
 YAY_VCS_DB=${XDG_CACHE_HOME:-${HOME}/.cache}/yay/vcs.json
 RUST_COMPONENTS=(rustfmt clippy rust-analyzer)
+# Native, self-updating AI tools (x86_64 only, like the rest of this package set).
+ANTIGRAVITY_INSTALL_DIR=/opt/Antigravity
+ANTIGRAVITY_COMMAND_LINK=/usr/local/bin/antigravity
+ANTIGRAVITY_DESKTOP_FILE=/usr/share/applications/antigravity.desktop
+ANTIGRAVITY_ICON_FILE=/usr/share/icons/hicolor/512x512/apps/antigravity.png
+ANTIGRAVITY_DESKTOP_MANIFEST_URL=https://antigravity-hub-auto-updater-974169037036.us-central1.run.app/manifest/latest-x64-linux.yml
+ANTIGRAVITY_DESKTOP_URL_SUFFIX=/linux-x64/Antigravity.AppImage
+ANTIGRAVITY_CLI_MANIFEST_URL=https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json
+ANTIGRAVITY_CLI_URL_SUFFIX=/linux-x64/cli_linux_x64.tar.gz
+ANTIGRAVITY_VERSION=
+ANTIGRAVITY_DESKTOP_URL=
+ANTIGRAVITY_DESKTOP_SHA512=
+ANTIGRAVITY_DESKTOP_SIZE=
+ANTIGRAVITY_CLI_VERSION=
+ANTIGRAVITY_CLI_URL=
+ANTIGRAVITY_CLI_ARCHIVE_SHA512=
+ARCH=x86_64
+CODEX_INSTALLER_URL=https://chatgpt.com/codex/install.sh
+CLAUDE_INSTALLER_URL=https://claude.ai/install.sh
+# Packages the native installs replace; none of them can update in place.
+RETIRED_AI_PKGS=(antigravity antigravity-cli claude-code openai-codex)
 RUST_TOOLCHAIN=stable-x86_64-unknown-linux-gnu
 # Arch's rust split packages all pin the rust package version, which rustup's
 # unversioned provides cannot satisfy, so they leave together; the standalone
@@ -95,6 +123,7 @@ PKGS_OFFICIAL_CORE=(
   efibootmgr
   erofs-utils
   flex
+  fuse2
   gcc
   gdb
   git
@@ -119,6 +148,7 @@ PKGS_OFFICIAL_CORE=(
   hivex
   htop
   jdk-openjdk
+  jq
   less
   libgtop # Optional upstream, required by the System Monitor shell extension.
   libmpc
@@ -149,7 +179,6 @@ PKGS_OFFICIAL_CORE=(
   nvidia-utils
   opencl-mesa
   opencode
-  openai-codex
   openssh
   pacman-contrib
   pipewire
@@ -169,6 +198,7 @@ PKGS_OFFICIAL_CORE=(
   sudo
   system-config-printer
   texinfo
+  tmux
   tree
   unarchiver
   vim
@@ -218,10 +248,7 @@ PKGS_AUR_CORE=(
   android-sdk-cmdline-tools-latest
   android-sdk-platform-tools
   android-studio
-  antigravity
-  antigravity-cli
   balun-bin
-  claude-code
   downgrade
   gnome-icon-theme
   gnome-icon-theme-symbolic
@@ -534,26 +561,417 @@ transition_openjdk_runtime_arch() {
   note "standalone OpenJDK JRE replaced by jdk-openjdk"
 }
 
-verify_antigravity_arch() {
-  local package_line version comparison
-  package_line=$(pacman -Q antigravity 2>/dev/null) \
-    || die "Antigravity 2.x was not installed"
-  version=${package_line#* }
-  comparison=$(vercmp "${version}" 2.0.0) \
-    || die "could not compare the installed Antigravity version"
-  (( comparison >= 0 )) \
-    || die "legacy Antigravity ${version} is installed; version 2.0 or newer is required"
-  pacman -Q antigravity-cli &>/dev/null \
-    || die "the Antigravity CLI package was not installed"
-  command -v antigravity >/dev/null \
-    || die "the Antigravity package did not provide antigravity"
-  command -v agy >/dev/null \
-    || die "the Antigravity CLI package did not provide agy"
-  agy --version >/dev/null 2>&1 \
+is_supported_antigravity_desktop_version() {
+  local version=$1
+  [[ ${version} =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
+    || return 1
+  printf '%s\n%s\n' 2.0.0 "${version}" | LC_ALL=C sort -V -C
+}
+
+# Fetch release metadata without following a redirect to plaintext. GitHub's
+# API token is optional; when supplied it raises the rate limit without
+# changing which public release metadata is trusted.
+fetch_release_document() {
+  local url=$1
+  local curl_args=(--proto '=https' --tlsv1.2 -fsSL --retry 3
+                   --connect-timeout 30 --max-time 120)
+  case ${url} in
+    https://api.github.com/*)
+      curl_args+=(-H 'Accept: application/vnd.github+json'
+                  -H 'X-GitHub-Api-Version: 2022-11-28')
+      if [[ -n ${GITHUB_TOKEN:-} ]]; then
+        curl_args+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+      fi
+      ;;
+  esac
+  curl "${curl_args[@]}" "${url}"
+}
+
+parse_antigravity_desktop_manifest() {
+  local manifest=$1
+  awk '
+    BEGIN { rollout = 100 }
+    $1 == "version:" { version = $2 }
+    $1 == "-" && $2 == "url:" {
+      in_appimage = ($3 ~ /\/Antigravity[.]AppImage$/)
+      if (in_appimage) { count += 1; url = $3 }
+      next
+    }
+    in_appimage && $1 == "sha512:" { checksum = $2; next }
+    in_appimage && $1 == "size:" { size = $2; in_appimage = 0; next }
+    $1 == "stagingPercentage:" { rollout = $2 }
+    END {
+      if (count != 1 || version == "" || url == "" || checksum == "" ||
+          size == "") exit 1
+      printf "%s\t%s\t%s\t%s\t%s\n", version, url, checksum, size, rollout
+    }
+  ' <<<"${manifest}"
+}
+
+resolve_antigravity_desktop_release() {
+  local manifest line checksum_base64 decoded_hex
+  manifest=$(fetch_release_document "${ANTIGRAVITY_DESKTOP_MANIFEST_URL}") \
+    || die "could not query the latest Antigravity desktop release"
+  line=$(parse_antigravity_desktop_manifest "${manifest}") \
+    || die "latest Antigravity desktop manifest has an unexpected layout"
+  IFS=$'\t' read -r ANTIGRAVITY_VERSION ANTIGRAVITY_DESKTOP_URL \
+    checksum_base64 ANTIGRAVITY_DESKTOP_SIZE ANTIGRAVITY_DESKTOP_ROLLOUT <<<"${line}"
+  is_supported_antigravity_desktop_version "${ANTIGRAVITY_VERSION}" \
+    || die "latest Antigravity desktop manifest is not a stable release at or above 2.0.0"
+  [[ ${ANTIGRAVITY_DESKTOP_URL} == \
+      "https://storage.googleapis.com/antigravity-public/"*"/${ANTIGRAVITY_VERSION}-"*"${ANTIGRAVITY_DESKTOP_URL_SUFFIX}" ]] \
+    || die "latest Antigravity desktop manifest selected an unexpected ${ARCH} URL"
+  [[ ${ANTIGRAVITY_DESKTOP_SIZE} =~ ^[0-9]+$ ]] \
+    && (( ANTIGRAVITY_DESKTOP_SIZE > 0 )) \
+    || die "latest Antigravity desktop manifest has an invalid artifact size"
+  [[ ${ANTIGRAVITY_DESKTOP_ROLLOUT} =~ ^[0-9]+$ ]] \
+    && (( ANTIGRAVITY_DESKTOP_ROLLOUT >= 1 && ANTIGRAVITY_DESKTOP_ROLLOUT <= 100 )) \
+    || die "latest Antigravity desktop manifest has an invalid rollout percentage"
+  decoded_hex=$(printf '%s' "${checksum_base64}" | base64 --decode 2>/dev/null \
+    | od -An -v -tx1 | tr -d ' \n') \
+    || die "latest Antigravity desktop manifest has invalid Base64 checksum data"
+  [[ ${decoded_hex} =~ ^[[:xdigit:]]{128}$ ]] \
+    || die "latest Antigravity desktop manifest checksum is not SHA-512"
+  ANTIGRAVITY_DESKTOP_SHA512=${decoded_hex,,}
+}
+
+resolve_antigravity_cli_release() {
+  local metadata line
+  metadata=$(fetch_release_document "${ANTIGRAVITY_CLI_MANIFEST_URL}") \
+    || die "could not query the latest Antigravity CLI release"
+  line=$(jq -er '
+      select(type == "object"
+        and (.version | type) == "string"
+        and (.url | type) == "string"
+        and (.sha512 | type) == "string")
+      | [.version, .url, .sha512] | @tsv
+    ' <<<"${metadata}") \
+    || die "latest Antigravity CLI manifest has an unexpected layout"
+  IFS=$'\t' read -r ANTIGRAVITY_CLI_VERSION ANTIGRAVITY_CLI_URL \
+    ANTIGRAVITY_CLI_ARCHIVE_SHA512 <<<"${line}"
+  [[ ${ANTIGRAVITY_CLI_VERSION} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || die "latest Antigravity CLI manifest has an invalid version"
+  [[ ${ANTIGRAVITY_CLI_URL} == \
+      "https://storage.googleapis.com/antigravity-public/antigravity-cli/${ANTIGRAVITY_CLI_VERSION}-"*"${ANTIGRAVITY_CLI_URL_SUFFIX}" ]] \
+    || die "latest Antigravity CLI manifest selected an unexpected ${ARCH} URL"
+  [[ ${ANTIGRAVITY_CLI_ARCHIVE_SHA512} =~ ^[[:xdigit:]]{128}$ ]] \
+    || die "latest Antigravity CLI manifest has no valid SHA-512 digest"
+  ANTIGRAVITY_CLI_ARCHIVE_SHA512=${ANTIGRAVITY_CLI_ARCHIVE_SHA512,,}
+}
+
+# antigravity_appimage_extract <image> <member> <dir>: extracts one AppImage
+# member to <dir>/squashfs-root/<member> without FUSE; fails if it is absent.
+antigravity_appimage_extract() {
+  local image=$1 member=$2 dir=$3
+  rm -rf -- "${dir}"
+  install -d -- "${dir}"
+  ( cd -- "${dir}" && "${image}" --appimage-extract "${member}" ) >/dev/null 2>&1 \
+    && [[ -f ${dir}/squashfs-root/${member} && ! -L ${dir}/squashfs-root/${member} ]]
+}
+
+# Prints the X-AppImage-Version embedded in an Antigravity AppImage. Unlike the
+# release marker, it stays accurate after the app updates itself in place.
+antigravity_appimage_version() {
+  local dir=${WORK_DIR}/antigravity-version version
+  antigravity_appimage_extract "$1" antigravity.desktop "${dir}" || return 1
+  version=$(sed -n 's/^X-AppImage-Version=//p' \
+    "${dir}/squashfs-root/antigravity.desktop" | tail -1)
+  rm -rf -- "${dir}"
+  [[ -n ${version} ]] || return 1
+  printf '%s\n' "${version}"
+}
+
+# electron-updater replaces the AppImage by unlinking it and moving the new
+# image into the same directory, so the desktop user must own the install.
+ensure_antigravity_owner() {
+  local install_dir=$1 uid gid
+  uid=$(id -u) || die "could not determine the current user"
+  gid=$(id -g) || die "could not determine the current user's primary group"
+  if [[ -n $(find "${install_dir}" \( ! -uid "${uid}" -o ! -gid "${gid}" \) \
+               -print -quit) ]]; then
+    sudo chown -R -- "${uid}:${gid}" "${install_dir}" \
+      || die "could not hand ${install_dir} to UID ${uid} for in-app updates"
+    note "${install_dir}: owned by UID ${uid} so Antigravity can update itself"
+  fi
+}
+
+# Installs the icon bundled in the AppImage under the name the launcher uses.
+install_antigravity_icon() {
+  local image=$1 dir=${WORK_DIR}/antigravity-icon
+  local member=usr/share/icons/hicolor/512x512/apps/antigravity.png
+  local theme_dir=${ANTIGRAVITY_ICON_FILE%/*/*/*}
+  if ! antigravity_appimage_extract "${image}" "${member}" "${dir}"; then
+    warn "could not extract the Antigravity icon from ${image}; the launcher icon may be generic"
+    return 0
+  fi
+  put_file -s "${dir}/squashfs-root/${member}" "${ANTIGRAVITY_ICON_FILE}"
+  rm -rf -- "${dir}"
+  if (( PUT_FILE_CHANGED )) && [[ -f ${theme_dir}/index.theme ]] \
+     && command -v gtk-update-icon-cache >/dev/null; then
+    sudo gtk-update-icon-cache -q -t -f -- "${theme_dir}" \
+      || warn "could not refresh the icon cache in ${theme_dir}"
+  fi
+}
+
+# Shared tail of every successful desktop install or reconcile.
+finish_antigravity_desktop() {
+  local install_dir=$1
+  ensure_antigravity_owner "${install_dir}"
+  ensure_symlink -s "${install_dir}/Antigravity.AppImage" "${ANTIGRAVITY_COMMAND_LINK}"
+  put_file -s "${FILES}/usr/share/applications/antigravity.desktop" \
+    "${ANTIGRAVITY_DESKTOP_FILE}"
+  install_antigravity_icon "${install_dir}/Antigravity.AppImage"
+}
+
+# Optional install root keeps artifact/convergence tests unprivileged.
+# shellcheck disable=SC2120
+install_antigravity_desktop() {
+  local install_dir=${1:-${ANTIGRAVITY_INSTALL_DIR}}
+  local marker=${install_dir}/.lan-ipxe-release
+  local installed_image=${install_dir}/Antigravity.AppImage
+  local image=${WORK_DIR}/Antigravity-${ANTIGRAVITY_VERSION}.AppImage
+  local marker_source=${WORK_DIR}/antigravity-release-marker
+  local stage=${install_dir}.lan-ipxe-stage.$$
+  local backup=${install_dir}.lan-ipxe-backup.$$
+  local current_sha='' current_size='' current_version='' expected_current_sha=''
+  local image_sha='' image_size='' self_updated=0 owner='' group=''
+
+  [[ ! -e ${ANTIGRAVITY_COMMAND_LINK} || -L ${ANTIGRAVITY_COMMAND_LINK} ]] \
+    || die "refusing to replace unmanaged path: ${ANTIGRAVITY_COMMAND_LINK}"
+  if [[ -x ${installed_image} && -f ${marker} ]] \
+     && grep -Fxq 'managed-by=lan-ipxe/setup-arch-workstation.sh' "${marker}"; then
+    current_sha=$(sha512sum -- "${installed_image}") \
+      || die "could not hash ${installed_image}"
+    current_sha=${current_sha%% *}
+    current_size=$(stat -c '%s' -- "${installed_image}") \
+      || die "could not read the size of ${installed_image}"
+    expected_current_sha=$(sed -n 's/^image-sha512=//p' "${marker}" | tail -1)
+    if [[ ${current_sha} == "${expected_current_sha}" ]]; then
+      current_version=$(sed -n 's/^version=//p' "${marker}" | tail -1)
+    elif current_version=$(antigravity_appimage_version "${installed_image}"); then
+      # The app replaced the image this script installed with its own update.
+      self_updated=1
+    else
+      current_version=''
+    fi
+    if [[ ${current_version} == "${ANTIGRAVITY_VERSION}" \
+          && ${current_sha} == "${ANTIGRAVITY_DESKTOP_SHA512}" \
+          && ${current_size} == "${ANTIGRAVITY_DESKTOP_SIZE}" ]]; then
+      note "Antigravity ${ANTIGRAVITY_VERSION}: present and verified"
+      finish_antigravity_desktop "${install_dir}"
+      return 0
+    fi
+    if [[ -n ${current_version} && ${current_version} != "${ANTIGRAVITY_VERSION}" ]] \
+       && is_supported_antigravity_desktop_version "${current_version}" \
+       && printf '%s\n%s\n' "${ANTIGRAVITY_VERSION}" "${current_version}" \
+          | LC_ALL=C sort -V -C; then
+      if (( self_updated )); then
+        note "Antigravity ${current_version}: updated in place by the app (manifest ${ANTIGRAVITY_VERSION}); preserving it"
+      else
+        warn "Antigravity ${current_version} is newer than the current manifest ${ANTIGRAVITY_VERSION}; preserving it to avoid a downgrade"
+      fi
+      finish_antigravity_desktop "${install_dir}"
+      return 0
+    fi
+  fi
+
+  if [[ -e ${install_dir} || -L ${install_dir} ]]; then
+    [[ -f ${marker} ]] \
+      && grep -Fxq 'managed-by=lan-ipxe/setup-arch-workstation.sh' "${marker}" \
+      || die "refusing to replace unmanaged Antigravity path: ${install_dir}"
+  fi
+  curl --proto '=https' --tlsv1.2 -fL --retry 3 \
+    -o "${image}" "${ANTIGRAVITY_DESKTOP_URL}" \
+    || die "could not download Antigravity ${ANTIGRAVITY_VERSION}"
+  image_sha=$(sha512sum -- "${image}") || die "could not hash ${image}"
+  image_sha=${image_sha%% *}
+  [[ ${image_sha} == "${ANTIGRAVITY_DESKTOP_SHA512}" ]] \
+    || die "Antigravity AppImage checksum mismatch for ${ARCH}"
+  image_size=$(stat -c '%s' -- "${image}") \
+    || die "could not read the Antigravity AppImage size"
+  [[ ${image_size} == "${ANTIGRAVITY_DESKTOP_SIZE}" ]] \
+    || die "Antigravity AppImage size mismatch for ${ARCH}"
+  chmod 0755 "${image}"
+  "${image}" --appimage-version >/dev/null 2>&1 \
+    || die "the verified Antigravity artifact is not a runnable AppImage"
+
+  [[ ! -e ${stage} && ! -L ${stage} && ! -e ${backup} && ! -L ${backup} ]] \
+    || die "stale Antigravity staging path exists beside ${install_dir}"
+  # User-owned so the app's own updater can replace the AppImage in place.
+  owner=$(id -un) || die "could not determine the current user"
+  group=$(id -gn) || die "could not determine the current user's primary group"
+  sudo install -d -o "${owner}" -g "${group}" -m 0755 -- "${stage}"
+  sudo install -o "${owner}" -g "${group}" -m 0755 -- "${image}" \
+    "${stage}/Antigravity.AppImage"
+  printf '%s\n' \
+    'managed-by=lan-ipxe/setup-arch-workstation.sh' \
+    "version=${ANTIGRAVITY_VERSION}" \
+    "source-url=${ANTIGRAVITY_DESKTOP_URL}" \
+    "image-size=${ANTIGRAVITY_DESKTOP_SIZE}" \
+    "image-sha512=${ANTIGRAVITY_DESKTOP_SHA512}" \
+    >"${marker_source}"
+  sudo install -o "${owner}" -g "${group}" -m 0644 -- "${marker_source}" \
+    "${stage}/.lan-ipxe-release"
+  if [[ -e ${install_dir} || -L ${install_dir} ]]; then
+    sudo mv -- "${install_dir}" "${backup}"
+    if ! sudo mv -- "${stage}" "${install_dir}"; then
+      sudo mv -- "${backup}" "${install_dir}" || true
+      die "could not activate Antigravity ${ANTIGRAVITY_VERSION}"
+    fi
+    sudo rm -rf -- "${backup}"
+  else
+    sudo mv -- "${stage}" "${install_dir}"
+  fi
+  if command -v restorecon >/dev/null; then
+    sudo restorecon -R "${install_dir}" \
+      || die "failed to restore SELinux labels under ${install_dir}"
+  fi
+  "${installed_image}" --appimage-version >/dev/null 2>&1 \
+    || die "installed Antigravity AppImage is not runnable"
+  finish_antigravity_desktop "${install_dir}"
+  note "Antigravity ${ANTIGRAVITY_VERSION}: installed from the verified latest AppImage"
+}
+
+# Optional bin directory keeps artifact/convergence tests isolated.
+# shellcheck disable=SC2120
+install_antigravity_cli() {
+  local bin_dir=${1:-${HOME}/.local/bin}
+  local dest=${bin_dir}/agy archive=${WORK_DIR}/antigravity-cli.tar.gz
+  local marker=${dest}.lan-ipxe-release marker_source=${WORK_DIR}/antigravity-cli-release-marker
+  local extract_dir=${WORK_DIR}/antigravity-cli archive_sha='' binary_sha='' version=''
+  local expected_binary_sha=''
+  if [[ -x ${dest} && -f ${marker} ]] \
+     && grep -Fxq 'managed-by=lan-ipxe/setup-arch-workstation.sh' "${marker}" \
+     && grep -Fxq "version=${ANTIGRAVITY_CLI_VERSION}" "${marker}" \
+     && grep -Fxq "archive-sha512=${ANTIGRAVITY_CLI_ARCHIVE_SHA512}" "${marker}"; then
+    binary_sha=$(sha256sum -- "${dest}") || die "could not hash ${dest}"
+    binary_sha=${binary_sha%% *}
+    expected_binary_sha=$(sed -n 's/^binary-sha256=//p' "${marker}" | tail -1)
+    if [[ ${binary_sha} == "${expected_binary_sha}" ]]; then
+      version=$("${dest}" --version 2>/dev/null) \
+        || die "the installed Antigravity CLI is not runnable"
+      [[ ${version} == "${ANTIGRAVITY_CLI_VERSION}" ]] \
+        || die "the verified Antigravity CLI reported unexpected version ${version}"
+      note "Antigravity CLI ${version}: present and verified"
+      return 0
+    fi
+  fi
+  # agy replaces itself in place when it self-updates, so a managed binary
+  # that no longer matches its marker but is at least the manifest version
+  # is the app's own update, not drift.
+  if [[ -x ${dest} && -f ${marker} ]] \
+     && grep -Fxq 'managed-by=lan-ipxe/setup-arch-workstation.sh' "${marker}" \
+     && version=$("${dest}" --version 2>/dev/null) \
+     && [[ ${version} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+     && printf '%s\n%s\n' "${ANTIGRAVITY_CLI_VERSION}" "${version}" \
+        | LC_ALL=C sort -V -C; then
+    note "Antigravity CLI ${version}: updated in place by agy (manifest ${ANTIGRAVITY_CLI_VERSION}); preserving it"
+    return 0
+  fi
+  curl --proto '=https' --tlsv1.2 -fL --retry 3 \
+    -o "${archive}" "${ANTIGRAVITY_CLI_URL}" \
+    || die "could not download Antigravity CLI ${ANTIGRAVITY_CLI_VERSION}"
+  archive_sha=$(sha512sum -- "${archive}") || die "could not hash ${archive}"
+  archive_sha=${archive_sha%% *}
+  [[ ${archive_sha} == "${ANTIGRAVITY_CLI_ARCHIVE_SHA512}" ]] \
+    || die "Antigravity CLI archive checksum mismatch for ${ARCH}"
+  mkdir -p "${extract_dir}"
+  tar -xzf "${archive}" -C "${extract_dir}" antigravity \
+    || die "Antigravity CLI archive has an unexpected layout"
+  binary_sha=$(sha256sum -- "${extract_dir}/antigravity") \
+    || die "could not hash the extracted Antigravity CLI"
+  binary_sha=${binary_sha%% *}
+  version=$("${extract_dir}/antigravity" --version 2>/dev/null) \
+    || die "the verified Antigravity CLI is not runnable"
+  [[ ${version} == "${ANTIGRAVITY_CLI_VERSION}" ]] \
+    || die "Antigravity CLI reported unexpected version ${version}"
+  printf '%s\n' \
+    'managed-by=lan-ipxe/setup-arch-workstation.sh' \
+    "version=${ANTIGRAVITY_CLI_VERSION}" \
+    "source-url=${ANTIGRAVITY_CLI_URL}" \
+    "archive-sha512=${ANTIGRAVITY_CLI_ARCHIVE_SHA512}" \
+    "binary-sha256=${binary_sha}" \
+    >"${marker_source}"
+  put_file "${extract_dir}/antigravity" "${dest}" 0755
+  put_file "${marker_source}" "${marker}" 0644
+  "${dest}" --version >/dev/null 2>&1 \
     || die "the installed Antigravity CLI is not runnable"
-  ! pacman -Q antigravity-ide &>/dev/null \
-    || die "legacy Antigravity IDE is still installed"
-  note "Antigravity ${version} + CLI: verified; legacy IDE absent"
+  note "Antigravity CLI ${version}: installed as ~/.local/bin/agy"
+}
+
+install_codex_cli() {
+  local installer=${WORK_DIR}/codex-install.sh
+  curl --proto '=https' --tlsv1.2 -fsSL "${CODEX_INSTALLER_URL}" -o "${installer}" \
+    || die "could not download the official Codex CLI installer"
+  sh -n "${installer}" || die "the downloaded Codex CLI installer is not valid POSIX shell"
+  PATH="${HOME}/.local/bin:${PATH}" \
+    CODEX_INSTALL_DIR="${HOME}/.local/bin" \
+    CODEX_NON_INTERACTIVE=true \
+    CODEX_INSTALLER_USE_RELEASES_OPENAI_COM=true \
+    sh "${installer}" \
+    || die "the official Codex CLI installer failed"
+  [[ -x ${HOME}/.local/bin/codex ]] \
+    || die "the Codex CLI installer did not create ~/.local/bin/codex"
+  "${HOME}/.local/bin/codex" --version >/dev/null \
+    || die "the installed Codex CLI is not runnable"
+  note "Codex CLI: current official standalone release installed"
+}
+
+install_claude_cli() {
+  local installer=${WORK_DIR}/claude-install.sh
+  curl --proto '=https' --tlsv1.2 -fsSL "${CLAUDE_INSTALLER_URL}" -o "${installer}" \
+    || die "could not download the official Claude Code installer"
+  bash -n "${installer}" || die "the downloaded Claude Code installer is not valid Bash"
+  PATH="${HOME}/.local/bin:${PATH}" bash "${installer}" \
+    || die "the official Claude Code installer failed"
+  [[ -x ${HOME}/.local/bin/claude ]] \
+    || die "the Claude Code installer did not create ~/.local/bin/claude"
+  "${HOME}/.local/bin/claude" --version >/dev/null \
+    || die "the installed Claude Code CLI is not runnable"
+  note "Claude Code: current official native release installed (self-updating)"
+}
+
+# Removes the pacman/AUR builds the native installs replace. The AUR
+# antigravity package owns /opt/Antigravity, so it must go before the AppImage
+# install claims that path; the CLI packages go after their native successors
+# are in place so the commands are never missing.
+remove_retired_ai_pkgs_arch() {
+  local package installed=()
+  for package in "$@"; do
+    if pacman -Q "${package}" &>/dev/null; then
+      installed+=("${package}")
+    fi
+  done
+  if (( ! ${#installed[@]} )); then
+    note "pacman/AUR builds replaced by native installs: absent ($*)"
+    return 0
+  fi
+  sudo pacman -Rns --noconfirm "${installed[@]}" \
+    || die "could not remove packages replaced by native installs: ${installed[*]}"
+  for package in "${installed[@]}"; do
+    ! pacman -Q "${package}" &>/dev/null \
+      || die "${package} is still installed"
+  done
+  note "removed in favor of self-updating native installs: ${installed[*]}"
+}
+
+verify_native_ai_tools_arch() {
+  local package
+  for package in "${RETIRED_AI_PKGS[@]}" antigravity-ide; do
+    ! pacman -Q "${package}" &>/dev/null \
+      || die "${package} is still installed"
+  done
+  [[ -x ${ANTIGRAVITY_INSTALL_DIR}/Antigravity.AppImage ]] \
+    || die "the Antigravity AppImage is not installed"
+  command -v antigravity >/dev/null \
+    || die "the antigravity command is unavailable"
+  for package in agy claude codex; do
+    [[ -x ${HOME}/.local/bin/${package} ]] \
+      || die "the native ${package} command is missing from ~/.local/bin"
+  done
+  "${HOME}/.local/bin/agy" --version >/dev/null 2>&1 \
+    || die "the installed Antigravity CLI is not runnable"
+  note "Antigravity AppImage, agy, claude, codex: native and self-updating"
 }
 
 # Rust comes only from rustup. rustup conflicts with Arch's rust package, so
@@ -716,7 +1134,7 @@ check_system_state() {
 
 run_check() {
   local repo_list group_output group package_line version comparison entry
-  local owner src dst mode unit
+  local owner src dst mode unit package
   CHECK_DRIFT=0
   CHECK_CURRENT=0
   printf 'Profile: %s; mode: check (read-only)\n' "${PROFILE}"
@@ -741,6 +1159,22 @@ run_check() {
   fi
   pacman -Q vscodium-bin &>/dev/null \
     && report DRIFT "vscodium-bin: installed (replaced by code)"
+  for package in "${RETIRED_AI_PKGS[@]}"; do
+    pacman -Q "${package}" &>/dev/null \
+      && report DRIFT "${package}: installed (replaced by a self-updating native install)"
+  done
+  if [[ -x ${ANTIGRAVITY_INSTALL_DIR}/Antigravity.AppImage ]]; then
+    report CURRENT "Antigravity AppImage: ${ANTIGRAVITY_INSTALL_DIR}"
+  else
+    report DRIFT "Antigravity AppImage: not installed under ${ANTIGRAVITY_INSTALL_DIR}"
+  fi
+  for package in agy claude codex; do
+    if [[ -x ${HOME}/.local/bin/${package} ]]; then
+      report CURRENT "native ${package}: ~/.local/bin/${package}"
+    else
+      report DRIFT "native ${package}: missing from ~/.local/bin"
+    fi
+  done
   pacman -Q jre-openjdk &>/dev/null \
     && report DRIFT "jre-openjdk: installed (replaced by jdk-openjdk)"
   installed_rust_distro_pkgs
@@ -832,6 +1266,13 @@ print_plan() {
   done
   printf '  cockpit.socket (enable --now)\n'
   printf 'PLAN: dconf update for the GDM database when its font setting changes\n'
+  printf 'PLAN: native self-updating AI tools (%s):\n' \
+    "$( (( NO_UPGRADE )) && echo 'missing only' || echo 'latest verified release')"
+  printf '  %s\n' 'Antigravity AppImage -> /opt/Antigravity (user-owned)' \
+    'agy -> ~/.local/bin' 'claude -> ~/.local/bin (official installer)' \
+    'codex -> ~/.local/bin (official installer)'
+  printf 'PLAN: remove pacman/AUR builds replaced by the native installs: %s\n' \
+    "${RETIRED_AI_PKGS[*]}"
   printf 'PLAN: bootstrap yay-bin from the AUR if needed (interactive PKGBUILD review)\n'
   if (( NO_UPGRADE )); then
     printf 'PLAN: --no-upgrade: skip yay -Sua --devel\n'
@@ -842,7 +1283,7 @@ print_plan() {
   for package in "${PKGS_AUR[@]}"; do
     printf '  %s\n' "${package}"
   done
-  printf 'PLAN: verify Antigravity 2.x + CLI and the claude code codex opencode zed cargo rustc commands\n'
+  printf 'PLAN: verify native Antigravity + CLI/Claude/Codex and the claude code codex opencode zed cargo rustc commands\n'
 }
 
 #--- Preflight --------------------------------------------------------------
@@ -1095,7 +1536,46 @@ if (( PUT_FILE_CHANGED )) || [[ ! -f /etc/dconf/db/gdm ]]; then
   note "dconf database updated"
 fi
 
-#--- 7. AUR -----------------------------------------------------------------
+#--- 7. Native self-updating AI tools ---------------------------------------
+# --no-upgrade resolves vendor manifests only when an Antigravity piece is missing.
+if (( ! NO_UPGRADE )) || [[ ! -x ${ANTIGRAVITY_INSTALL_DIR}/Antigravity.AppImage \
+      || ! -x ${HOME}/.local/bin/agy ]]; then
+  log "Resolving latest verified Antigravity releases"
+  resolve_antigravity_desktop_release
+  resolve_antigravity_cli_release
+  note "resolved Antigravity ${ANTIGRAVITY_VERSION} and Antigravity CLI ${ANTIGRAVITY_CLI_VERSION}"
+fi
+
+log "Antigravity 2.0+ desktop (self-updating AppImage) + CLI"
+command -v fusermount >/dev/null || die "fuse2 did not provide fusermount for the AppImage"
+remove_retired_ai_pkgs_arch antigravity
+if (( NO_UPGRADE )) && [[ -x ${ANTIGRAVITY_INSTALL_DIR}/Antigravity.AppImage ]]; then
+  note "Antigravity: installed; kept at its current version (--no-upgrade)"
+else
+  install_antigravity_desktop
+fi
+if (( NO_UPGRADE )) && [[ -x ${HOME}/.local/bin/agy ]]; then
+  note "agy: installed; kept at its current version (--no-upgrade)"
+else
+  install_antigravity_cli
+fi
+
+log "Codex CLI (official standalone release)"
+if (( NO_UPGRADE )) && [[ -x ${HOME}/.local/bin/codex ]]; then
+  note "codex: installed; kept at its current version (--no-upgrade)"
+else
+  install_codex_cli
+fi
+
+log "Claude Code (official native release)"
+if (( NO_UPGRADE )) && [[ -x ${HOME}/.local/bin/claude ]]; then
+  note "claude: installed; kept at its current version (--no-upgrade)"
+else
+  install_claude_cli
+fi
+remove_retired_ai_pkgs_arch antigravity-cli claude-code openai-codex
+
+#--- 8. AUR -----------------------------------------------------------------
 # AUR PKGBUILDs are third-party code. Keep this phase last so an AUR build
 # cannot alter user-writable repository payloads before they are installed as
 # root, drop the setup script's cached sudo credential, and leave yay's review
@@ -1144,9 +1624,9 @@ else
   note "all ${#PKGS_AUR[@]} packages present"
 fi
 
-verify_antigravity_arch
+verify_native_ai_tools_arch
 for command_name in claude code codex opencode zed; do
-  command -v "${command_name}" >/dev/null \
+  PATH="${HOME}/.local/bin:${PATH}" command -v "${command_name}" >/dev/null \
     || die "expected workstation command is unavailable: ${command_name}"
 done
 for command_name in cargo rustc; do

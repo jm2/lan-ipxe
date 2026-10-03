@@ -23,13 +23,18 @@ as presence-only or -NoUpgrade is given.
   3. The winget package set for the selected profile. One `winget export`
      snapshot of what is installed decides what is missing. Installed desired
      packages are checked for updates every run, except for the explicitly
-     presence-only Speedtest CLI. The legacy Antigravity IDE, VSCodium and
+     presence-only Speedtest CLI and the Antigravity app, which updates
+     itself. The legacy Antigravity IDE, VSCodium and
      standalone Rust MSI packages are removed in favor of Antigravity 2.0,
      Microsoft VS Code and rustup. "Already installed" and "reboot required"
      results count as success; any other failure is reported at the end
      (exit code 1) without stopping the run, so one broken installer never
      blocks the rest.
-  4. Rust through rustup only: a stable default toolchain (only when none is
+  4. Claude Code, Codex CLI and the Antigravity CLI from each vendor's
+     official per-user installer, so they update themselves in place. The
+     WinGet packages they replace (Anthropic.ClaudeCode, OpenAI.Codex,
+     Google.AntigravityCLI) are uninstalled once the native command runs.
+  5. Rust through rustup only: a stable default toolchain (only when none is
      configured) with rustfmt, clippy and rust-analyzer.
 
 Exit codes: 0 converged (or -DryRun), 1 error/failed install, 2 drift found by
@@ -94,7 +99,6 @@ $OpenSshDefaultShell = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.ex
 # core: every developer toolchain, editor, agent, browser and everyday utility.
 $WingetPackages = @(
     '7zip.7zip'
-    'Anthropic.ClaudeCode'
     'GIMP.GIMP.3'
     'Git.Git'
     'GitHub.GitHubDesktop'
@@ -102,7 +106,6 @@ $WingetPackages = @(
     'GoLang.Go'
     'Google.AndroidStudio'
     'Google.Antigravity'
-    'Google.AntigravityCLI'
     'Google.Chrome'
     'Google.PlatformTools'
     'Inkscape.Inkscape'
@@ -125,7 +128,6 @@ $WingetPackages = @(
     'Ninja-build.Ninja'
     'Ookla.Speedtest.CLI'
     'Ookla.Speedtest.Desktop'
-    'OpenAI.Codex'
     'PuTTY.PuTTY'
     'Rufus.Rufus'
     # Rust comes only from rustup; the toolchain is initialized per user below.
@@ -158,6 +160,9 @@ $WingetFullPackages = @(
     'Valve.Steam'
 )
 $WingetPresenceOnlyPackages = @(
+    # The Antigravity app is a per-user installer that updates itself; WinGet
+    # only installs it when missing.
+    'Google.Antigravity'
     # Preserve the deliberately fixed Speedtest CLI once it is installed.
     'Ookla.Speedtest.CLI'
 )
@@ -169,6 +174,38 @@ $WingetLegacyPackages = @(
     'Rustlang.Rust.MSVC'
 )
 $RustComponents = @('rustfmt', 'clippy', 'rust-analyzer')
+
+# AI CLIs that update themselves come from each vendor's official per-user
+# installer: their WinGet portable/zip packages pin them to a WinGet-managed
+# copy that never self-updates. Each replaces the WinGet package named by
+# WingetId, which is uninstalled only after the native command is verified.
+$NativeCliTools = @(
+    @{
+        Name = 'Claude Code'
+        Installer = 'https://claude.ai/install.ps1'
+        Root = 'USERPROFILE'
+        RelativePath = '.local\bin\claude.exe'
+        WingetId = 'Anthropic.ClaudeCode'
+        Environment = @{}
+    }
+    @{
+        Name = 'Codex CLI'
+        Installer = 'https://chatgpt.com/codex/install.ps1'
+        Root = 'LOCALAPPDATA'
+        RelativePath = 'Programs\OpenAI\Codex\bin\codex.exe'
+        WingetId = 'OpenAI.Codex'
+        Environment = @{ CODEX_NON_INTERACTIVE = 'true' }
+    }
+    @{
+        # Its installer is a no-op once agy.exe exists; agy then updates itself.
+        Name = 'Antigravity CLI'
+        Installer = 'https://antigravity.google/cli/install.ps1'
+        Root = 'LOCALAPPDATA'
+        RelativePath = 'agy\bin\agy.exe'
+        WingetId = 'Google.AntigravityCLI'
+        Environment = @{}
+    }
+)
 
 # Balun (core, beside jm2.Tributary). Its WinGet manifest jm2.Balun is pending
 # review, so apply prefers WinGet as soon as the ID resolves and otherwise
@@ -416,6 +453,109 @@ function Invoke-WingetPackageSet {
         UpdatedOrCurrent = @($updatedOrCurrent)
         RemovedLegacy = @($removedLegacy)
         Deferred = @($deferred)
+        Failed = @($failed)
+    }
+}
+
+function Get-NativeCliPath {
+    param([Parameter(Mandatory = $true)][hashtable]$Tool)
+    $base = [Environment]::GetEnvironmentVariable($Tool.Root)
+    if ([string]::IsNullOrWhiteSpace($base)) { return $null }
+    return Join-Path $base $Tool.RelativePath
+}
+
+# Runs one vendor installer in a child PowerShell, so its own exit and
+# strict-mode settings cannot end this script.
+function Invoke-NativeCliInstaller {
+    param([Parameter(Mandatory = $true)][hashtable]$Tool)
+    $dir = Join-Path ([IO.Path]::GetTempPath()) ("native-cli-{0}" -f [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $dir | Out-Null
+    $saved = @{}
+    try {
+        $installer = Join-Path $dir 'install.ps1'
+        Invoke-WebRequest -Uri $Tool.Installer -OutFile $installer -UseBasicParsing
+        $tokens = $null
+        $parseErrors = $null
+        [System.Management.Automation.Language.Parser]::ParseFile($installer, [ref]$tokens, [ref]$parseErrors) | Out-Null
+        if ($parseErrors.Count) {
+            throw "the downloaded $($Tool.Name) installer is not valid PowerShell"
+        }
+        foreach ($name in $Tool.Environment.Keys) {
+            $saved[$name] = [Environment]::GetEnvironmentVariable($name)
+            [Environment]::SetEnvironmentVariable($name, $Tool.Environment[$name])
+        }
+        $hostPath = (Get-Process -Id $PID).Path
+        & $hostPath -NoProfile -ExecutionPolicy Bypass -File $installer | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            throw "the official $($Tool.Name) installer exited with $LASTEXITCODE"
+        }
+    }
+    finally {
+        foreach ($name in $saved.Keys) {
+            [Environment]::SetEnvironmentVariable($name, $saved[$name])
+        }
+        Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Test-NativeCliCommand {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    & $Path --version | Out-Null
+    return $LASTEXITCODE -eq 0
+}
+
+# Installs or refreshes each native CLI, then uninstalls the WinGet package it
+# replaces. A failed install leaves that WinGet copy in place.
+function Invoke-NativeCliSet {
+    param(
+        [string[]]$InstalledIds = @(),
+        [switch]$NoUpgrade
+    )
+    $current = @()
+    $installedNow = @()
+    $retired = @()
+    $failed = @()
+    foreach ($tool in $NativeCliTools) {
+        $path = Get-NativeCliPath -Tool $tool
+        try {
+            if (-not $path) { throw "%$($tool.Root)% is not set" }
+            $existing = Test-Path -LiteralPath $path
+            if ($existing -and $NoUpgrade) {
+                Write-Note "$($tool.Name): present (-NoUpgrade)"
+            }
+            else {
+                Write-Note "$($tool.Name): official installer $($tool.Installer)"
+                Invoke-NativeCliInstaller -Tool $tool
+                if (-not (Test-Path -LiteralPath $path)) {
+                    throw "the official installer did not create $path"
+                }
+            }
+            if (-not (Test-NativeCliCommand -Path $path)) { throw "$path --version failed" }
+            if ($existing) { $current += $tool.Name } else { $installedNow += $tool.Name }
+        }
+        catch {
+            Write-Warning "$($tool.Name): $($_.Exception.Message)"
+            $failed += "install $($tool.Name)"
+            continue
+        }
+        if ($InstalledIds -notcontains $tool.WingetId) { continue }
+        Write-Note "removing $($tool.WingetId) (replaced by the self-updating native install)"
+        & winget uninstall --id $tool.WingetId --exact --source winget --silent --accept-source-agreements --disable-interactivity | Out-Host
+        $code = $LASTEXITCODE
+        if ($WingetRebootCodes -contains $code) { $script:RebootNeeded = $true }
+        if ($WingetRemoveOkCodes.ContainsKey($code)) {
+            $retired += $tool.WingetId
+            Write-Note "$($tool.WingetId): $($WingetRemoveOkCodes[$code])"
+        }
+        else {
+            $failed += "uninstall $($tool.WingetId)"
+            Write-Warning ("{0}: winget uninstall exited with 0x{1:X8} ({1})" -f $tool.WingetId, $code)
+        }
+    }
+    return [pscustomobject]@{
+        Current = @($current)
+        Installed = @($installedNow)
+        RetiredWinget = @($retired)
         Failed = @($failed)
     }
 }
@@ -687,6 +827,10 @@ if ($DryRun) {
     Write-Note "    run silently ($($BalunInstallerArgs -join ' ')); skipped when present and -NoUpgrade"
     Write-Note 'Legacy packages removed if installed:'
     foreach ($id in $WingetLegacyPackages) { Write-Note "    $id" }
+    Write-Note 'Self-updating native CLIs (official per-user installers; the WinGet package each replaces is removed afterwards):'
+    foreach ($tool in $NativeCliTools) {
+        Write-Note "    $($tool.Name): $($tool.Installer) -> %$($tool.Root)%\$($tool.RelativePath) (replaces $($tool.WingetId))"
+    }
     Write-Note "Rust: rustup stable default (when none set) + $($RustComponents -join ', ')"
     exit 0
 }
@@ -736,6 +880,14 @@ if ($Check) {
     Write-State ($python.Count -gt 0) 'Python 3' $(if ($python.Count) { ($python -join ', ') + ' (latest channel checked on apply)' } else { 'no Python.Python.3.N installed' })
     foreach ($id in $WingetLegacyPackages) {
         if ($installedIds -contains $id) { Write-State $false $id 'legacy package still installed' }
+    }
+    foreach ($tool in $NativeCliTools) {
+        $path = Get-NativeCliPath -Tool $tool
+        $present = $path -and (Test-Path -LiteralPath $path)
+        Write-State $present "$($tool.Name) (native)" $(if ($present) { $path } else { 'not installed' })
+        if ($installedIds -contains $tool.WingetId) {
+            Write-State $false $tool.WingetId 'replaced by the native install; removed on apply'
+        }
     }
     $balun = Get-BalunInstall
     $balunOwner = if ($installedIds -contains $BalunWingetId) { "WinGet $BalunWingetId" } else { 'GitHub release' }
@@ -823,7 +975,11 @@ Write-Step 'Balun (WinGet when published, otherwise verified GitHub release)'
 $balunResult = Invoke-BalunStep -InstalledIds $installedIds -NoUpgrade:$NoUpgrade
 Write-Note "Balun: $balunResult"
 
-#--- 4. Rust toolchain (rustup only) ----------------------------------------
+#--- 4. Self-updating native CLIs ------------------------------------------
+Write-Step 'Claude Code, Codex CLI and Antigravity CLI (official native installers)'
+$nativeResult = Invoke-NativeCliSet -InstalledIds $installedIds -NoUpgrade:$NoUpgrade
+
+#--- 5. Rust toolchain (rustup only) ----------------------------------------
 Write-Step 'Rust (rustup stable + components)'
 $rustResult = Initialize-RustupToolchain -NoUpgrade:$NoUpgrade
 Write-Note "rustup: $rustResult"
@@ -836,5 +992,7 @@ if ($wingetResult.Failed.Count)   { Write-Note "failed: $($wingetResult.Failed -
 if ($script:RebootNeeded) {
     Write-Warning 'A reboot is required to finish; re-run this script afterwards to pick up anything deferred.'
 }
+Write-Note "native CLIs: $($nativeResult.Installed.Count) installed now, $($nativeResult.Current.Count) current, $($nativeResult.RetiredWinget.Count) WinGet copies removed, $($nativeResult.Failed.Count) failed"
+if ($nativeResult.Failed.Count) { Write-Note "failed: $($nativeResult.Failed -join ', ')" }
 if ($balunResult -eq 'deferred') { Write-Note 'deferred (re-run after a reboot): Balun' }
-if ($wingetResult.Failed.Count -or $rustResult -eq 'failed' -or $balunResult -eq 'failed') { exit 1 }
+if ($wingetResult.Failed.Count -or $nativeResult.Failed.Count -or $rustResult -eq 'failed' -or $balunResult -eq 'failed') { exit 1 }

@@ -48,23 +48,39 @@ select_fedora_artifacts() {
 
 test_arch_catalog() (
   load_helpers setup-arch-workstation.sh
-  array_contains antigravity "${PKGS_AUR[@]}" \
-    || fail 'Arch AUR set omits Antigravity 2.x'
-  array_contains antigravity-cli "${PKGS_AUR[@]}" \
-    || fail 'Arch AUR set omits Antigravity CLI'
-  ! array_contains antigravity-ide "${PKGS_AUR[@]}" \
-    || fail 'Arch AUR set still requests the legacy Antigravity IDE'
+  local package
+  # Antigravity, its CLI, Claude Code and Codex now come from self-updating
+  # native installs, not root-owned pacman/AUR builds.
+  for package in "${RETIRED_AI_PKGS[@]}" antigravity-ide; do
+    ! array_contains "${package}" "${PKGS_OFFICIAL[@]}" "${PKGS_AUR[@]}" \
+      || fail "Arch still requests ${package} as a package"
+  done
+  for package in antigravity antigravity-cli claude-code openai-codex; do
+    array_contains "${package}" "${RETIRED_AI_PKGS[@]}" \
+      || fail "Arch does not retire the ${package} package"
+  done
+  for package in fuse2 jq tmux; do
+    array_contains "${package}" "${PKGS_OFFICIAL[@]}" \
+      || fail "Arch official package set omits ${package}"
+  done
+  [[ ${ANTIGRAVITY_DESKTOP_MANIFEST_URL} == https://*/latest-x64-linux.yml \
+     && ${ANTIGRAVITY_CLI_MANIFEST_URL} == https://*/linux_amd64.json ]] \
+    || fail 'Arch Antigravity manifests are not the x86_64 Linux vendor feeds'
+  [[ ${CLAUDE_INSTALLER_URL} == https://claude.ai/install.sh \
+     && ${CODEX_INSTALLER_URL} == https://chatgpt.com/codex/install.sh ]] \
+    || fail 'Arch Claude/Codex do not use the official native installers'
+  grep -Fq 'managed-by=lan-ipxe/setup-arch-workstation.sh' \
+    <(declare -f install_antigravity_desktop install_antigravity_cli | tr -d "'") \
+    || fail 'Arch native installs do not write Arch-owned release markers'
 )
 
 test_arch_developer_catalog() (
   load_helpers setup-arch-workstation.sh
   local package
-  for package in code opencode openai-codex zed; do
+  for package in code opencode zed; do
     array_contains "${package}" "${PKGS_OFFICIAL[@]}" \
       || fail "Arch official package set omits ${package}"
   done
-  array_contains claude-code "${PKGS_AUR[@]}" \
-    || fail 'Arch AUR set omits Claude Code'
   ! array_contains vscodium-bin "${PKGS_OFFICIAL[@]}" \
     || fail 'Arch official package set still requests VSCodium'
   ! array_contains vscodium-bin "${PKGS_AUR[@]}" \
@@ -72,6 +88,41 @@ test_arch_developer_catalog() (
   grep -Fq 'for command_name in claude code codex opencode zed' \
     "${REPO_ROOT}/setup-arch-workstation.sh" \
     || fail 'Arch does not enforce all requested developer-command postconditions'
+)
+
+test_arch_native_flow_order() (
+  local script=${REPO_ROOT}/setup-arch-workstation.sh
+  # The AUR antigravity package owns /opt/Antigravity, so it goes first; the
+  # CLI packages go only once their native successors are installed; all of
+  # it runs before the AUR phase drops cached sudo credentials.
+  awk '
+    $0 == "remove_retired_ai_pkgs_arch antigravity" { pkg = NR }
+    $0 ~ /^ *install_antigravity_desktop$/ { desktop = NR }
+    $0 ~ /^ *install_claude_cli$/ { claude = NR }
+    $0 ~ /^ *install_codex_cli$/ { codex = NR }
+    $0 == "remove_retired_ai_pkgs_arch antigravity-cli claude-code openai-codex" { cli = NR }
+    $0 == "sudo -k" { aur = NR }
+    END { exit !(pkg && pkg < desktop && desktop < cli && claude < cli && codex < cli && cli < aur) }
+  ' "${script}" || fail 'Arch native-tool migration steps run in an unsafe order'
+)
+
+test_arch_retired_package_removal() (
+  load_helpers setup-arch-workstation.sh
+  local -A pkg_state=([claude-code]=1 [openai-codex]=1)
+  local removals=0
+  pacman() {
+    [[ $1 == -Q ]] || return 97
+    [[ -n ${pkg_state[$2]:-} ]]
+  }
+  sudo() {
+    [[ $* == 'pacman -Rns --noconfirm claude-code openai-codex' ]] \
+      || fail "unexpected retired-package removal: $*"
+    (( removals += 1 ))
+    pkg_state=()
+  }
+  remove_retired_ai_pkgs_arch antigravity-cli claude-code openai-codex
+  remove_retired_ai_pkgs_arch antigravity-cli claude-code openai-codex
+  (( removals == 1 )) || fail 'retired Arch packages were not removed exactly once'
 )
 
 test_arch_yay_devel_updates() (
@@ -202,59 +253,49 @@ test_arch_legacy_version_purge() (
   (( old_installed == 0 )) || fail 'legacy Antigravity 1.x remained installed'
 )
 
+setup_arch_native_fixture() {
+  HOME=${TEST_ROOT}/arch-native-$1/home
+  ANTIGRAVITY_INSTALL_DIR=${TEST_ROOT}/arch-native-$1/Antigravity
+  install -d "${HOME}/.local/bin" "${ANTIGRAVITY_INSTALL_DIR}"
+  local tool
+  printf '#!/bin/sh\nexit 0\n' >"${ANTIGRAVITY_INSTALL_DIR}/Antigravity.AppImage"
+  chmod 0755 "${ANTIGRAVITY_INSTALL_DIR}/Antigravity.AppImage"
+  for tool in agy claude codex; do
+    printf '#!/bin/sh\nexit 0\n' >"${HOME}/.local/bin/${tool}"
+    chmod 0755 "${HOME}/.local/bin/${tool}"
+  done
+}
+
 test_arch_verify_good() (
   load_helpers setup-arch-workstation.sh
-  pacman() {
-    case "$*" in
-      '-Q antigravity')     printf 'antigravity 2.11.0-1\n' ;;
-      '-Q antigravity-cli') return 0 ;;
-      '-Q antigravity-ide') return 1 ;;
-      *)                    return 97 ;;
-    esac
-  }
-  vercmp() { printf '1\n'; }
-  command() {
-    [[ $1 == -v && ( $2 == antigravity || $2 == agy ) ]]
-  }
-  agy() { [[ $1 == --version ]]; }
-  verify_antigravity_arch
+  setup_arch_native_fixture good
+  pacman() { [[ $1 == -Q ]] || return 97; return 1; }
+  command() { [[ $1 == -v && $2 == antigravity ]]; }
+  verify_native_ai_tools_arch
 )
 
 test_arch_verify_rejection() {
   local scenario=$1 rc=0
   (
     load_helpers setup-arch-workstation.sh
+    setup_arch_native_fixture "${scenario}"
     pacman() {
-      case "$*" in
-        '-Q antigravity')
-          if [[ ${scenario} == old-version ]]; then
-            printf 'antigravity 1.21.9-1\n'
-          else
-            printf 'antigravity 2.11.0-1\n'
-          fi
-          ;;
-        '-Q antigravity-cli')
-          [[ ${scenario} != missing-cli ]]
-          ;;
-        '-Q antigravity-ide')
-          [[ ${scenario} == legacy-ide ]]
-          ;;
-        *) return 97 ;;
+      [[ $1 == -Q ]] || return 97
+      case ${scenario}:$2 in
+        aur-package:antigravity|legacy-ide:antigravity-ide|rpm-claude:claude-code) return 0 ;;
       esac
-    }
-    vercmp() {
-      if [[ $1 == 1.* ]]; then printf '%s\n' -1; else printf '1\n'; fi
+      return 1
     }
     command() {
-      [[ $1 == -v ]] || return 1
-      case $2 in
-        antigravity) [[ ${scenario} != missing-desktop-command ]] ;;
-        agy)         [[ ${scenario} != missing-cli-command ]] ;;
-        *)           return 1 ;;
-      esac
+      [[ $1 == -v && $2 == antigravity && ${scenario} != missing-desktop-command ]]
     }
-    agy() { [[ $1 == --version && ${scenario} != broken-cli ]]; }
-    verify_antigravity_arch
+    case ${scenario} in
+      missing-appimage) rm -f -- "${ANTIGRAVITY_INSTALL_DIR}/Antigravity.AppImage" ;;
+      missing-cli) rm -f -- "${HOME}/.local/bin/agy" ;;
+      missing-claude) rm -f -- "${HOME}/.local/bin/claude" ;;
+      broken-cli) printf '#!/bin/sh\nexit 1\n' >"${HOME}/.local/bin/agy" ;;
+    esac
+    verify_native_ai_tools_arch
   ) >/dev/null 2>&1 || rc=$?
   [[ ${rc} == 1 ]] || fail "Arch verification accepted ${scenario}"
 }
@@ -312,37 +353,37 @@ test_fedora_release_sources() (
 test_fedora_developer_catalog() (
   load_helpers setup-fedora-workstation.sh
   array_contains code "${PKGS[@]}" || fail 'Fedora package set omits VS Code'
-  array_contains claude-code "${PKGS[@]}" || fail 'Fedora package set omits Claude Code'
+  ! array_contains claude-code "${PKGS[@]}" \
+    || fail 'Fedora still installs Claude Code from the RPM repository'
   ! array_contains codium "${PKGS[@]}" || fail 'Fedora package set still requests VSCodium'
   [[ ! -e ${REPO_ROOT}/files/etc/yum.repos.d/vscodium.repo ]] \
     || fail 'Fedora still ships the VSCodium repository payload'
-  [[ ${MICROSOFT_KEY_FINGERPRINT} =~ ^[[:xdigit:]]{40}$ \
-     && ${CLAUDE_KEY_FINGERPRINT} =~ ^[[:xdigit:]]{40}$ ]] \
+  [[ ${MICROSOFT_KEY_FINGERPRINT} =~ ^[[:xdigit:]]{40}$ ]] \
     || fail 'Fedora developer repository signing-key fingerprints are not pinned'
+  [[ ! -e ${REPO_ROOT}/files/etc/yum.repos.d/claude-code.repo ]] \
+    || fail 'Fedora still ships the retired Claude Code repository payload'
+  [[ ${CLAUDE_INSTALLER_URL} == https://claude.ai/install.sh ]] \
+    || fail 'Fedora Claude Code does not use the official native installer URL'
+  declare -f install_claude_cli | grep -Fq 'claude" --version' \
+    || fail 'Fedora Claude Code installer lacks a runnable-command postcondition'
 
-  local repo expected_key
-  for repo in vscode.repo claude-code.repo; do
-    [[ -f ${REPO_ROOT}/files/etc/yum.repos.d/${repo} ]] \
-      || fail "Fedora signed repository payload is missing: ${repo}"
-    grep -qx 'enabled=1' "${REPO_ROOT}/files/etc/yum.repos.d/${repo}" \
-      || fail "${repo} is not enabled"
-    grep -qx 'gpgcheck=1' "${REPO_ROOT}/files/etc/yum.repos.d/${repo}" \
-      || fail "${repo} does not require RPM signature validation"
-    grep -Eq '^baseurl=https://[^[:space:]]+$' \
-      "${REPO_ROOT}/files/etc/yum.repos.d/${repo}" \
-      || fail "${repo} does not use an HTTPS package source"
-    case ${repo} in
-      vscode.repo)     expected_key=${MICROSOFT_KEY_FILE} ;;
-      claude-code.repo) expected_key=${CLAUDE_KEY_FILE} ;;
-    esac
-    [[ ${expected_key} == /etc/pki/rpm-gpg/* ]] \
-      || fail "${repo} signing key is not installed under /etc/pki/rpm-gpg"
-    grep -Fqx "gpgkey=file://${expected_key}" \
-      "${REPO_ROOT}/files/etc/yum.repos.d/${repo}" \
-      || fail "${repo} does not use its fingerprint-verified local signing key"
-    grep -qx 'sslverify=1' "${REPO_ROOT}/files/etc/yum.repos.d/${repo}" \
-      || fail "${repo} does not require TLS certificate validation"
-  done
+  local repo=vscode.repo expected_key=${MICROSOFT_KEY_FILE}
+  [[ -f ${REPO_ROOT}/files/etc/yum.repos.d/${repo} ]] \
+    || fail "Fedora signed repository payload is missing: ${repo}"
+  grep -qx 'enabled=1' "${REPO_ROOT}/files/etc/yum.repos.d/${repo}" \
+    || fail "${repo} is not enabled"
+  grep -qx 'gpgcheck=1' "${REPO_ROOT}/files/etc/yum.repos.d/${repo}" \
+    || fail "${repo} does not require RPM signature validation"
+  grep -Eq '^baseurl=https://[^[:space:]]+$' \
+    "${REPO_ROOT}/files/etc/yum.repos.d/${repo}" \
+    || fail "${repo} does not use an HTTPS package source"
+  [[ ${expected_key} == /etc/pki/rpm-gpg/* ]] \
+    || fail "${repo} signing key is not installed under /etc/pki/rpm-gpg"
+  grep -Fqx "gpgkey=file://${expected_key}" \
+    "${REPO_ROOT}/files/etc/yum.repos.d/${repo}" \
+    || fail "${repo} does not use its fingerprint-verified local signing key"
+  grep -qx 'sslverify=1' "${REPO_ROOT}/files/etc/yum.repos.d/${repo}" \
+    || fail "${repo} does not require TLS certificate validation"
   grep -Fqx "gpgkey=file://${MICROSOFT_KEY_FILE}" \
     "${REPO_ROOT}/files/etc/yum.repos.d/microsoft-prod.repo" \
     || fail 'Microsoft production repo bypasses the fingerprint-verified local key'
@@ -1254,6 +1295,132 @@ test_fedora_zed_checksum_rejection() {
     || fail 'corrupt Zed archive mutated the command link'
 }
 
+test_fedora_self_updated_cli_preserved() (
+  load_helpers setup-fedora-workstation.sh
+  WORK_DIR=${TEST_ROOT}/cli-self-updated/work
+  local bin_dir=${TEST_ROOT}/cli-self-updated/bin
+  ANTIGRAVITY_CLI_VERSION=3.4.5
+  ANTIGRAVITY_CLI_URL=https://storage.googleapis.com/antigravity-public/antigravity-cli/3.4.5-456/linux-x64/cli_linux_x64.tar.gz
+  ANTIGRAVITY_CLI_ARCHIVE_SHA512=$(printf 'b%.0s' {1..128})
+  install -d "${WORK_DIR}" "${bin_dir}"
+  # The marker records an older install; agy has since replaced itself.
+  printf '%s\n' \
+    'managed-by=lan-ipxe/setup-fedora-workstation.sh' \
+    'version=3.4.0' \
+    "binary-sha256=$(printf '0%.0s' {1..64})" \
+    >"${bin_dir}/agy.lan-ipxe-release"
+  printf '#!/usr/bin/env sh\nprintf "3.5.0\\n"\n' >"${bin_dir}/agy"
+  chmod 0755 "${bin_dir}/agy"
+  curl() { fail 'a self-updated Antigravity CLI was re-downloaded'; }
+  put_file() { fail 'a self-updated Antigravity CLI was overwritten'; }
+  install_antigravity_cli "${bin_dir}"
+  [[ $("${bin_dir}/agy") == 3.5.0 ]] || fail 'self-updated Antigravity CLI was modified'
+)
+
+test_fedora_stale_cli_replaced() (
+  load_helpers setup-fedora-workstation.sh
+  WORK_DIR=${TEST_ROOT}/cli-stale/work
+  local bin_dir=${TEST_ROOT}/cli-stale/bin
+  ANTIGRAVITY_CLI_VERSION=3.4.5
+  install -d "${WORK_DIR}" "${bin_dir}"
+  printf '%s\n' 'managed-by=lan-ipxe/setup-fedora-workstation.sh' 'version=3.4.0' \
+    >"${bin_dir}/agy.lan-ipxe-release"
+  printf '#!/usr/bin/env sh\nprintf "3.4.0\\n"\n' >"${bin_dir}/agy"
+  chmod 0755 "${bin_dir}/agy"
+  curl() { printf 'download\n' >"${WORK_DIR}/downloaded"; return 1; }
+  ( install_antigravity_cli "${bin_dir}" ) >/dev/null 2>&1 \
+    && fail 'stale Antigravity CLI download failure was not fatal'
+  [[ -f ${WORK_DIR}/downloaded ]] || fail 'an older Antigravity CLI was preserved'
+)
+
+write_known_claude_repo() {
+  local path=$1
+  install -d "$(dirname "${path}")"
+  printf '%s\n' \
+    '[claude-code]' \
+    'name=Claude Code' \
+    'baseurl=https://downloads.claude.ai/claude-code/rpm/stable' \
+    'enabled=1' \
+    'gpgcheck=1' \
+    'gpgkey=file:///etc/pki/rpm-gpg/ANTHROPIC-CLAUDE-CODE-RPM-GPG-KEY' \
+    'sslverify=1' \
+    'metadata_expire=1h' \
+    >"${path}"
+}
+
+test_fedora_claude_repo_retirement() (
+  load_helpers setup-fedora-workstation.sh
+  local dir=${TEST_ROOT}/claude-repo path key removed=() key_deleted=0
+  path=${dir}/claude-code.repo key=${dir}/ANTHROPIC-CLAUDE-CODE-RPM-GPG-KEY
+  write_known_claude_repo "${path}"
+  printf 'key\n' >"${key}"
+  [[ $(sha256sum -- "${path}" | awk '{print $1}') == "${LEGACY_CLAUDE_REPO_SHA256}" ]] \
+    || fail 'Claude Code repository fixture drifted from the recognized checksum'
+  dnf_repo_enabled() { fail 'the known Claude Code repository needed a DNF query'; }
+  rpmkeys() {
+    [[ $1 == --list ]] || fail "unexpected unprivileged rpmkeys call: $*"
+    printf '%s Anthropic Claude Code Release Signing public key\n' \
+      "${LEGACY_CLAUDE_KEY_FINGERPRINT,,}"
+  }
+  sudo() {
+    case $* in
+      "rm -f -- ${path}"|"rm -f -- ${key}") removed+=("${*: -1}"); command "$@" ;;
+      "rpmkeys --delete ${LEGACY_CLAUDE_KEY_FINGERPRINT}") (( key_deleted += 1 )) ;;
+      *) fail "unexpected Claude Code retirement command: $*" ;;
+    esac
+  }
+  remove_legacy_claude_repo "${path}" "${key}"
+  [[ ! -e ${path} && ! -e ${key} ]] || fail 'retired Claude Code repo or key was preserved'
+  (( ${#removed[@]} == 2 && key_deleted == 1 )) \
+    || fail 'Claude Code repo/key retirement did not run exactly once'
+)
+
+test_fedora_custom_claude_repo_preservation() (
+  load_helpers setup-fedora-workstation.sh
+  local path=${TEST_ROOT}/claude-custom/claude-code.repo repo_enabled=1 disable_calls=0
+  install -d "$(dirname "${path}")"
+  printf 'administrator customization\n' >"${path}"
+  dnf_repo_enabled() {
+    [[ $1 == claude-code ]] || return 97
+    (( repo_enabled == 1 ))
+  }
+  rpmkeys() { fail 'the Claude Code key was considered while a repo may still need it'; }
+  sudo() {
+    [[ $* == 'dnf config-manager setopt claude-code.enabled=0' ]] \
+      || fail "unexpected customized Claude Code repository action: $*"
+    (( disable_calls += 1 ))
+    repo_enabled=0
+  }
+  # The key is still referenced by a repository file, so it is preserved.
+  grep() {
+    [[ $1 == -rlsF ]] && return 0
+    command grep "$@"
+  }
+  remove_legacy_claude_repo "${path}" /etc/pki/rpm-gpg/ANTHROPIC-CLAUDE-CODE-RPM-GPG-KEY \
+    2>/dev/null
+  command grep -qx 'administrator customization' "${path}" \
+    || fail 'customized Claude Code repository was modified'
+  (( disable_calls == 1 )) || fail 'customized Claude Code repository was not disabled exactly once'
+)
+
+test_fedora_claude_rpm_removed_after_native() (
+  load_helpers setup-fedora-workstation.sh
+  local installed=1 removals=0
+  rpm() { [[ $* == '-q --quiet claude-code' ]] || return 97; (( installed == 1 )); }
+  sudo() {
+    [[ $* == 'dnf -y remove claude-code' ]] || fail "unexpected Claude RPM action: $*"
+    (( removals += 1 )); installed=0
+  }
+  remove_legacy_claude_rpm
+  remove_legacy_claude_rpm
+  (( removals == 1 )) || fail 'Claude Code RPM removal did not converge'
+  # Native install must precede RPM removal in the main flow.
+  awk '/^ *install_claude_cli$/ { native = NR } /^remove_legacy_claude_rpm$/ { rpm = NR }
+       END { exit !(native && rpm && native < rpm) }' \
+    "${REPO_ROOT}/setup-fedora-workstation.sh" \
+    || fail 'the Claude Code RPM is removed before the native install'
+)
+
 write_known_legacy_repo() {
   local path=$1
   install -d "$(dirname "${path}")"
@@ -1418,7 +1585,7 @@ test_legacy_payloads_retired() {
 main() {
   local scenario
   test_arch_catalog
-  printf 'PASS Arch Antigravity 2.x/CLI desired package set\n'
+  printf 'PASS Arch self-updating native AI tool set\n'
   test_arch_developer_catalog
   printf 'PASS Arch native developer-tool package/postcondition set\n'
   test_arch_yay_devel_updates
@@ -1431,11 +1598,14 @@ main() {
   test_arch_legacy_purge_noop
   printf 'PASS Arch legacy Antigravity 1.x/IDE purge convergence\n'
   test_arch_verify_good
-  for scenario in old-version missing-cli missing-desktop-command \
-    missing-cli-command broken-cli legacy-ide; do
+  for scenario in aur-package legacy-ide rpm-claude missing-appimage missing-cli \
+    missing-claude missing-desktop-command broken-cli; do
     test_arch_verify_rejection "${scenario}"
   done
-  printf 'PASS Arch Antigravity 2.x/desktop/CLI runtime/legacy-absence postconditions\n'
+  printf 'PASS Arch native Antigravity/CLI/Claude/Codex postconditions\n'
+  test_arch_native_flow_order
+  test_arch_retired_package_removal
+  printf 'PASS Arch pacman/AUR AI package retirement and ordering\n'
   test_fedora_release_sources
   printf 'PASS Fedora dynamic release sources and intentional Speedtest pin\n'
   test_fedora_developer_catalog
@@ -1467,6 +1637,9 @@ main() {
   printf 'PASS Fedora self-updated desktop preservation/replacement\n'
   test_fedora_desktop_owner_handoff
   printf 'PASS Fedora user-owned desktop install for in-app updates\n'
+  test_fedora_self_updated_cli_preserved
+  test_fedora_stale_cli_replaced
+  printf 'PASS Fedora self-updated Antigravity CLI preservation/replacement\n'
   test_fedora_appimage_icon_and_version
   printf 'PASS Fedora bundled launcher icon and embedded version extraction\n'
   test_fedora_converged_opencode
@@ -1495,6 +1668,10 @@ main() {
   test_fedora_known_repo_removal
   test_fedora_custom_repo_preservation
   printf 'PASS Fedora known/customized legacy repository handling\n'
+  test_fedora_claude_repo_retirement
+  test_fedora_custom_claude_repo_preservation
+  test_fedora_claude_rpm_removed_after_native
+  printf 'PASS Fedora Claude Code RPM repo/key/package retirement\n'
   test_fedora_legacy_rpm_removal
   test_fedora_nonlegacy_rpm_preservation
   test_fedora_legacy_rpm_noop

@@ -219,6 +219,28 @@ class ConfigurationTests(unittest.TestCase):
             self.obj.feed_cli(cli)
         self.assertEqual(path.read_bytes(), b'mine')
 
+    def test_feed_cli_preserves_its_own_in_place_update(self):
+        self.obj.args = w.arguments([])
+        cli, _, fetch, downloads = self.feed_fixture('agy')
+        self.obj.fetch = fetch
+        with patch.object(self.obj, 'verify_binary'):
+            self.obj.feed_cli(cli)
+        path = self.home / cli['path']
+        path.write_bytes(b'self-updated')
+        reported = {'version': '2.0.21'}
+        def command(argv, **kwargs):
+            self.assertEqual([str(a) for a in argv], [str(path), '--version'])
+            return subprocess.CompletedProcess(argv, 0, 'agy ' + reported['version'] + '\n', '')
+        with patch.object(self.obj, 'verify_binary'), patch.object(self.obj, 'command', side_effect=command):
+            self.obj.feed_cli(cli)
+        self.assertEqual(path.read_bytes(), b'self-updated')
+        self.assertEqual(len(downloads), 1, 'a self-updated CLI must not be replaced by the feed build')
+        self.assertIn('updated in place', self.obj.events[-1]['detail'])
+        reported['version'] = '2.0.19'
+        with patch.object(self.obj, 'verify_binary'), patch.object(self.obj, 'command', side_effect=command):
+            self.obj.feed_cli(cli)
+        self.assertEqual(path.read_bytes(), b'binary', 'an older modified copy must be replaced')
+
     def test_feed_release_rejects_off_origin_prefix_confusion_and_missing_digest(self):
         for name in ('opencode', 'agy'):
             cli, feed, fetch, _ = self.feed_fixture(name, '1.2.14')

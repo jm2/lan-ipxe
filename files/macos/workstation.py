@@ -730,6 +730,14 @@ class Workstation:
             raise Deferred(cli['name'] + ' release lacks ' + algorithm.upper())
         return version, url, algorithm, digest.lower()
 
+    def self_updated_version(self, path):
+        try:
+            reported = self.command([path, '--version']).stdout.split()
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            return None
+        match = re.fullmatch(r'v?([0-9]+)\.([0-9]+)\.([0-9]+)', reported[-1]) if reported else None
+        return tuple(int(part) for part in match.groups()) if match else None
+
     def verify_binary(self, binary, cli, version):
         if 'arm64' not in self.command(['/usr/bin/file', '-b', binary]).stdout:
             raise Deferred('Native ARM64 executable not verified for ' + cli['name'])
@@ -767,6 +775,12 @@ class Workstation:
         if owned and path.is_file() and receipt.get('version') == version and receipt.get('digest') == digest \
                 and hashlib.sha256(path.read_bytes()).hexdigest() == receipt.get('executable_sha256'):
             self.emit('CURRENT', cli['name'], version); return
+        if owned and path.is_file():
+            # These CLIs replace themselves in place; a copy at or past the feed is their own update.
+            current = self.self_updated_version(path)
+            if current and current >= tuple(int(part) for part in version.split('.')):
+                self.emit('CURRENT', cli['name'], '.'.join(map(str, current)) + ' (updated in place; feed ' + version + ')')
+                return
         with tempfile.TemporaryDirectory(prefix='macos-feed-cli-') as temporary:
             folder = Path(temporary)
             archive = folder / Path(urllib.parse.urlparse(url).path).name

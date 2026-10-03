@@ -60,7 +60,7 @@ test_profile_selection() (
     array_contains "${package}" "${PKGS_OFFICIAL[@]}" \
       || fail "core official set omits ${package}"
   done
-  for package in google-chrome balun-bin tributary-bin claude-code powershell-bin android-studio; do
+  for package in google-chrome balun-bin tributary-bin powershell-bin android-studio; do
     array_contains "${package}" "${PKGS_AUR[@]}" \
       || fail "core AUR set omits ${package}"
   done
@@ -147,7 +147,17 @@ test_check_exit_codes() (
   printf 'default_toolchain = "stable-x86_64-unknown-linux-gnu"\n' >"${RUSTUP_HOME}/settings.toml"
   printf 'rustc-x86_64\nrustfmt-preview-x86_64\nclippy-preview-x86_64\nrust-analyzer-preview-x86_64\n' \
     >"${RUSTUP_HOME}/toolchains/${RUST_TOOLCHAIN}/lib/rustlib/components"
-  installed=' antigravity '
+  # Native self-updating AI tools live under a fixture home and install root.
+  HOME=${TEST_ROOT}/check-home
+  ANTIGRAVITY_INSTALL_DIR=${TEST_ROOT}/check-Antigravity
+  mkdir -p "${HOME}/.local/bin" "${ANTIGRAVITY_INSTALL_DIR}"
+  local tool
+  for tool in "${ANTIGRAVITY_INSTALL_DIR}/Antigravity.AppImage" \
+      "${HOME}/.local/bin/agy" "${HOME}/.local/bin/claude" "${HOME}/.local/bin/codex"; do
+    printf '#!/bin/sh\n' >"${tool}"
+    chmod 0755 "${tool}"
+  done
+  installed=' '
   pacman() {
     case $1 in
       -Sg) return 0 ;;
@@ -165,11 +175,21 @@ test_check_exit_codes() (
   [[ ${rc} == 2 && ${output} == *'DRIFT    official package zed'* ]] \
     || fail "core check did not report missing zed with exit 2 (${rc})"
   missing=0
-  installed=' antigravity rust mkinitcpio '
+  installed=' rust mkinitcpio '
   rc=0; output=$(run_check) || rc=$?
   [[ ${rc} == 2 && ${output} == *'distro Rust: rust installed'* && ${output} == *mkinitcpio* ]] \
     || fail 'check did not flag distro Rust / mkinitcpio'
-  installed=' antigravity '
+  installed=' claude-code '
+  rc=0; output=$(run_check) || rc=$?
+  [[ ${rc} == 2 && ${output} == *'claude-code: installed (replaced by a self-updating native install)'* ]] \
+    || fail 'check did not flag the retired claude-code package'
+  rm -f -- "${HOME}/.local/bin/claude"
+  installed=' '
+  rc=0; output=$(run_check) || rc=$?
+  [[ ${rc} == 2 && ${output} == *'native claude: missing'* ]] \
+    || fail 'check did not flag a missing native claude'
+  printf '#!/bin/sh\n' >"${HOME}/.local/bin/claude"
+  chmod 0755 "${HOME}/.local/bin/claude"
   PROFILE=full; select_profile full
   rc=0; output=$(run_check) || rc=$?
   [[ ${rc} == 2 && ${output} == *'official package steam: not installed'* ]] \

@@ -26,6 +26,7 @@ $assignmentNames = @(
     'WingetRebootCodes'
     'WingetDeferredCodes'
     'WingetRemoveOkCodes'
+    'NativeCliTools'
 )
 foreach ($assignmentName in $assignmentNames) {
     $assignmentAst = $ast.Find({
@@ -38,7 +39,8 @@ foreach ($assignmentName in $assignmentNames) {
     . ([scriptblock]::Create($assignmentAst.Extent.Text))
 }
 
-foreach ($functionName in @('Resolve-LatestPythonWingetPackageId', 'Invoke-WingetPackageSet')) {
+foreach ($functionName in @('Resolve-LatestPythonWingetPackageId', 'Invoke-WingetPackageSet',
+        'Get-NativeCliPath', 'Invoke-NativeCliSet')) {
     $functionAst = $ast.Find({
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
@@ -68,13 +70,26 @@ function Assert-CollectionItem {
 }
 
 $currentPackages = @(
-    'Anthropic.ClaudeCode'
-    'Google.Antigravity'
-    'Google.AntigravityCLI'
-    'OpenAI.Codex'
     'SST.opencode'
     'ZedIndustries.Zed'
 )
+# Self-updating native installs replace these WinGet packages.
+$nativeReplacedPackages = @{
+    'Anthropic.ClaudeCode' = 'https://claude.ai/install.ps1'
+    'OpenAI.Codex' = 'https://chatgpt.com/codex/install.ps1'
+    'Google.AntigravityCLI' = 'https://antigravity.google/cli/install.ps1'
+}
+foreach ($id in $nativeReplacedPackages.Keys) {
+    if ($WingetPackages -contains $id -or $WingetLegacyPackages -contains $id) {
+        throw "ASSERT: $id must be retired by the native step, not managed by WinGet"
+    }
+    $tool = @($NativeCliTools | Where-Object { $_.WingetId -eq $id })
+    Assert-Equal $tool.Count 1 "$id has exactly one native replacement"
+    Assert-Equal $tool[0].Installer $nativeReplacedPackages[$id] "$id is replaced by its vendor's official installer"
+}
+# The Antigravity app updates itself; WinGet only installs it when missing.
+Assert-CollectionItem $WingetPackages 'Google.Antigravity' 'Antigravity app remains in the desired package set'
+Assert-CollectionItem $WingetPresenceOnlyPackages 'Google.Antigravity' 'Antigravity app is presence-only so its own updater owns it'
 $legacyPackages = @(
     'Google.AntigravityIDE'
     'VSCodium.VSCodium'
@@ -94,12 +109,12 @@ if ($scriptText -notmatch '(?m)^\$latestPythonPackageId = Resolve-LatestPythonWi
     $scriptText -notmatch '(?m)^\$WingetPackages \+= \$latestPythonPackageId\r?$') {
     throw 'ASSERT: dynamically resolved Python channel is not added to the desired WinGet set'
 }
-Assert-Equal ($WingetPresenceOnlyPackages -join ',') 'Ookla.Speedtest.CLI' 'Speedtest CLI is the only presence-only package'
+Assert-Equal ($WingetPresenceOnlyPackages -join ',') 'Google.Antigravity,Ookla.Speedtest.CLI' 'only the self-updating Antigravity app and the pinned Speedtest CLI are presence-only'
 foreach ($id in $WingetPresenceOnlyPackages) {
     Assert-CollectionItem $WingetPackages $id "$id presence-only exemption belongs to the desired package set"
 }
 foreach ($id in $WingetPackages) {
-    if ($id -ne 'Ookla.Speedtest.CLI' -and $WingetPresenceOnlyPackages -contains $id) {
+    if ($id -notin @('Google.Antigravity', 'Ookla.Speedtest.CLI') -and $WingetPresenceOnlyPackages -contains $id) {
         throw "ASSERT: ordinary desired package $id was unexpectedly exempted from upgrades"
     }
 }
@@ -172,16 +187,13 @@ try {
     $script:ExitCodes = @{
         'uninstall|Google.AntigravityIDE' = [int]0x8A150014
         'upgrade|Git.Git' = [int]0x8A15002B
-        'upgrade|Google.Antigravity' = [int]0x8A15002B
     }
-    $focusedDesired = @('Git.Git', 'Ookla.Speedtest.CLI') + $currentPackages
+    $focusedDesired = @('Git.Git', 'Ookla.Speedtest.CLI', 'Google.Antigravity', 'Microsoft.VisualStudioCode') + $currentPackages
     $inventory = @(
         'Git.Git'
         'Ookla.Speedtest.CLI'
-        'Anthropic.ClaudeCode'
         'Google.Antigravity'
         'Google.AntigravityIDE'
-        'OpenAI.Codex'
         'SST.opencode'
         'VSCodium.VSCodium'
         'ZedIndustries.Zed'
@@ -195,18 +207,15 @@ try {
     $expectedCalls = @(
         'uninstall|--id|Google.AntigravityIDE|--exact|--source|winget|--silent|--accept-source-agreements|--disable-interactivity'
         'uninstall|--id|VSCodium.VSCodium|--exact|--source|winget|--silent|--accept-source-agreements|--disable-interactivity'
-        'install|--id|Google.AntigravityCLI|--exact|--source|winget|--no-upgrade|--silent|--accept-package-agreements|--accept-source-agreements|--disable-interactivity'
+        'install|--id|Microsoft.VisualStudioCode|--exact|--source|winget|--no-upgrade|--silent|--accept-package-agreements|--accept-source-agreements|--disable-interactivity'
         'upgrade|--id|Git.Git|--exact|--source|winget|--include-unknown|--silent|--accept-package-agreements|--accept-source-agreements|--disable-interactivity'
-        'upgrade|--id|Anthropic.ClaudeCode|--exact|--source|winget|--include-unknown|--silent|--accept-package-agreements|--accept-source-agreements|--disable-interactivity'
-        'upgrade|--id|Google.Antigravity|--exact|--source|winget|--include-unknown|--silent|--accept-package-agreements|--accept-source-agreements|--disable-interactivity'
-        'upgrade|--id|OpenAI.Codex|--exact|--source|winget|--include-unknown|--silent|--accept-package-agreements|--accept-source-agreements|--disable-interactivity'
         'upgrade|--id|SST.opencode|--exact|--source|winget|--include-unknown|--silent|--accept-package-agreements|--accept-source-agreements|--disable-interactivity'
         'upgrade|--id|ZedIndustries.Zed|--exact|--source|winget|--include-unknown|--silent|--accept-package-agreements|--accept-source-agreements|--disable-interactivity'
     )
     Assert-Equal ($script:WingetCalls -join "`n") ($expectedCalls -join "`n") 'migration command sequence and exact arguments'
-    Assert-Equal ($result.Present -join ',') 'Ookla.Speedtest.CLI' 'installed Speedtest CLI remains presence-only'
-    Assert-Equal ($result.Installed -join ',') 'Google.AntigravityCLI' 'missing current CLI is installed'
-    Assert-Equal ($result.UpdatedOrCurrent -join ',') 'Git.Git,Anthropic.ClaudeCode,Google.Antigravity,OpenAI.Codex,SST.opencode,ZedIndustries.Zed' 'ordinary and current tools are refreshed, including an accepted no-update result'
+    Assert-Equal ($result.Present -join ',') 'Ookla.Speedtest.CLI,Google.Antigravity' 'installed Speedtest CLI and self-updating Antigravity app are presence-only'
+    Assert-Equal ($result.Installed -join ',') 'Microsoft.VisualStudioCode' 'missing desired package is installed'
+    Assert-Equal ($result.UpdatedOrCurrent -join ',') 'Git.Git,SST.opencode,ZedIndustries.Zed' 'ordinary and current tools are refreshed, including an accepted no-update result'
     Assert-Equal ($result.RemovedLegacy -join ',') 'Google.AntigravityIDE,VSCodium.VSCodium' 'legacy packages are removed or already absent'
     Assert-Equal $result.Deferred.Count 0 'migration has no deferred operations'
     Assert-Equal $result.Failed.Count 0 'migration has no failed operations'
@@ -220,14 +229,14 @@ try {
         -DesiredIds $focusedDesired `
         -PresenceOnlyIds $WingetPresenceOnlyPackages `
         -LegacyIds $WingetLegacyPackages
-    Assert-Equal $script:WingetCalls.Count ($currentPackages.Count + 1) 'second run refresh count'
+    Assert-Equal $script:WingetCalls.Count ($currentPackages.Count + 2) 'second run refresh count'
     foreach ($call in $script:WingetCalls) {
         if ($call -notlike 'upgrade|*') {
             throw "ASSERT: converged run issued a non-upgrade command: $call"
         }
     }
-    Assert-Equal ($result.UpdatedOrCurrent -join ',') ((@('Git.Git') + $currentPackages) -join ',') 'second run refreshes ordinary and current packages'
-    Assert-Equal ($result.Present -join ',') 'Ookla.Speedtest.CLI' 'second run still skips only the fixed Speedtest CLI'
+    Assert-Equal ($result.UpdatedOrCurrent -join ',') ((@('Git.Git', 'Microsoft.VisualStudioCode') + $currentPackages) -join ',') 'second run refreshes ordinary and current packages'
+    Assert-Equal ($result.Present -join ',') 'Ookla.Speedtest.CLI,Google.Antigravity' 'second run still skips only the presence-only packages'
 
     # Presence-only affects only an installed package; a missing exempt package
     # still receives the same exact-ID install as the rest of the desired set.
@@ -267,6 +276,53 @@ try {
         -LegacyIds @('VSCodium.VSCodium')
     Assert-Equal ($result.Failed -join ',') 'uninstall VSCodium.VSCodium' 'failed purge is reported'
     Assert-Equal ($result.Installed -join ',') 'Microsoft.VisualStudioCode' 'replacement still installs after a failed purge'
+
+    # Native CLIs: each official installer runs, the command is verified, and
+    # only then is the WinGet copy it replaces uninstalled. A failed install
+    # keeps the WinGet copy.
+    $nativeRoot = Join-Path ([IO.Path]::GetTempPath()) ("native-cli-test-{0}" -f [Guid]::NewGuid().ToString('N'))
+    $savedRoots = @{ USERPROFILE = $env:USERPROFILE; LOCALAPPDATA = $env:LOCALAPPDATA }
+    $env:USERPROFILE = Join-Path $nativeRoot 'profile'
+    $env:LOCALAPPDATA = Join-Path $nativeRoot 'local'
+    $script:InstallerRuns = @()
+    $script:FailInstaller = ''
+    function Invoke-NativeCliInstaller {
+        param([hashtable]$Tool)
+        $script:InstallerRuns += $Tool.Name
+        if ($Tool.Name -eq $script:FailInstaller) { throw 'download failed' }
+        $path = Get-NativeCliPath -Tool $Tool
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
+        Set-Content -LiteralPath $path -Value 'native'
+    }
+    function Test-NativeCliCommand {
+        param([string]$Path)
+        return (Get-Content -Raw -LiteralPath $Path).Trim() -eq 'native'
+    }
+    try {
+        $script:WingetCalls = @()
+        $script:ExitCodes = @{}
+        $script:FailInstaller = 'Codex CLI'
+        $native = Invoke-NativeCliSet -InstalledIds @('Anthropic.ClaudeCode', 'OpenAI.Codex', 'Git.Git') 3>$null
+        Assert-Equal ($script:InstallerRuns -join ',') 'Claude Code,Codex CLI,Antigravity CLI' 'every native installer runs'
+        Assert-Equal ($script:WingetCalls -join "`n") 'uninstall|--id|Anthropic.ClaudeCode|--exact|--source|winget|--silent|--accept-source-agreements|--disable-interactivity' 'only the verified replacement retires its WinGet copy'
+        Assert-Equal ($native.RetiredWinget -join ',') 'Anthropic.ClaudeCode' 'retired WinGet copies are reported'
+        Assert-Equal ($native.Installed -join ',') 'Claude Code,Antigravity CLI' 'new native installs are reported'
+        Assert-Equal ($native.Failed -join ',') 'install Codex CLI' 'a failed native install is reported'
+
+        # -NoUpgrade keeps an existing native command without running its installer.
+        $script:InstallerRuns = @()
+        $script:WingetCalls = @()
+        $script:FailInstaller = ''
+        $native = Invoke-NativeCliSet -InstalledIds @() -NoUpgrade
+        Assert-Equal ($script:InstallerRuns -join ',') 'Codex CLI' '-NoUpgrade runs only the missing installer'
+        Assert-Equal ($native.Current -join ',') 'Claude Code,Antigravity CLI' '-NoUpgrade keeps present native commands'
+        Assert-Equal $script:WingetCalls.Count 0 'no WinGet copies remain to retire'
+    }
+    finally {
+        $env:USERPROFILE = $savedRoots.USERPROFILE
+        $env:LOCALAPPDATA = $savedRoots.LOCALAPPDATA
+        Remove-Item -LiteralPath $nativeRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 finally {
     Remove-Item -Path Function:\global:winget -ErrorAction SilentlyContinue

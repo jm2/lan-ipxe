@@ -27,12 +27,12 @@
 # perform a lightweight update check.
 #
 # What it does, in order:
-#   1. signed third-party repos: VS Code, Claude Code, the jmsqrd/tributary
-#      and jmsqrd/balun coprs, RPM Fusion free+nonfree, Chrome, sing-box; on
-#      x86_64 also Microsoft (PowerShell) and the RPM Fusion nvidia-driver
-#      repo, plus (full) the RPM Fusion steam repo and Plex Media Server. The
-#      abandoned Antigravity 1.x RPM repo/package and VSCodium are retired in
-#      favor of native Antigravity 2.0+ and VS Code.
+#   1. signed third-party repos: VS Code, the jmsqrd/tributary and
+#      jmsqrd/balun coprs, RPM Fusion free+nonfree, Chrome, sing-box; on
+#      x86_64 also Microsoft (PowerShell), plus (full) the RPM Fusion steam
+#      repo and Plex Media Server. The abandoned Antigravity 1.x RPM
+#      repo/package, VSCodium and the Claude Code RPM repo/key are retired in
+#      favor of native Antigravity 2.0+, VS Code and native Claude Code.
 #   2. CA-bundle symlinks at the Debian-style paths some tools hard-code
 #   3. the dnf package set, including native Chrome and Chromium on both
 #      architectures (plus the x86_64-only PowerShell RPM and Intel VA driver);
@@ -41,9 +41,12 @@
 #      checksummed from its GitHub release metadata, and OwnTone built into an
 #      RPM from its checksummed latest release tarball with
 #      files/rpm/owntone.spec
-#   4. Antigravity desktop 2.0+, Antigravity CLI, OpenCode, Codex CLI, and Zed
-#      using the latest native vendor artifacts/installers (checksummed from
-#      live upstream release metadata where upstream publishes digests)
+#   4. Antigravity desktop 2.0+, Antigravity CLI, OpenCode, Claude Code,
+#      Codex CLI, and Zed using the latest native vendor artifacts/installers
+#      (checksummed from live upstream release metadata where upstream
+#      publishes digests). Antigravity, its CLI, Claude Code and Codex update
+#      themselves in place; reruns keep a self-updated copy rather than
+#      downgrading it, and the Claude Code RPM is removed
 #   5. Rust via rustup only: a per-user stable toolchain with rustfmt, clippy
 #      and rust-analyzer (distro rust/cargo packages are purged)
 #   6. a checksum-pinned Ookla speedtest CLI into ~/.local/bin
@@ -75,9 +78,12 @@ MICROSOFT_KEY_FILE=/etc/pki/rpm-gpg/MICROSOFT-RPM-GPG-KEY
 PLEX_KEY_URL=https://downloads.plex.tv/plex-keys/PlexSign.v2.key
 PLEX_KEY_FINGERPRINT=6EFFEB478A6559D75C7C4FE706C521790B9CFFDE
 PLEX_KEY_FILE=/etc/pki/rpm-gpg/PLEX-RPM-GPG-KEY
-CLAUDE_KEY_URL=https://downloads.claude.ai/keys/claude-code.asc
-CLAUDE_KEY_FINGERPRINT=31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE
-CLAUDE_KEY_FILE=/etc/pki/rpm-gpg/ANTHROPIC-CLAUDE-CODE-RPM-GPG-KEY
+# Claude Code moved from Anthropic's RPM repo to its self-updating native
+# install; the repo file this script used to install and its key are retired.
+LEGACY_CLAUDE_REPO=/etc/yum.repos.d/claude-code.repo
+LEGACY_CLAUDE_REPO_SHA256=8489cb2a1106315f3f5884a8b3170da6d59ea003635f7852d37e6a121cf71ac3
+LEGACY_CLAUDE_KEY_FILE=/etc/pki/rpm-gpg/ANTHROPIC-CLAUDE-CODE-RPM-GPG-KEY
+LEGACY_CLAUDE_KEY_FINGERPRINT=31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE
 SINGBOX_REPO_URL=https://sing-box.app/sing-box.repo
 SINGBOX_REPO_FILE=/etc/yum.repos.d/sing-box.repo
 LEGACY_ANTIGRAVITY_REPO=/etc/yum.repos.d/antigravity.repo
@@ -105,6 +111,7 @@ OPENCODE_URL=
 OPENCODE_ARCHIVE_SHA256=
 OPENCODE_RELEASE_API=https://api.github.com/repos/anomalyco/opencode/releases/latest
 CODEX_INSTALLER_URL=https://chatgpt.com/codex/install.sh
+CLAUDE_INSTALLER_URL=https://claude.ai/install.sh
 ZED_VERSION=
 ZED_URL=
 ZED_ARCHIVE_SHA256=
@@ -138,7 +145,6 @@ PKGS=(
   ccache
   chromium
   chrony
-  claude-code
   clang
   cmake
   cockpit
@@ -277,6 +283,7 @@ PKGS=(
   system-config-printer
   tar
   texinfo
+  tmux
   transmission-cli
   tree
   tributary
@@ -663,6 +670,56 @@ remove_replaced_vscodium_fedora() {
   fi
 }
 
+# The Claude Code repo file is removed only while it matches the copy this
+# script installed; its signing key goes once no repo file references it.
+remove_legacy_claude_repo() {
+  local path=${1:-${LEGACY_CLAUDE_REPO}} key=${2:-${LEGACY_CLAUDE_KEY_FILE}} sha=
+  if [[ -f ${path} && ! -L ${path} ]]; then
+    sha=$(sha256sum -- "${path}") || die "could not hash ${path}"
+    sha=${sha%% *}
+  fi
+  if [[ ${sha} == "${LEGACY_CLAUDE_REPO_SHA256}" ]]; then
+    sudo rm -f -- "${path}" || die "could not remove ${path}"
+    note "Claude Code RPM repository: removed"
+  else
+    if dnf_repo_enabled claude-code; then
+      sudo dnf config-manager setopt claude-code.enabled=0
+      dnf_repo_enabled claude-code \
+        && die "could not disable the Claude Code RPM repository"
+    fi
+    if [[ -e ${path} || -L ${path} ]]; then
+      warn "Preserving customized ${path}; its Claude Code repository is disabled."
+    else
+      note "Claude Code RPM repository: absent"
+    fi
+  fi
+  if grep -rlsF -- "${key}" /etc/yum.repos.d >/dev/null; then
+    warn "Preserving ${key}: a repository file still references it."
+    return 0
+  fi
+  if [[ -e ${key} ]]; then
+    sudo rm -f -- "${key}" || die "could not remove ${key}"
+  fi
+  if rpmkeys --list 2>/dev/null \
+      | awk -v fpr="${LEGACY_CLAUDE_KEY_FINGERPRINT,,}" 'tolower($1) == fpr { found = 1 } END { exit !found }'; then
+    sudo rpmkeys --delete "${LEGACY_CLAUDE_KEY_FINGERPRINT}" \
+      || die "could not remove the retired Claude Code RPM signing key"
+    note "Claude Code RPM signing key: removed"
+  fi
+}
+
+# Runs after the native install so a failed download never leaves the
+# workstation without a claude command.
+remove_legacy_claude_rpm() {
+  if ! rpm -q --quiet claude-code; then
+    note "Claude Code RPM: absent"
+    return 0
+  fi
+  sudo dnf -y remove claude-code || die "could not remove the Claude Code RPM"
+  rpm -q --quiet claude-code && die "the Claude Code RPM is still installed"
+  note "Claude Code RPM: removed (replaced by the self-updating native install)"
+}
+
 # Fetch release metadata without following a redirect to plaintext. GitHub's
 # API token is optional; when supplied it raises the rate limit without
 # changing which public release metadata is trusted.
@@ -1009,6 +1066,18 @@ install_antigravity_cli() {
       return 0
     fi
   fi
+  # agy replaces itself in place when it self-updates, so a managed binary
+  # that no longer matches its marker but is at least the manifest version
+  # is the app's own update, not drift.
+  if [[ -x ${dest} && -f ${marker} ]] \
+     && grep -Fxq 'managed-by=lan-ipxe/setup-fedora-workstation.sh' "${marker}" \
+     && version=$("${dest}" --version 2>/dev/null) \
+     && [[ ${version} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+     && printf '%s\n%s\n' "${ANTIGRAVITY_CLI_VERSION}" "${version}" \
+        | LC_ALL=C sort -V -C; then
+    note "Antigravity CLI ${version}: updated in place by agy (manifest ${ANTIGRAVITY_CLI_VERSION}); preserving it"
+    return 0
+  fi
   curl --proto '=https' --tlsv1.2 -fL --retry 3 \
     -o "${archive}" "${ANTIGRAVITY_CLI_URL}" \
     || die "could not download Antigravity CLI ${ANTIGRAVITY_CLI_VERSION}"
@@ -1111,6 +1180,20 @@ install_codex_cli() {
   "${HOME}/.local/bin/codex" --version >/dev/null \
     || die "the installed Codex CLI is not runnable"
   note "Codex CLI: current official standalone release installed"
+}
+
+install_claude_cli() {
+  local installer=${WORK_DIR}/claude-install.sh
+  curl --proto '=https' --tlsv1.2 -fsSL "${CLAUDE_INSTALLER_URL}" -o "${installer}" \
+    || die "could not download the official Claude Code installer"
+  bash -n "${installer}" || die "the downloaded Claude Code installer is not valid Bash"
+  PATH="${HOME}/.local/bin:${PATH}" bash "${installer}" \
+    || die "the official Claude Code installer failed"
+  [[ -x ${HOME}/.local/bin/claude ]] \
+    || die "the Claude Code installer did not create ~/.local/bin/claude"
+  "${HOME}/.local/bin/claude" --version >/dev/null \
+    || die "the installed Claude Code CLI is not runnable"
+  note "Claude Code: current official native release installed (self-updating)"
 }
 
 # Microsoft's RHEL repo carries x86_64 PowerShell. ARM uses the official
@@ -1402,15 +1485,14 @@ select_profile() {
   SELECTED_PKGS=("${PKGS[@]}")
   SELECTED_FLATPAKS=("${FLATPAKS[@]}")
   SELECTED_SERVICES=("${SERVICES[@]}")
-  SELECTED_REPOS=(code claude-code google-chrome sing-box rpmfusion-free rpmfusion-nonfree)
+  SELECTED_REPOS=(code google-chrome sing-box rpmfusion-free rpmfusion-nonfree)
   local copr
   for copr in "${COPRS[@]}"; do
     SELECTED_REPOS+=("copr:copr.fedorainfracloud.org:${copr/\//:}")
   done
-  SELECTED_TOOLS=(antigravity agy opencode codex zed speedtest)
+  SELECTED_TOOLS=(antigravity agy opencode claude codex zed speedtest)
   MANAGED_FILES=(
     "etc/yum.repos.d/vscode.repo|/etc/yum.repos.d/vscode.repo"
-    "etc/yum.repos.d/claude-code.repo|/etc/yum.repos.d/claude-code.repo"
     "etc/yum.repos.d/google-chrome.repo|/etc/yum.repos.d/google-chrome.repo"
     "bashrc|${HOME}/.bashrc"
     "vimrc|${HOME}/.vimrc"
@@ -1424,9 +1506,8 @@ select_profile() {
   if (( IS_X86_64 )); then
     SELECTED_PKGS+=("${PKGS_X86_64[@]}")
     SELECTED_FLATPAKS+=("${FLATPAKS_X86_64[@]}")
-    SELECTED_REPOS+=(rpmfusion-nonfree-nvidia-driver packages-microsoft-com-prod)
+    SELECTED_REPOS+=(packages-microsoft-com-prod)
     MANAGED_FILES+=(
-      "etc/yum.repos.d/rpmfusion-nonfree-nvidia-driver.repo|/etc/yum.repos.d/rpmfusion-nonfree-nvidia-driver.repo"
       "etc/yum.repos.d/microsoft-prod.repo|/etc/yum.repos.d/microsoft-prod.repo"
     )
   else
@@ -1455,7 +1536,7 @@ print_plan() {
   printf 'Profile: %s; mode: dry-run (offline; no sudo, network, or writes)\n' "${PROFILE}"
   printf 'Architecture: %s; upgrades: %s\n' "${ARCH}" \
     "$( (( NO_UPGRADE )) && echo 'skipped (--no-upgrade)' || echo 'dnf upgrade --refresh + flatpak update')"
-  printf 'PLAN: retire legacy Antigravity 1.x repo/package/settings and VSCodium\n'
+  printf 'PLAN: retire legacy Antigravity 1.x repo/package/settings, VSCodium, and the Claude Code RPM repo/key/package\n'
   printf 'PLAN: enable %d repositories:\n' "${#SELECTED_REPOS[@]}"
   printf '  %s\n' "${SELECTED_REPOS[@]}"
   printf 'PLAN: CA-bundle symlinks /etc/ssl/certs/ca-certificates.crt, /etc/pki/tls/certs/ca-bundle.crt\n'
@@ -1521,6 +1602,8 @@ check_state() {
   for tool in "${SELECTED_TOOLS[@]}"; do
     case ${tool} in
       navidrome|owntone) id=rpm:${tool} ;;
+      # The RPM's /usr/bin/claude does not count as the native install.
+      claude) id=${HOME}/.local/bin/claude ;;
       *) id=${tool} ;;
     esac
     if tool_present "${id}"; then
@@ -1545,6 +1628,10 @@ check_state() {
     ! rpm -q --quiet -- "${pkg}" 2>/dev/null \
       || check_report DRIFT "distro package ${pkg}: installed (purged in favor of rustup)"
   done
+  ! rpm -q --quiet claude-code 2>/dev/null \
+    || check_report DRIFT "package claude-code: installed (replaced by the native install)"
+  [[ ! -e ${LEGACY_CLAUDE_REPO} ]] \
+    || check_report DRIFT "file ${LEGACY_CLAUDE_REPO}: present (retired)"
   for id in "${SELECTED_FLATPAKS[@]}"; do
     if flatpak info --system "${id}" >/dev/null 2>&1; then
       check_report CURRENT "flatpak ${id}"
@@ -1682,14 +1769,11 @@ remove_legacy_antigravity_repo
 remove_legacy_antigravity_rpm
 remove_legacy_antigravity_settings
 remove_replaced_vscodium_fedora
+remove_legacy_claude_repo
 import_rpm_key "${MICROSOFT_KEY_URL}" gpgsecurity@microsoft.com \
   "${MICROSOFT_KEY_FINGERPRINT}" "${MICROSOFT_KEY_FILE}"
-import_rpm_key "${CLAUDE_KEY_URL}" security@anthropic.com \
-  "${CLAUDE_KEY_FINGERPRINT}" "${CLAUDE_KEY_FILE}"
 put_file -s "${FILES}/etc/yum.repos.d/vscode.repo" /etc/yum.repos.d/vscode.repo
-put_file -s "${FILES}/etc/yum.repos.d/claude-code.repo" /etc/yum.repos.d/claude-code.repo
 dnf_repo_enabled code || die "the Microsoft VS Code repository is not enabled"
-dnf_repo_enabled claude-code || die "the Claude Code repository is not enabled"
 
 for copr in "${COPRS[@]}"; do
   repo_id="copr:copr.fedorainfracloud.org:${copr/\//:}"
@@ -1720,8 +1804,6 @@ log "Repositories (Chrome, x86_64 extras, Microsoft, full-profile Steam/Plex, si
 put_file -s "${FILES}/etc/yum.repos.d/google-chrome.repo" /etc/yum.repos.d/google-chrome.repo
 import_rpm_key "${GOOGLE_KEY_URL}" linux-packages-keymaster@google.com
 if (( IS_X86_64 )); then
-  put_file -s "${FILES}/etc/yum.repos.d/rpmfusion-nonfree-nvidia-driver.repo" \
-    /etc/yum.repos.d/rpmfusion-nonfree-nvidia-driver.repo
   put_file -s "${FILES}/etc/yum.repos.d/microsoft-prod.repo" /etc/yum.repos.d/microsoft-prod.repo
 fi
 if (( IS_X86_64 )) && [[ ${PROFILE} == full ]]; then
@@ -1798,6 +1880,16 @@ keep_installed opencode || install_opencode_cli
 # and validates its published checksums before activating it under ~/.local.
 log "Codex CLI (official standalone release)"
 keep_installed codex || install_codex_cli
+
+# Anthropic's native install updates itself in the background; the RPM it
+# replaces is removed only after the native command is in place.
+log "Claude Code (official native release)"
+if (( NO_UPGRADE )) && [[ -x ${HOME}/.local/bin/claude ]]; then
+  note "claude: installed; kept at its current version (--no-upgrade)"
+else
+  install_claude_cli
+fi
+remove_legacy_claude_rpm
 
 # Fedora has no first-party Zed RPM. Install Zed's official release archive
 # only after checking the digest published with the immutable GitHub asset.

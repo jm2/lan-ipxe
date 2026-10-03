@@ -61,7 +61,7 @@ Assert-True ((Get-Content -Raw -LiteralPath $ScriptPath) -notmatch '(?m)^#Requir
 $scriptText = Get-Content -Raw -LiteralPath $ScriptPath
 Assert-True ($core -contains 'jm2.Tributary') 'Tributary is in core'
 Assert-True ($scriptText -match '(?m)^\$balunResult = Invoke-BalunStep ') 'Balun step runs in every profile (core)'
-Assert-True ($scriptText.IndexOf('Invoke-BalunStep -InstalledIds') -lt $scriptText.IndexOf('#--- 4. Rust')) 'Balun step is part of the package phase'
+Assert-True ($scriptText.IndexOf('Invoke-BalunStep -InstalledIds') -lt $scriptText.IndexOf('#--- 4. Self-updating native CLIs')) 'Balun step is part of the package phase'
 Assert-True (($BalunInstallerArgs -join ' ') -eq '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-') 'Balun uses Inno Setup silent switches'
 Write-Output 'PROFILE CONTENTS PASSED'
 
