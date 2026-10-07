@@ -247,6 +247,23 @@ test_os_metadata_and_exec_mimes() (
   [[ image/heic =~ ${EXPECTED_MIME[jpg]} ]] || fail 'EXPECTED_MIME[jpg] rejects another image type'
 )
 
+test_clam_eta() (
+  load_scanner
+  local dir out now
+  dir=$(mktemp -d -p "${TMPDIR:-/var/tmp}")
+  trap 'rm -rf -- "${dir}"' EXIT
+  now=$(date +%s)
+  [[ $(clam_eta "${dir}" 30 4) == estimating ]] || fail 'clam_eta did not wait for a finished batch'
+  # Two finished 60 s batches, 4 jobs, 30 batches: 28 x 60 / 4 = 420 s.
+  for id in 00000 00001; do
+    touch -d "@$(( now - 60 ))" "${dir}/clamscan.${id}.start"
+    echo 0 >"${dir}/clamscan.${id}.rc"; touch -d "@${now}" "${dir}/clamscan.${id}.rc"
+  done
+  : >"${dir}/clamscan.00002.start"   # still running: ignored
+  out=$(clam_eta "${dir}" 30 4)
+  [[ ${out} == 0h07m ]] || fail "clam_eta gave ${out}, expected 0h07m"
+)
+
 test_internal_scan_guard() {
   local out rc args
   for args in '--internal-scan' '--internal-scan one two'; do
@@ -277,5 +294,7 @@ test_suspect_regexes
 printf 'PASS scanner suspect MIME/name regular expressions\n'
 test_os_metadata_and_exec_mimes
 printf 'PASS scanner OS-metadata, executable-MIME and expected-MIME tables\n'
+test_clam_eta
+printf 'PASS scanner ClamAV ETA from finished-batch durations and job count\n'
 test_internal_scan_guard
 printf 'PASS scanner --internal-scan argument-count guard\n'

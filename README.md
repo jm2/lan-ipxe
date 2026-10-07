@@ -417,7 +417,9 @@ Files of 2 GiB or more are recorded as ClamAV coverage gaps (its hard limit).
 The report TSVs escape every control character in file names, so they are safe
 to view in a terminal; `clamscan.log`/`yara.log` are raw tool output. The
 report lists DEFINITE / LIKELY / REVIEW findings plus coverage gaps; exit 0 no
-findings, 3 findings, 1 error. While each volume scans, its phase and progress are
+findings, 3 findings, 1 error. Everything printed during the run is also saved as
+`console.log` in the report directory (colour codes and control characters
+stripped), so the report folder alone is a complete record. While each volume scans, its phase and progress are
 printed once a minute (inventory size, hashing files/GiB with an ETA, file
 typing, classification, ClamAV batches with an ETA, YARA); the data is read
 three times (hashing, ClamAV, YARA), and the classification pass is CPU-only,

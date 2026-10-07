@@ -360,8 +360,26 @@ count_existing() {
 eta() {
   local done=$1 total=$2 start=$3 elapsed left
   elapsed=$(( EPOCHSECONDS - start ))
-  (( done > 0 && elapsed > 0 && total > done )) || { printf '?'; return; }
+  (( done > 0 && elapsed > 0 && total > done )) || { printf 'estimating'; return; }
   left=$(( (total - done) * elapsed / done ))
+  printf '%dh%02dm' $(( left / 3600 )) $(( left % 3600 / 60 ))
+}
+
+# clam_eta <out> <batches> <jobs>: time left for the ClamAV batches. Batches
+# run <jobs> at a time, so the remaining ones take (remaining x average
+# finished-batch duration / jobs); a plain done/elapsed rate would overstate
+# the first estimates by up to the job count.
+clam_eta() {
+  local out=$1 total=$2 jobs=$3 rc start sum=0 done=0 left
+  for rc in "${out}"/clamscan.[0-9]*.rc; do
+    start=${rc%.rc}.start
+    [[ -e ${rc} && -e ${start} ]] || continue
+    sum=$(( sum + $(stat -c %Y -- "${rc}") - $(stat -c %Y -- "${start}") ))
+    done=$(( done + 1 ))
+  done
+  (( done > 0 && total > done )) || { printf 'estimating'; return; }
+  left=$(( (total - done) * sum / done / jobs ))
+  (( left > 0 )) || left=60
   printf '%dh%02dm' $(( left / 3600 )) $(( left % 3600 / 60 ))
 }
 
@@ -492,9 +510,13 @@ internal_scan() {
   [[ ${clam_db} != - ]] && clam_opts+=(--database="${clam_db}")
   if (( files > 0 )); then
     jobs=$(clam_jobs)
-    # About 20 batches per job: fine-grained progress, few database loads.
-    per=$(( (files + jobs * 20 - 1) / (jobs * 20) ))
-    (( per >= 200 )) || per=200
+    # Every batch starts by loading the ~1 GB signature database (15-30 s),
+    # so batches hold at least ~1000 files; very large volumes are capped at
+    # 20 batches per job, which still gives fine-grained progress.
+    batches=$(( (files + 999) / 1000 ))
+    (( batches >= jobs )) || batches=${jobs}
+    (( batches <= jobs * 20 )) || batches=$(( jobs * 20 ))
+    per=$(( (files + batches - 1) / batches ))
     awk -v RS='\0' -v per="${per}" -v dir="${out}" '
       index($0, "\n") { printf "%s%c", $0, 0 > (dir "/clambatch.nl"); next }
       { b = int(n++ / per); f = sprintf("%s/clambatch.%05d.lst", dir, b)
@@ -508,6 +530,7 @@ internal_scan() {
       if [[ -e ${out}/clambatch.00000.lst ]]; then
         printf '%s\0' "${out}"/clambatch.*.lst | xargs -0 -r -P "${jobs}" -I{} bash -c '
           out=$1 batch=$2 n=$3; shift 3; id=${batch##*/clambatch.}; id=${id%.lst}
+          : >"${out}/clamscan.${id}.start"
           rc=0; clamscan "${@:1:n}" --file-list="${batch}" >"${out}/clamscan.${id}.part" 2>"${out}/clamscan.${id}.err" || rc=$?
           echo "${rc}" >"${out}/clamscan.${id}.rc"' _ "${out}" {} "${#clam_opts[@]}" "${clam_opts[@]}"
       fi
@@ -521,11 +544,11 @@ internal_scan() {
     xpid=$!
     while kill -0 "${xpid}" 2>/dev/null; do
       n=$(count_existing "${out}"/clamscan.*.rc)
-      scan_progress "${out}" "clamav: ${n}/${batches} batches done, ETA $(eta "${n}" "${batches}" "${started}")"
+      scan_progress "${out}" "clamav: ${n}/${batches} batches done, ETA $(clam_eta "${out}" "${batches}" "${jobs}")"
       sleep 10
     done
     wait "${xpid}" || true
-    rm -f -- "${out}"/clambatch.*
+    rm -f -- "${out}"/clambatch.* "${out}"/clamscan.*.start
   fi
   cat "${out}"/clamscan.*.part >"${out}/clamscan.log" 2>/dev/null || : >"${out}/clamscan.log"
   cat "${out}"/clamscan.*.err >"${out}/clamscan.err" 2>/dev/null || : >"${out}/clamscan.err"
@@ -602,6 +625,7 @@ LVM_ACTIVE=()
 RO_DEVS=()
 FRESHCLAM_WAS_ACTIVE=0
 KEEPALIVE_PID=
+CONSOLE_PID=
 UNIT_SEQ=0
 COMPILED_YARA=-
 YARA_DESC=disabled
@@ -696,6 +720,11 @@ cleanup() {
     for i in "${RO_DEVS[@]}"; do note "  sudo blockdev --setrw ${i}"; done
   fi
   [[ -n ${KEEPALIVE_PID} ]] && kill "${KEEPALIVE_PID}" 2>/dev/null
+  # Last: close the console so the console.log writer flushes before exit.
+  if [[ -n ${CONSOLE_PID} ]]; then
+    exec >&- 2>&-
+    wait "${CONSOLE_PID}" 2>/dev/null
+  fi
 }
 
 start_sudo() {
@@ -1366,7 +1395,7 @@ write_report() {
       printf 'scan can give; it is still not proof that the media is clean (new or targeted\n'
       printf 'malware has no signatures). Prefer copying only the documents you need.\n'
     fi
-    printf '\nReport files: summary.txt, findings.tsv, gaps.tsv, volumes/<tag>/{files,suspect,findings,gaps}.tsv,\n'
+    printf '\nReport files: summary.txt, console.log, findings.tsv, gaps.tsv, volumes/<tag>/{files,suspect,findings,gaps}.tsv,\n'
     printf 'bundles.txt, clamscan.log, yara.log%s\n' "$( (( USE_VT )) && echo ', virustotal.tsv')"
   } >"${s}"
   echo
@@ -1423,6 +1452,14 @@ main() {
   esac
   [[ -z $(ls -A -- "${REPORT_DIR}") ]] || die "Report dir ${REPORT_DIR} is not empty"
   : >"${REPORT_DIR}/gaps-global.tsv"
+  # Keep a copy of everything printed from here on as console.log, without
+  # colour codes or other control characters (APFS volume names and mount
+  # errors come from the untrusted media). Prompts use /dev/tty directly.
+  # One awk process prints and logs, so cleanup can wait for it to flush.
+  exec > >(LC_ALL=C awk -v logfile="${REPORT_DIR}/console.log" '{ print; fflush()
+    s = $0; gsub(/\033\[[0-9;]*m/, "", s); gsub(/[\001-\010\013-\037\177]/, "", s)
+    print s >> logfile; fflush(logfile) }') 2>&1
+  CONSOLE_PID=$!
   log "Report directory: ${REPORT_DIR}"
 
   (( HARDEN_SESSION )) && harden_session "${REPORT_DIR}/restore-session-settings.sh"
