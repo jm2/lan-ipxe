@@ -61,7 +61,10 @@ YARA_TIMEOUT=120
 # scanner verdicts (MIME types reported by file(1)).
 SUSPECT_MIMES='^(application/(x-mach-binary|x-executable|x-pie-executable|x-sharedlib|x-object|x-dosexec|vnd\.microsoft\.portable-executable|x-msdownload|x-msi|java-archive|x-java-applet|x-apple-diskimage|x-xar|x-iso9660-image|x-ms-shortcut|x-bytecode\.python)|text/(x-shellscript|x-script\.python|x-python|x-perl|x-ruby|x-php|x-tcl|x-msdos-batch|x-applescript))$'
 # File-name patterns (case-insensitive, matched against the relative path).
-SUSPECT_NAMES='(\.(app|pkg|mpkg|dmg|command|tool|scpt|scptd|applescript|workflow|action|terminal|jar|dylib|so|kext|plugin|bundle|osax|qlgenerator|mdimporter|saver|prefpane|webloc|inetloc|fileloc|lnk|url|desktop|exe|dll|scr|com|bat|cmd|ps1|psm1|py|pyw|pl|pm|rb|php|pht|vbs|vbe|jse|wsf|hta|msi|iso|docm|dotm|xlsm|xltm|xlam|pptm|potm|ppam|sldm)(/|$)|(^|/)(LaunchAgents|LaunchDaemons|StartupItems|Login ?Items|ScriptingAdditions|Extensions)/|(^|/)\.(zshrc|zprofile|zshenv|zlogin|bash_profile|bashrc|profile|login)$|(^|/)(authorized_keys|crontab)$)'
+# Bundle types are directories, so they match anywhere in the path (every
+# file inside Foo.app/ is app content); every other extension must end the
+# path, or a folder such as "name@icloud.com/" would flag everything below it.
+SUSPECT_NAMES='(\.(app|pkg|mpkg|scptd|workflow|action|bundle|plugin|kext|osax|qlgenerator|mdimporter|saver|prefpane)(/|$)|\.(dmg|command|tool|scpt|applescript|terminal|jar|dylib|so|webloc|inetloc|fileloc|lnk|url|desktop|exe|dll|scr|com|bat|cmd|ps1|psm1|py|pyw|pl|pm|rb|php|pht|vbs|vbe|jse|wsf|hta|msi|iso|docm|dotm|xlsm|xltm|xlam|pptm|potm|ppam|sldm)$|(^|/)(LaunchAgents|LaunchDaemons|StartupItems|Login ?Items|ScriptingAdditions|Extensions)/|(^|/)\.(zshrc|zprofile|zshenv|zlogin|bash_profile|bashrc|profile|login)$|(^|/)(authorized_keys|crontab)$)'
 
 PKGS_FEDORA=(apfs-fuse clamav clamav-update curl ddrescue file jq kernel-modules-extra unzip yara)
 PKGS_ARCH=(clamav curl ddrescue file jq unzip yara)
@@ -769,7 +772,8 @@ acquire_device() {
     die "${dev} has mounted filesystems. Unmount them first (udisksctl unmount -b <partition>), then rerun."
   fi
   swapon --show=NAME --noheadings 2>/dev/null | grep -qxF "${dev}" && die "${dev} is in use as swap"
-  RO_DEVS=("${dev}")
+  # lsblk lists the disk itself first, then its partitions.
+  RO_DEVS=()
   while read -r node; do
     sudo blockdev --setro "${node}" || die "blockdev --setro ${node} failed"
     RO_DEVS+=("${node}")

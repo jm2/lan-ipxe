@@ -200,10 +200,11 @@ test_suspect_regexes() (
   done
   for value in 'Foo.app/' 'note.docm' 'Library/LaunchAgents/com.example.plist' \
                '/home/u/Downloads/notes.txt.py' 'home/u/.bashrc' 'ssh/authorized_keys' \
-               'EVIL.APP/install'; do
+               'EVIL.APP/install' 'x/setup.com' 'Kit.kext/Contents/Info.plist'; do
     [[ ${value} =~ ${SUSPECT_NAMES} ]] || fail "SUSPECT_NAMES does not match ${value}"
   done
-  for value in photo.jpg report.pdf notes.txt Resume.docx fake.appendix; do
+  for value in photo.jpg report.pdf notes.txt Resume.docx fake.appendix \
+               'someone@icloud.com/Old Downloads/notes.txt' 'backup.exe/readme.txt'; do
     ! [[ ${value} =~ ${SUSPECT_NAMES} ]] || fail "SUSPECT_NAMES unexpectedly matches ${value}"
   done
 )
