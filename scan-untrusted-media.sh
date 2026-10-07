@@ -885,6 +885,10 @@ scan_volume() {
   printf '%s\t%s\t%s\n' "${tag}" "${fstype}" "${root}" >>"${REPORT_DIR}/volumes.tsv"
   UNIT_SEQ=$(( UNIT_SEQ + 1 ))
   log "Scanning ${tag} (${fstype}) at ${root}"
+  # The worker runs as "bash <script>", never by exec'ing the script itself:
+  # under SELinux, systemd (init_t) may not execute a file labeled
+  # user_home_t (a checkout in ~), which fails every scan with 203/EXEC.
+  # bash is bin_t and transitions to unconfined_service_t, which may read it.
   sudo systemd-run --quiet --wait --pipe --collect --expand-environment=no \
     --unit="scan-utm-${EPOCHSECONDS}-$$-${UNIT_SEQ}" \
     -p User="${USER_NAME}" -p WorkingDirectory=/ -p UMask=0077 \
@@ -896,7 +900,7 @@ scan_volume() {
     -p RestrictAddressFamilies=AF_UNIX -p RestrictNamespaces=yes -p RestrictSUIDSGID=yes \
     -p RestrictRealtime=yes -p LockPersonality=yes -p SystemCallArchitectures=native \
     -p Nice=5 -p IOSchedulingClass=best-effort -p IOSchedulingPriority=6 \
-    -- "${SCRIPT_PATH}" --internal-scan "${root}" "${out}" "${fstype}" "${COMPILED_YARA}" "${CLAM_DB:--}" \
+    -- "${BASH}" "${SCRIPT_PATH}" --internal-scan "${root}" "${out}" "${fstype}" "${COMPILED_YARA}" "${CLAM_DB:--}" \
     </dev/null || rc=$?
   (( rc == 0 )) || gap "${tag}" scan "sandboxed scan exited ${rc}; results for this volume are incomplete"
   [[ -f ${out}/counts ]] && note "$(tr '\n' ' ' <"${out}/counts")"
