@@ -1,0 +1,25 @@
+# Managed by setup-{fedora,arch}-workstation.sh. Long-running watcher: scans
+# what is already mounted under /run/media, then follows the mount table and
+# scans each newly mounted removable filesystem read-only (see
+# /usr/local/libexec/clamav-media-scan). A .path unit is not used: inotify on
+# /run/media cannot see the per-drive mount points under /run/media/<user>.
+[Unit]
+Description=Scan newly mounted removable media with ClamAV
+Documentation=man:clamdscan(1)
+After=clamd@scan.service clamav-daemon.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/libexec/clamav-media-scan --watch
+Restart=always
+RestartSec=30s
+# Detections are reported, never acted on: this unit must never quarantine.
+# ProtectSystem=strict leaves the whole tree (including /run/media) read-only;
+# mounts made later on the host still propagate into this namespace.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+StateDirectory=clamav-media-scan
+
+[Install]
+WantedBy=multi-user.target

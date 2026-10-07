@@ -1,0 +1,14 @@
+# Managed by setup-{fedora,arch}-workstation.sh. Runs the AIDE check daily.
+# Randomized delay plus a mid-morning slot keeps it away from the nightly
+# dnf5-automatic / pacman-update runs, so update-time /etc changes and AIDE's
+# report stay separable; see the ordering rationale in /etc/aide.conf.
+[Unit]
+Description=Daily AIDE configuration integrity check
+
+[Timer]
+OnCalendar=*-*-* 10:00:00
+RandomizedDelaySec=45m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

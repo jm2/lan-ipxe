@@ -142,6 +142,9 @@ test_check_exit_codes() (
   systemctl() { return 0; }
   check_managed_file() { report CURRENT "$3"; }
   check_system_state() { report CURRENT 'system state'; }
+  # The security checks render files under ${FILES}, which resolves to a
+  # /dev/fd path inside load_helpers; they are covered by their own tests.
+  check_security_state() { report CURRENT 'security state'; }
   RUSTUP_HOME=${TEST_ROOT}/rustup
   mkdir -p "${RUSTUP_HOME}/toolchains/${RUST_TOOLCHAIN}/lib/rustlib"
   printf 'default_toolchain = "stable-x86_64-unknown-linux-gnu"\n' >"${RUSTUP_HOME}/settings.toml"
@@ -271,6 +274,166 @@ test_no_upgrade_sync_dbs() (
   sync_dbs_present || fail 'complete sync databases were rejected'
 )
 
+# The rendered security configs must be deterministic: apply installs them and
+# --check compares against the same rendering.
+test_security_renders() (
+  load_helpers
+  local base=${REPO_ROOT}/files/etc/clamav/clamd.conf
+  local out_core out_full
+  local out1 out2
+  out1=$(render_clamd_config "${base}" /home/alice/Downloads /home/bob/Downloads)
+  out2=$(render_clamd_config "${base}" /home/alice/Downloads /home/bob/Downloads)
+  [[ ${out1} == "${out2}" ]] || fail 'render_clamd_config is not deterministic'
+  cmp -s <(cat -- "${base}") <(printf '%s\n' "${out1}" | head -n "$(wc -l <"${base}")") \
+    || fail 'render_clamd_config does not start with the checked-in base'
+  grep -Fxq 'OnAccessIncludePath /home/alice/Downloads' <<<"${out1}" \
+    || fail 'render_clamd_config omits the first Downloads include'
+  grep -Fxq 'OnAccessIncludePath /home/bob/Downloads' <<<"${out1}" \
+    || fail 'render_clamd_config omits the second Downloads include'
+
+  select_profile core
+  out_core=$(render_lan_zone "${FIREWALL_LAN_SERVICES[@]}")
+  # firewalld puts each packet in exactly one zone: without ssh here, LAN
+  # peers would be rejected instead of falling through to the default zone.
+  grep -Fq '<service name="ssh"/>' <<<"${out_core}" \
+    || fail 'core LAN zone omits ssh (LAN peers would be rejected)'
+  grep -Fq '<service name="cockpit"/>' <<<"${out_core}" \
+    || fail 'core LAN zone omits cockpit'
+  grep -Fq '<service name="rdp"/>' <<<"${out_core}" \
+    || fail 'core LAN zone omits rdp (GNOME Remote Desktop)'
+  grep -Fq '<service name="ipp-client"/>' <<<"${out_core}" \
+    || fail 'core LAN zone omits printer discovery'
+  grep -Fq '<service name="mdns"/>' <<<"${out_core}" \
+    || fail 'core LAN zone omits mdns'
+  ! grep -Fq '<service name="steam-streaming"/>' <<<"${out_core}" \
+    || fail 'core LAN zone opens Steam streaming'
+  grep -Fq '<source address="192.168.1.0/24"/>' <<<"${out_core}" \
+    || fail 'LAN zone omits the LAN source'
+  grep -Fq '<source address="192.168.2.0/23"/>' <<<"${out_core}" \
+    || fail 'LAN zone omits the SD-WAN source'
+  select_profile full
+  out_full=$(render_lan_zone "${FIREWALL_LAN_SERVICES[@]}")
+  grep -Fq '<service name="steam-streaming"/>' <<<"${out_full}" \
+    || fail 'full LAN zone omits Steam streaming'
+  ! grep -Fq '<service name="navidrome"/>' <<<"${out_full}" \
+    || fail 'Arch full LAN zone opens navidrome (no such package on Arch)'
+)
+
+test_clamav_db_bootstrap() (
+  load_helpers
+  local db=${TEST_ROOT}/clamav-db calls=${TEST_ROOT}/clamav-calls
+  mkdir -p "${db}"
+  : >"${calls}"
+  systemctl() { return 1; }
+  sudo() {
+    printf 'sudo %s\n' "$*" >>"${calls}"
+    [[ $1 == freshclam ]] && touch "${db}/main.cld" "${db}/daily.cld"
+    return 0
+  }
+  bootstrap_clamav_db "${db}" >/dev/null
+  [[ $(<"${calls}") == 'sudo freshclam' ]] \
+    || fail "unexpected Arch bootstrap calls: $(<"${calls}")"
+  : >"${calls}"
+  bootstrap_clamav_db "${db}" >/dev/null
+  [[ ! -s ${calls} ]] || fail 'bootstrap re-ran with the database present'
+  # The freshclam daemon holds the update lock and must be stopped first.
+  rm -f "${db}"/main.cld "${db}"/daily.cld
+  : >"${calls}"
+  systemctl() { [[ $1 == is-active && $3 == clamav-freshclam.service ]] && return 0; return 1; }
+  bootstrap_clamav_db "${db}" >/dev/null
+  grep -qx 'sudo systemctl stop clamav-freshclam.service' "${calls}" \
+    || fail 'bootstrap did not stop the running freshclam daemon'
+  grep -qx 'sudo freshclam' "${calls}" \
+    || fail 'bootstrap did not run freshclam after stopping the daemon'
+)
+
+test_ensure_started_unit() (
+  load_helpers
+  local calls=${TEST_ROOT}/ensure-calls active=1
+  : >"${calls}"
+  systemctl() {
+    case $1 in
+      is-active) return "${active}" ;;
+      start|restart) active=0; return 0 ;;
+    esac
+    return 0
+  }
+  sudo() {
+    printf '%s\n' "$*" >>"${calls}"
+    # Run the (mocked) privileged command so start/restart flips the state.
+    systemctl $2
+    return 0
+  }
+  ensure_started_unit clamav-daemon.service 0 >/dev/null
+  [[ $(<"${calls}") == 'systemctl start clamav-daemon.service' ]] \
+    || fail 'an inactive unit was not started'
+  : >"${calls}"
+  active=0
+  ensure_started_unit clamav-daemon.service 0 >/dev/null
+  [[ ! -s ${calls} ]] || fail 'an unchanged active unit was touched'
+  ensure_started_unit clamav-daemon.service 1 >/dev/null
+  [[ $(<"${calls}") == 'systemctl restart clamav-daemon.service' ]] \
+    || fail 'a changed active unit was not restarted'
+)
+
+test_wazuh_manager_gating() (
+  load_helpers
+  local conf=${TEST_ROOT}/wazuh-ossec.conf calls=${TEST_ROOT}/wazuh-calls
+  cat >"${conf}" <<'EOF'
+<ossec_conf>
+  <client>
+    <server>
+      <address>0.0.0.0</address>
+      <port>1514</port>
+    </server>
+  </client>
+</ossec_conf>
+EOF
+# shellcheck disable=SC2034  # read by the sourced helpers
+  WAZUH_MANAGER=wazuh.lan
+# shellcheck disable=SC2034  # read by the sourced helpers
+  WORK_DIR=${TEST_ROOT}
+  put_file() {
+    [[ $1 == -s ]] && shift
+    cp -- "$1" "$2"
+    # shellcheck disable=SC2034
+    PUT_FILE_CHANGED=1
+  }
+  configure_wazuh_agent "${conf}" >/dev/null
+  grep -Fq '<address>wazuh.lan</address>' "${conf}" \
+    || fail 'the manager address did not land in ossec.conf'
+  grep -Fq '<location>/var/log/audit/audit.log</location>' "${conf}" \
+    || fail 'audit log collection was not appended'
+  grep -Fq '<log_format>journald</log_format>' "${conf}" \
+    || fail 'ClamAV journald collection was not appended'
+  grep -Fq '<location>clamav-media-scan.service</location>' "${conf}" \
+    || fail 'the media-scan unit was not collected'
+  [[ $(tail -n 1 "${conf}") == '</ossec_conf>' ]] \
+    || fail 'the appended stanzas broke the ossec.conf structure'
+  cp -- "${conf}" "${conf}.first"
+  configure_wazuh_agent "${conf}" >/dev/null
+  cmp -s "${conf}" "${conf}.first" \
+    || fail 'configure_wazuh_agent is not idempotent'
+
+  : >"${calls}"
+  systemctl() { return 0; }
+  sudo() { printf '%s\n' "$*" >>"${calls}"; }
+  wazuh_service_action >/dev/null
+  [[ $(<"${calls}") == 'systemctl enable --now wazuh-agent' ]] \
+    || fail 'a configured manager did not enable+start wazuh-agent'
+  : >"${calls}"
+# shellcheck disable=SC2034  # read by the sourced helpers
+  WAZUH_MANAGER=
+  systemctl() {
+    [[ $1 == is-active ]] && return 1
+    [[ $1 == is-enabled ]] && return 0
+    return 0
+  }
+  wazuh_service_action >/dev/null
+  [[ $(<"${calls}") == 'systemctl disable --now wazuh-agent' ]] \
+    || fail 'a missing manager did not disable an enabled wazuh-agent'
+)
+
 test_argument_parsing
 printf 'PASS Arch argument parsing and usage errors\n'
 test_profile_selection
@@ -287,3 +450,11 @@ test_rustup_toolchain
 printf 'PASS Arch rustup stable toolchain reconciliation\n'
 test_no_upgrade_sync_dbs
 printf 'PASS Arch --no-upgrade sync-database guard\n'
+test_security_renders
+printf 'PASS Arch deterministic clamd/LAN-zone rendering with profile gating\n'
+test_clamav_db_bootstrap
+printf 'PASS Arch ClamAV database bootstrap (lock handling, one-time)\n'
+test_ensure_started_unit
+printf 'PASS Arch start-now/restart-on-change unit reconciliation\n'
+test_wazuh_manager_gating
+printf 'PASS Arch manager-gated Wazuh configuration and enablement\n'

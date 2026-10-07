@@ -56,7 +56,28 @@
 #      prompt as /etc/profile.d/01-arch-prompt.sh
 #   9. the service set, graphical.target as default, Cockpit, and automatic
 #      DNF updates with the controller's apply-updates/reboot-when-needed policy
-#  10. publishes ~/.config/monitors.xml to GDM and applies the GDM font setting
+#  10. ClamAV: freshclam daemon + one-time DB bootstrap, clamd@scan with a
+#      real LocalSocket, notify-only on-access scanning of the invoking
+#      user's ~/Downloads, and a mount-table watcher that read-only-scans each
+#      newly mounted USB/removable drive under /run/media (never whole-/home on-access: the
+#      DDD watch cannot follow later mounts, and developer trees are noisy)
+#  11. firewalld: a custom workstation default zone (SSH broadly reachable
+#      because WAN port forwarding is in use; everything else rejected) plus a
+#      source-bound workstation-lan zone for the LAN 192.168.1.0/24 and the
+#      SD-WAN 192.168.2.0/23 with the profile's LAN services
+#  12. auditd with curated high-signal rules (identity/auth files, sudoers,
+#      sshd config, unit/cron/shell-rc persistence, module loads, time
+#      changes, mounts, auditd itself; no per-execve logging)
+#  13. AIDE, scoped to configuration trees (/etc, /usr/local, /root) because
+#      rpm -Va already verifies package-owned files and a whole-tree baseline
+#      would drown in nightly-update noise; database initialized once, daily
+#      check via systemd timer
+#  14. the Wazuh agent (client only) from Wazuh's signed repository: installed
+#      always, but configured for a manager and enabled only when
+#      --wazuh-manager/WAZUH_MANAGER is supplied; the agent version must not
+#      exceed the future manager's, so the repository stays disabled by
+#      default and upgrades never happen implicitly
+#  15. publishes ~/.config/monitors.xml to GDM and applies the GDM font setting
 
 set -euo pipefail
 
@@ -84,6 +105,15 @@ LEGACY_CLAUDE_REPO=/etc/yum.repos.d/claude-code.repo
 LEGACY_CLAUDE_REPO_SHA256=8489cb2a1106315f3f5884a8b3170da6d59ea003635f7852d37e6a121cf71ac3
 LEGACY_CLAUDE_KEY_FILE=/etc/pki/rpm-gpg/ANTHROPIC-CLAUDE-CODE-RPM-GPG-KEY
 LEGACY_CLAUDE_KEY_FINGERPRINT=31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE
+# Wazuh publishes no fingerprint in its documentation; this pin was verified by
+# fetching the key served for their documented rpm --import URL and confirming
+# it is the key that actually signs packages.wazuh.com RPMs (rpm -Kv reports
+# signature key ID 96B3EE5F29111145, the tail of this fingerprint; UID
+# "Wazuh.com (Wazuh Signing Key) <support@wazuh.com>", created 2016-08-01).
+WAZUH_KEY_URL=https://packages.wazuh.com/key/GPG-KEY-WAZUH
+WAZUH_KEY_FINGERPRINT=0DCFCA5547B19D2A6099506096B3EE5F29111145
+WAZUH_KEY_FILE=/etc/pki/rpm-gpg/WAZUH-RPM-GPG-KEY
+WAZUH_MANAGER=${WAZUH_MANAGER:-}
 SINGBOX_REPO_URL=https://sing-box.app/sing-box.repo
 SINGBOX_REPO_FILE=/etc/yum.repos.d/sing-box.repo
 LEGACY_ANTIGRAVITY_REPO=/etc/yum.repos.d/antigravity.repo
@@ -130,8 +160,10 @@ CA_BUNDLE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
 # or @groups
 PKGS=(
   abattis-cantarell-fonts
+  aide
   alsa-lib-devel
   alsa-sof-firmware
+  audit
   autoconf
   automake
   avahi-devel
@@ -145,6 +177,9 @@ PKGS=(
   ccache
   chromium
   chrony
+  clamav
+  clamav-update
+  clamd
   clang
   cmake
   cockpit
@@ -173,6 +208,7 @@ PKGS=(
   elfutils-libelf-devel
   erofs-utils
   ffmpeg-free-devel
+  firewalld
   flatpak
   flex
   fuse
@@ -376,6 +412,7 @@ die()  { printf '\033[1;31m==> ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 usage() {
   cat <<USAGE
 Usage: ${0##*/} [--profile core|full] [--check | --dry-run] [--no-upgrade]
+       [--wazuh-manager HOST]
        ${0##*/} -h|--help
 
 Idempotent Fedora Workstation setup: third-party repos, dnf + flatpak package
@@ -390,6 +427,12 @@ privileged steps); safe to re-run at any time.
                   or writes
   --no-upgrade    install only what is missing; skip system/Flatpak upgrades
                   and keep installed vendor tools at their current version
+  --wazuh-manager HOST
+                  write HOST into the Wazuh agent configuration and enable
+                  plus start wazuh-agent (also via \$WAZUH_MANAGER). Without
+                  it the agent is installed but left disabled: no manager
+                  exists yet, and an agent newer than its manager cannot
+                  connect.
 
 Exit: 0 converged/dry-run, 1 error, 2 drift found by --check.
 USAGE
@@ -412,11 +455,225 @@ while (( $# )); do
       [[ ${MODE} == apply ]] || { usage >&2; die "Choose one of --check or --dry-run"; }
       MODE=${1#--} ;;
     --no-upgrade) NO_UPGRADE=1 ;;
+    --wazuh-manager)
+      (( $# >= 2 )) || { usage >&2; die "--wazuh-manager requires a host name or address"; }
+      WAZUH_MANAGER=$2
+      shift ;;
     *) usage >&2; die "Unknown option: $1" ;;
   esac
   shift
 done
 if [[ ${ARCH} == x86_64 ]]; then IS_X86_64=1; else IS_X86_64=0; fi
+if [[ -n ${WAZUH_MANAGER} && ! ${WAZUH_MANAGER} =~ ^[A-Za-z0-9._:-]+$ ]]; then
+  die "--wazuh-manager must be a host name or address: ${WAZUH_MANAGER}"
+fi
+
+#--- Security helpers (ClamAV, firewalld, auditd, AIDE, Wazuh) --------------
+
+# render_clamd_config <base-config> <downloads-dir>...: print the managed
+# clamd config. clamd.conf has no glob support for OnAccessIncludePath, so the
+# watched directories are generated at apply time from the invoking user's
+# $HOME; apply installs this exact rendering and --check compares against it,
+# keeping drift well-defined.
+render_clamd_config() {
+  local base=$1 path
+  shift
+  cat -- "${base}"
+  printf '# Generated at apply time by setup-fedora-workstation.sh: watched\n'
+  printf '# Downloads directories (realtime coverage is Downloads-only).\n'
+  for path in "$@"; do
+    printf 'OnAccessIncludePath %s\n' "${path}"
+  done
+}
+
+# clamav_db_missing <db-dir>: true while the main or daily definition database
+# is absent (each ships as .cvd or the freshclam-optimized .cld form).
+clamav_db_missing() {
+  local db_dir=$1
+  [[ -f ${db_dir}/main.cvd || -f ${db_dir}/main.cld ]] || return 0
+  [[ -f ${db_dir}/daily.cvd || -f ${db_dir}/daily.cld ]] || return 0
+  return 1
+}
+
+# bootstrap_clamav_db <db-dir>: one-time `sudo freshclam`. The running
+# freshclam daemon holds the update lock, so it is stopped first (and
+# restarted afterwards by the caller's enable+start). Optional dir keeps the
+# mocked test unprivileged.
+# shellcheck disable=SC2120
+bootstrap_clamav_db() {
+  local db_dir=${1:-/var/lib/clamav}
+  if ! clamav_db_missing "${db_dir}"; then
+    note "ClamAV definition database: present"
+    return 0
+  fi
+  log "Bootstrapping the ClamAV definition database (one-time freshclam)"
+  if systemctl is-active --quiet clamav-freshclam.service 2>/dev/null; then
+    sudo systemctl stop clamav-freshclam.service \
+      || die "could not stop clamav-freshclam.service, which holds the freshclam lock"
+  fi
+  sudo freshclam || die "freshclam could not download the initial database"
+  clamav_db_missing "${db_dir}" \
+    && die "freshclam completed but ${db_dir} still lacks the main/daily database"
+  # freshclam runs as the clamupdate user; labels drift when the directory was
+  # first created by root (as our put_file runs do).
+  if command -v restorecon >/dev/null; then
+    sudo restorecon -R "${db_dir}" \
+      || die "could not restore SELinux labels under ${db_dir}"
+  fi
+  note "ClamAV definition database: bootstrapped"
+}
+
+# clamd runs as antivirus_t and may only traverse the filesystem when this
+# boolean is on (off by default); clamonacc itself is unconfined (bin_t).
+ensure_antivirus_selinux_boolean() {
+  local state
+  if ! command -v getsebool >/dev/null; then
+    note "SELinux boolean antivirus_can_scan_system: unverified (getsebool absent)"
+    return 0
+  fi
+  # getsebool also fails outright when SELinux is disabled (not just when
+  # absent); treat both the same so such hosts are neither aborted by apply
+  # nor reported as drifted by --check.
+  state=$(getsebool antivirus_can_scan_system 2>/dev/null) || state=
+  if [[ -z ${state} ]]; then
+    note "SELinux boolean antivirus_can_scan_system: unverified (getsebool failed; SELinux disabled?)"
+    return 0
+  fi
+  if [[ ${state} == *' --> on' ]]; then
+    note "SELinux boolean antivirus_can_scan_system: on"
+    return 0
+  fi
+  sudo setsebool -P antivirus_can_scan_system on \
+    || die "could not enable the antivirus_can_scan_system SELinux boolean"
+  state=$(getsebool antivirus_can_scan_system 2>/dev/null)
+  [[ ${state} == *' --> on' ]] \
+    || die "antivirus_can_scan_system is still off after setsebool"
+  note "SELinux boolean antivirus_can_scan_system: on (set now)"
+}
+
+# ensure_started_unit <unit> <changed>: start the unit now (the user wants
+# protection immediately, unlike the enable-only SERVICES set), restart it
+# only when its configuration actually changed, and fail closed.
+ensure_started_unit() {
+  local unit=$1 changed=$2
+  if systemctl is-active --quiet "${unit}" 2>/dev/null; then
+    if (( changed )); then
+      sudo systemctl restart "${unit}" || die "could not restart ${unit}"
+      note "${unit}: restarted (configuration changed)"
+    else
+      note "${unit}: active"
+    fi
+  else
+    sudo systemctl start "${unit}" || die "could not start ${unit}"
+    note "${unit}: started"
+  fi
+  systemctl is-active --quiet "${unit}" || die "${unit} did not become active"
+}
+
+# render_lan_zone <service>...: print the source-bound workstation-lan zone.
+# The service list is decided by select_profile, so profile-gated ports never
+# open for profiles that do not install the service behind them. Apply
+# installs this exact rendering; --check compares against it.
+render_lan_zone() {
+  local service
+  printf '<?xml version="1.0" encoding="utf-8"?>\n'
+  printf '<zone>\n'
+  printf '  <short>Workstation LAN</short>\n'
+  printf '  <description>Trusted LAN (192.168.1.0/24) and SD-WAN (192.168.2.0/23) sources: services that must never be reachable from the Internet. firewalld classifies each packet into exactly one zone, so SSH is listed here too: LAN peers never fall through to the default workstation zone, which keeps SSH reachable for WAN port forwarding.</description>\n'
+  printf '  <source address="192.168.1.0/24"/>\n'
+  printf '  <source address="192.168.2.0/23"/>\n'
+  for service in "$@"; do
+    printf '  <service name="%s"/>\n' "${service}"
+  done
+  printf '</zone>\n'
+}
+
+# render_wazuh_config <stock-ossec.conf> <manager>: the agent configuration
+# with the manager address applied and local log collection appended: the
+# audit log (Wazuh's audit log format understands the rules above) and the
+# ClamAV journal units (journald collection, Wazuh 4.8+; clamd/clamonacc log
+# via syslog to the journal, so there is no plain file to tail). Pure stdout
+# so --check-style comparisons and tests can render it offline.
+render_wazuh_config() {
+  local conf=$1 manager=$2
+  sed -e "s|<address>[^<]*</address>|<address>${manager}</address>|" -- "${conf}" \
+    | awk '
+        { lines[NR] = $0 }
+        index($0, "/var/log/audit/audit.log") { have_audit = 1 }
+        index($0, "clamav-clamonacc.service") { have_clamav = 1 }
+        END {
+          stanza_audit = \
+            "  <localfile>\n" \
+            "    <log_format>audit</log_format>\n" \
+            "    <location>/var/log/audit/audit.log</location>\n" \
+            "  </localfile>"
+          stanza_clamav = \
+            "  <localfile>\n" \
+            "    <log_format>journald</log_format>\n" \
+            "    <location>clamav-clamonacc.service</location>\n" \
+            "  </localfile>\n" \
+            "  <localfile>\n" \
+            "    <log_format>journald</log_format>\n" \
+            "    <location>clamav-media-scan.service</location>\n" \
+            "  </localfile>"
+          for (i = NR; i >= 1; i--)
+            if (lines[i] == "</ossec_conf>") break
+          for (j = 1; j <= NR; j++) {
+            if (j == i) {
+              if (!have_audit) print stanza_audit
+              if (!have_clamav) print stanza_clamav
+            }
+            print lines[j]
+          }
+        }'
+}
+
+# Install the rendered ossec.conf. Split from render_wazuh_config so the
+# manager-gated enable logic stays testable without /var/ossec.
+# shellcheck disable=SC2120
+configure_wazuh_agent() {
+  local conf=${1:-/var/ossec/etc/ossec.conf}
+  local rendered=${WORK_DIR}/ossec.conf
+  local count
+  [[ -f ${conf} ]] || die "the Wazuh agent configuration ${conf} is missing"
+  count=$(grep -c '<address>' -- "${conf}" || true)
+  # The stock agent ossec.conf has exactly one <address> (the manager entry
+  # under <client><server>); a different layout means someone customized it
+  # and blind editing could corrupt it.
+  (( count == 1 )) \
+    || die "unexpected Wazuh agent configuration (${count} <address> elements in ${conf}); configure it manually"
+  render_wazuh_config "${conf}" "${WAZUH_MANAGER}" >"${rendered}"
+  put_file -s "${rendered}" "${conf}"
+  grep -Fq "<address>${WAZUH_MANAGER}</address>" -- "${conf}" \
+    || die "the manager address did not land in ${conf}"
+  # The awk append silently no-ops when </ossec_conf> is missing, so verify
+  # the audit-log stanza landed too instead of trusting the rendering.
+  grep -Fq '<location>/var/log/audit/audit.log</location>' -- "${conf}" \
+    || die "the audit log collection stanza did not land in ${conf}"
+}
+
+# wazuh_service_action: enable+start the agent for a configured manager, or
+# disable+stop it when none is (a running agent would only log connection
+# failures, and an enrolled-but-orphaned agent is worse than a disabled one).
+# Split out so the manager gating is testable with a mocked systemctl.
+wazuh_service_action() {
+  if [[ -n ${WAZUH_MANAGER} ]]; then
+    sudo systemctl enable --now wazuh-agent \
+      || die "could not enable wazuh-agent for manager ${WAZUH_MANAGER}"
+    systemctl is-active --quiet wazuh-agent \
+      || die "wazuh-agent did not become active for manager ${WAZUH_MANAGER}"
+    note "wazuh-agent: configured for ${WAZUH_MANAGER} and started"
+  else
+    if systemctl is-enabled --quiet wazuh-agent 2>/dev/null \
+       || systemctl is-active --quiet wazuh-agent 2>/dev/null; then
+      sudo systemctl disable --now wazuh-agent \
+        || die "could not disable wazuh-agent (no manager configured)"
+    fi
+    ! systemctl is-active --quiet wazuh-agent 2>/dev/null \
+      || die "wazuh-agent is still active without a configured manager"
+    note "wazuh-agent: left disabled (no --wazuh-manager supplied)"
+  fi
+}
 
 #--- Helpers ----------------------------------------------------------------
 # put_file [-s] <src> <dst> [mode]
@@ -1435,6 +1692,28 @@ keep_installed() {
   note "${1#rpm:}: installed; kept at its current version (--no-upgrade)"
 }
 
+# Fedora 45's protobuf3-c compat package Obsoletes protobuf-c < 1.5.2-52 even
+# though protobuf-c 1.5.2-5 is the current library, so an earlier upgrade may
+# already have replaced protobuf-c (x86_64 and i686) and protobuf-c-devel can
+# then never install. Swap it back once. obsoletes=0 lets protobuf-c beat the
+# installed obsoleter; disable_excludes lets the transaction see the package
+# that files/etc/dnf/libdnf5.conf.d/80-protobuf3-c.conf hides from every other
+# run. DNF pulls protobuf-c.i686 back in for the 32-bit libprotobuf-c users.
+restore_protobuf_c() {
+  if ! rpm -q --quiet protobuf3-c 2>/dev/null; then
+    note "protobuf3-c: absent"
+    return 0
+  fi
+  sudo dnf -y --setopt=obsoletes=0 --setopt=disable_excludes='*' \
+    swap protobuf3-c protobuf-c \
+    || die "could not replace protobuf3-c with protobuf-c"
+  ! rpm -q --quiet protobuf3-c 2>/dev/null \
+    || die "protobuf3-c is still installed"
+  rpm -q --quiet protobuf-c 2>/dev/null \
+    || die "protobuf-c was not installed in place of protobuf3-c"
+  note "protobuf3-c replaced by protobuf-c"
+}
+
 # Per-user rustup is the only Rust source on every platform: distro rust/cargo
 # packages are purged first (only Rust-family packages depend on them).
 purge_distro_rust() {
@@ -1479,6 +1758,7 @@ SELECTED_FLATPAKS=()
 SELECTED_SERVICES=()
 SELECTED_REPOS=()
 SELECTED_TOOLS=()
+FIREWALL_LAN_SERVICES=()
 MANAGED_FILES=()
 RUST_COMPONENTS=(rustfmt clippy rust-analyzer)
 DISTRO_RUST_PKGS=(rust cargo clippy rustfmt rust-analyzer rust-std-static rust-src
@@ -1493,9 +1773,25 @@ select_profile() {
     SELECTED_REPOS+=("copr:copr.fedorainfracloud.org:${copr/\//:}")
   done
   SELECTED_TOOLS=(antigravity agy opencode claude codex zed speedtest)
+  # LAN-reachable services for the source-bound workstation-lan zone. Only
+  # services whose server the profile actually installs are opened. SSH is
+  # listed too: firewalld puts each packet in exactly one zone, so LAN peers
+  # never fall through to the default workstation zone (where SSH stays
+  # broadly reachable for WAN port forwarding) and would otherwise be
+  # rejected. GNOME Remote Desktop (rdp) and Cockpit are core; iperf3 ships
+  # in the core package set.
+  FIREWALL_LAN_SERVICES=(ssh cockpit rdp ipp-client mdns iperf3)
+  # Config payloads as source under files/|destination (no owner/mode fields:
+  # --check only compares content). The *rendered* security configs
+  # (/etc/clamd.d/scan.conf, /etc/firewalld/zones/workstation-lan.xml, and
+  # /var/ossec/etc/ossec.conf, all generated from the invoking user's HOME,
+  # the selected profile, or the Wazuh manager) are deliberately not listed
+  # here; they have dedicated apply and check logic around
+  # render_clamd_config, render_lan_zone, and configure_wazuh_agent instead.
   MANAGED_FILES=(
     "etc/yum.repos.d/vscode.repo|/etc/yum.repos.d/vscode.repo"
     "etc/yum.repos.d/google-chrome.repo|/etc/yum.repos.d/google-chrome.repo"
+    "etc/yum.repos.d/wazuh.repo|/etc/yum.repos.d/wazuh.repo"
     "bashrc|${HOME}/.bashrc"
     "vimrc|${HOME}/.vimrc"
     "etc/locale.conf|/etc/locale.conf"
@@ -1503,7 +1799,22 @@ select_profile() {
     "etc/systemd/zram-generator.conf|/etc/systemd/zram-generator.conf"
     "etc/bash.bashrc|/etc/profile.d/01-arch-prompt.sh"
     "etc/dnf/automatic.conf|/etc/dnf/automatic.conf"
+    "etc/dnf/libdnf5.conf.d/80-protobuf3-c.conf|/etc/dnf/libdnf5.conf.d/80-protobuf3-c.conf"
     "etc/dconf/db/gdm.d/10-font-settings|/etc/dconf/db/gdm.d/10-font-settings"
+    "etc/audit/rules.d/50-workstation.rules|/etc/audit/rules.d/50-workstation.rules"
+    "etc/aide.conf|/etc/aide.conf"
+    "etc/firewalld/zones/workstation.xml|/etc/firewalld/zones/workstation.xml"
+    "etc/firewalld/services/navidrome.xml|/etc/firewalld/services/navidrome.xml"
+    "etc/firewalld/services/owntone.xml|/etc/firewalld/services/owntone.xml"
+    "etc/firewalld/services/plexmediaserver.xml|/etc/firewalld/services/plexmediaserver.xml"
+    "etc/firewalld/services/steam-streaming.xml|/etc/firewalld/services/steam-streaming.xml"
+    "etc/firewalld/services/transmission.xml|/etc/firewalld/services/transmission.xml"
+    "etc/firewalld/services/iperf3.xml|/etc/firewalld/services/iperf3.xml"
+    "etc/systemd/system/clamav-clamonacc.service.d/50-fedora-workstation.conf|/etc/systemd/system/clamav-clamonacc.service.d/50-fedora-workstation.conf"
+    "etc/systemd/system/clamav-media-scan.service|/etc/systemd/system/clamav-media-scan.service"
+    "usr/local/libexec/clamav-media-scan|/usr/local/libexec/clamav-media-scan"
+    "etc/systemd/system/aide-check.service|/etc/systemd/system/aide-check.service"
+    "etc/systemd/system/aide-check.timer|/etc/systemd/system/aide-check.timer"
   )
   if (( IS_X86_64 )); then
     SELECTED_PKGS+=("${PKGS_X86_64[@]}")
@@ -1521,10 +1832,16 @@ select_profile() {
     SELECTED_FLATPAKS+=("${FLATPAKS_FULL[@]}")
     SELECTED_SERVICES+=("${SERVICES_FULL[@]}")
     SELECTED_TOOLS+=(navidrome owntone)
+    # Media servers join the LAN zone with the profile that installs them;
+    # transmission-daemon's RPC/peer ports are full-profile only as well.
+    FIREWALL_LAN_SERVICES+=(navidrome owntone transmission)
     if (( IS_X86_64 )); then
       SELECTED_PKGS+=("${PKGS_FULL_X86_64[@]}")
       SELECTED_SERVICES+=("${SERVICES_FULL_X86_64[@]}")
       SELECTED_REPOS+=(rpmfusion-nonfree-steam PlexTv)
+      # Plex publishes x86_64 RPMs only; Steam's i686 stack is x86_64-only,
+      # and so is its in-home streaming surface.
+      FIREWALL_LAN_SERVICES+=(plexmediaserver steam-streaming)
       MANAGED_FILES+=(
         "etc/yum.repos.d/rpmfusion-nonfree-steam.repo|/etc/yum.repos.d/rpmfusion-nonfree-steam.repo"
         "etc/yum.repos.d/plex.repo|/etc/yum.repos.d/plex.repo"
@@ -1542,6 +1859,7 @@ print_plan() {
   printf 'PLAN: enable %d repositories:\n' "${#SELECTED_REPOS[@]}"
   printf '  %s\n' "${SELECTED_REPOS[@]}"
   printf 'PLAN: CA-bundle symlinks /etc/ssl/certs/ca-certificates.crt, /etc/pki/tls/certs/ca-bundle.crt\n'
+  printf 'PLAN: exclude protobuf3-c* from DNF; swap an installed protobuf3-c back to protobuf-c\n'
   printf 'PLAN: dnf install %d entries:\n' "${#SELECTED_PKGS[@]}"
   printf '  %s\n' "${SELECTED_PKGS[@]}"
   printf 'PLAN: native vendor tools (%s):\n' \
@@ -1558,6 +1876,15 @@ print_plan() {
   printf 'PLAN: enable %d services:\n' "${#SELECTED_SERVICES[@]}"
   printf '  %s\n' "${SELECTED_SERVICES[@]}"
   printf 'PLAN: graphical.target default, cockpit.socket, dnf5-automatic.timer\n'
+  printf 'PLAN: ClamAV: freshclam daemon + one-time DB bootstrap, clamd@scan,\n'
+  printf '      notify-only on-access for ~/Downloads, /run/media mount watcher (read-only scans)\n'
+  printf 'PLAN: firewalld workstation default zone (ssh, dhcpv6-client, mdns; reject\n'
+  printf '      otherwise) + workstation-lan source zone (192.168.1.0/24, 192.168.2.0/23):\n'
+  printf '  %s\n' "${FIREWALL_LAN_SERVICES[*]}"
+  printf 'PLAN: auditd with curated high-signal rules (no per-execve logging)\n'
+  printf 'PLAN: AIDE baseline over /etc, /usr/local, /root (initialized once; daily check timer)\n'
+  printf 'PLAN: Wazuh agent from the disabled-by-default wazuh repo%s\n' \
+    "$( if [[ -n ${WAZUH_MANAGER} ]]; then printf ', configured for %s and enabled' "${WAZUH_MANAGER}"; else printf '; left disabled (pass --wazuh-manager)'; fi )"
   printf 'PLAN: publish ~/.config/monitors.xml to GDM when present; dconf update\n'
 }
 
@@ -1569,6 +1896,64 @@ check_report() {
 
 package_present() {
   rpm -q --quiet -- "$1" 2>/dev/null || rpm -q --quiet --whatprovides -- "$1" 2>/dev/null
+}
+
+# check_security_state: read-only mirror of the security steps (split out so
+# tests can stub the parts that need a live system). Rendered files are
+# compared against the same deterministic rendering the apply steps install.
+check_security_state() {
+  local unit state
+  if cmp -s \
+      <(render_clamd_config "${FILES}/etc/clamd.d/scan.conf" "${HOME}/Downloads") \
+      /etc/clamd.d/scan.conf; then
+    check_report CURRENT "file /etc/clamd.d/scan.conf (rendered)"
+  else
+    check_report DRIFT "file /etc/clamd.d/scan.conf (rendered)"
+  fi
+  if cmp -s <(render_lan_zone "${FIREWALL_LAN_SERVICES[@]}") \
+      /etc/firewalld/zones/workstation-lan.xml; then
+    check_report CURRENT "file /etc/firewalld/zones/workstation-lan.xml (rendered)"
+  else
+    check_report DRIFT "file /etc/firewalld/zones/workstation-lan.xml (rendered)"
+  fi
+  for unit in clamav-freshclam.service clamd@scan.service clamav-clamonacc.service \
+              clamav-media-scan.service firewalld.service auditd.service aide-check.timer; do
+    if systemctl is-enabled --quiet "${unit}" 2>/dev/null; then
+      check_report CURRENT "unit ${unit}"
+    else
+      check_report DRIFT "unit ${unit}"
+    fi
+  done
+  if command -v getsebool >/dev/null; then
+    # A failing getsebool (SELinux disabled) is a NOTE, not drift.
+    state=$(getsebool antivirus_can_scan_system 2>/dev/null) || state=
+    if [[ -z ${state} ]]; then
+      check_report NOTE "SELinux boolean antivirus_can_scan_system: unverified (getsebool failed; SELinux disabled?)"
+    elif [[ ${state} == *' --> on' ]]; then
+      check_report CURRENT "SELinux boolean antivirus_can_scan_system"
+    else
+      check_report DRIFT "SELinux boolean antivirus_can_scan_system"
+    fi
+  fi
+  # /var/lib/aide is root-only (0700), so an unprivileged test always fails;
+  # ask sudo non-interactively and say so when it cannot answer.
+  if sudo -n test -f /var/lib/aide/aide.db.gz 2>/dev/null; then
+    check_report CURRENT "AIDE database"
+  elif sudo -n true 2>/dev/null; then
+    check_report NOTE "AIDE database: initialized on the next apply"
+  else
+    check_report NOTE "AIDE database: unverified (root-only /var/lib/aide; run sudo -v first)"
+  fi
+  if [[ -n ${WAZUH_MANAGER} ]]; then
+    package_present wazuh-agent \
+      && check_report CURRENT "package wazuh-agent" \
+      || check_report DRIFT "package wazuh-agent"
+    systemctl is-enabled --quiet wazuh-agent 2>/dev/null \
+      && check_report CURRENT "unit wazuh-agent" \
+      || check_report DRIFT "unit wazuh-agent"
+  else
+    check_report NOTE "wazuh-agent: manager not configured (pass --wazuh-manager to enable)"
+  fi
 }
 
 check_state() {
@@ -1634,6 +2019,8 @@ check_state() {
     || check_report DRIFT "package claude-code: installed (replaced by the native install)"
   [[ ! -e ${LEGACY_CLAUDE_REPO} ]] \
     || check_report DRIFT "file ${LEGACY_CLAUDE_REPO}: present (retired)"
+  ! rpm -q --quiet protobuf3-c 2>/dev/null \
+    || check_report DRIFT "package protobuf3-c: installed (obsoletes protobuf-c; swapped back)"
   for id in "${SELECTED_FLATPAKS[@]}"; do
     if flatpak info --system "${id}" >/dev/null 2>&1; then
       check_report CURRENT "flatpak ${id}"
@@ -1668,6 +2055,7 @@ check_state() {
   else
     check_report DRIFT "default target graphical.target"
   fi
+  check_security_state
   if (( CHECK_DRIFT )); then
     printf 'Result: drift found\n'
     return 2
@@ -1831,7 +2219,22 @@ else
   note "${SINGBOX_REPO_FILE}: enabled now"
 fi
 
+# Wazuh agent repository. Deliberately enabled=0 (see files/etc/yum.repos.d/
+# wazuh.repo): an agent newer than its manager cannot connect, and Wazuh's own
+# documentation recommends keeping the repository disabled so the agent only
+# moves when the manager does. The install step below uses --enablerepo.
+import_rpm_key "${WAZUH_KEY_URL}" 'Wazuh.com' \
+  "${WAZUH_KEY_FINGERPRINT}" "${WAZUH_KEY_FILE}"
+put_file -s "${FILES}/etc/yum.repos.d/wazuh.repo" /etc/yum.repos.d/wazuh.repo
+
 #--- 3. Packages ------------------------------------------------------------
+# Before any upgrade: Fedora 45's protobuf3-c would otherwise obsolete
+# protobuf-c again and make protobuf-c-devel uninstallable.
+log "protobuf-c (Fedora 45 protobuf3-c obsolete workaround)"
+put_file -s "${FILES}/etc/dnf/libdnf5.conf.d/80-protobuf3-c.conf" \
+  /etc/dnf/libdnf5.conf.d/80-protobuf3-c.conf
+restore_protobuf_c
+
 if (( NO_UPGRADE )); then
   log "Skipping DNF package updates (--no-upgrade)"
 else
@@ -1991,7 +2394,221 @@ log "Automatic OS updates (apply updates, reboot when needed)"
 put_file -s "${FILES}/etc/dnf/automatic.conf" /etc/dnf/automatic.conf
 sudo systemctl enable --now dnf5-automatic.timer
 
-#--- 10. GDM ----------------------------------------------------------------
+#--- 10. ClamAV --------------------------------------------------------------
+# Light footprint by design: realtime coverage for ~/Downloads (where browser
+# downloads land) plus newly mounted removable media, not all of /home.
+# Everything is notify-only; nothing is ever blocked or quarantined
+# automatically.
+log "ClamAV (freshclam, clamd@scan, Downloads on-access, media scan)"
+CLAMD_CONF_CHANGED=0
+CLAMONACC_CONF_CHANGED=0
+SYSTEMD_RELOAD=0
+render_clamd_config "${FILES}/etc/clamd.d/scan.conf" "${HOME}/Downloads" \
+  >"${WORK_DIR}/clamd-scan.conf"
+put_file -s "${WORK_DIR}/clamd-scan.conf" /etc/clamd.d/scan.conf
+(( PUT_FILE_CHANGED )) && CLAMD_CONF_CHANGED=1
+put_file -s "${FILES}/etc/systemd/system/clamav-clamonacc.service.d/50-fedora-workstation.conf" /etc/systemd/system/clamav-clamonacc.service.d/50-fedora-workstation.conf
+(( PUT_FILE_CHANGED )) && CLAMONACC_CONF_CHANGED=1 SYSTEMD_RELOAD=1
+MEDIA_SCAN_CHANGED=0
+put_file -s "${FILES}/usr/local/libexec/clamav-media-scan" \
+  /usr/local/libexec/clamav-media-scan 0755
+(( PUT_FILE_CHANGED )) && MEDIA_SCAN_CHANGED=1
+put_file -s "${FILES}/etc/systemd/system/clamav-media-scan.service" \
+  /etc/systemd/system/clamav-media-scan.service
+(( PUT_FILE_CHANGED )) && MEDIA_SCAN_CHANGED=1 SYSTEMD_RELOAD=1
+# Earlier revisions triggered the scan from a clamav-media-scan.path unit,
+# which only ever saw /run/media/<user> being created (the first drive per
+# boot); the long-running watcher service replaces it.
+if [[ -e /etc/systemd/system/clamav-media-scan.path ]]; then
+  sudo systemctl disable --now clamav-media-scan.path 2>/dev/null || true
+  sudo rm -f /etc/systemd/system/clamav-media-scan.path
+  SYSTEMD_RELOAD=1
+  note "clamav-media-scan.path: retired (replaced by the watcher service)"
+fi
+if (( SYSTEMD_RELOAD )); then
+  sudo systemctl daemon-reload
+fi
+ensure_antivirus_selinux_boolean
+# The DB bootstrap must precede the clamd start: clamd@scan blocks in its
+# start job until the database is loaded, and with no database it fails.
+bootstrap_clamav_db /var/lib/clamav
+enable_unit clamav-freshclam.service
+enable_unit clamd@scan.service
+enable_unit clamav-clamonacc.service
+ensure_started_unit clamav-freshclam.service 0
+# Restarting clamd propagates a stop to clamonacc (Requires=), so clamonacc is
+# only restarted here when its own drop-in changed; otherwise the start below
+# converges it after a clamd restart - no double restart.
+ensure_started_unit clamd@scan.service "${CLAMD_CONF_CHANGED}"
+ensure_started_unit clamav-clamonacc.service "${CLAMONACC_CONF_CHANGED}"
+enable_unit clamav-media-scan.service
+ensure_started_unit clamav-media-scan.service "${MEDIA_SCAN_CHANGED}"
+
+#--- 11. Firewall ------------------------------------------------------------
+# See the zone files under files/etc/firewalld/ for the policy. libvirt and
+# podman manage their own zones (libvirt/trusted on virbr0/podman*) and are
+# deliberately left alone.
+log "Firewall (firewalld: workstation default + workstation-lan source zone)"
+FIREWALL_CHANGED=0
+put_file -s "${FILES}/etc/firewalld/zones/workstation.xml" \
+  /etc/firewalld/zones/workstation.xml
+(( PUT_FILE_CHANGED )) && FIREWALL_CHANGED=1
+render_lan_zone "${FIREWALL_LAN_SERVICES[@]}" >"${WORK_DIR}/workstation-lan.xml"
+put_file -s "${WORK_DIR}/workstation-lan.xml" /etc/firewalld/zones/workstation-lan.xml
+(( PUT_FILE_CHANGED )) && FIREWALL_CHANGED=1
+# The service definitions are installed unconditionally: a definition only
+# names ports, the rendered workstation-lan zone decides which are actually
+# opened for the selected profile.
+put_file -s "${FILES}/etc/firewalld/services/navidrome.xml" /etc/firewalld/services/navidrome.xml
+(( PUT_FILE_CHANGED )) && FIREWALL_CHANGED=1
+put_file -s "${FILES}/etc/firewalld/services/owntone.xml" /etc/firewalld/services/owntone.xml
+(( PUT_FILE_CHANGED )) && FIREWALL_CHANGED=1
+put_file -s "${FILES}/etc/firewalld/services/plexmediaserver.xml" /etc/firewalld/services/plexmediaserver.xml
+(( PUT_FILE_CHANGED )) && FIREWALL_CHANGED=1
+put_file -s "${FILES}/etc/firewalld/services/steam-streaming.xml" /etc/firewalld/services/steam-streaming.xml
+(( PUT_FILE_CHANGED )) && FIREWALL_CHANGED=1
+put_file -s "${FILES}/etc/firewalld/services/transmission.xml" /etc/firewalld/services/transmission.xml
+(( PUT_FILE_CHANGED )) && FIREWALL_CHANGED=1
+put_file -s "${FILES}/etc/firewalld/services/iperf3.xml" /etc/firewalld/services/iperf3.xml
+(( PUT_FILE_CHANGED )) && FIREWALL_CHANGED=1
+enable_unit firewalld.service
+systemctl is-active --quiet firewalld.service || sudo systemctl start firewalld.service
+systemctl is-active --quiet firewalld.service \
+  || die "firewalld did not become active"
+if [[ $(firewall-cmd --get-default-zone 2>/dev/null) == workstation ]]; then
+  note "default zone: workstation"
+else
+  sudo firewall-cmd --set-default-zone workstation
+  [[ $(firewall-cmd --get-default-zone 2>/dev/null) == workstation ]] \
+    || die "could not make workstation the default firewalld zone"
+  note "default zone: workstation (set now)"
+fi
+# Fedora Workstation ships the permissive FedoraWorkstation zone
+# (1025-65535/tcp open) as the effective default; move every interface that
+# landed in a stock general-purpose zone into workstation so the reject policy
+# actually covers them. Virtualization/container interfaces stay put.
+STOCK_ZONES='FedoraWorkstation block dmz drop external home internal public trusted work'
+while read -r zone interface; do
+  [[ -n ${zone} && -n ${interface} ]] || continue
+  if grep -qw "${zone}" <<<"${STOCK_ZONES}"; then
+    # --permanent only, and deliberately so: NetworkManager-owned interfaces
+    # take their zone from the NM connection profile instead (reconciled in
+    # the nmcli step below), while interfaces NM does not own get an
+    # <interface> entry persisted into the managed workstation.xml here --
+    # acceptable drift that --check reports for that zone file.
+    sudo firewall-cmd --permanent --zone=workstation --change-interface="${interface}"
+    FIREWALL_CHANGED=1
+    note "${interface}: moved from ${zone} to workstation"
+  fi
+done < <(firewall-cmd --get-active-zones 2>/dev/null | awk '
+  /^[^ ]/ { zone = $1; next }
+  /^  interfaces:/ { sub(/^  interfaces: */, ""); for (i = 1; i <= NF; i++) print zone, $i }
+')
+# NetworkManager pins a connection to its zone when one is set explicitly;
+# clear pins to retired stock zones so re-activations follow the new default.
+if command -v nmcli >/dev/null; then
+  while read -r connection zone; do
+    [[ -n ${connection} && -n ${zone} ]] || continue
+    if grep -qw "${zone}" <<<"${STOCK_ZONES}"; then
+      sudo nmcli connection modify "${connection}" connection.zone ""
+      note "connection ${connection}: zone pin ${zone} cleared"
+    fi
+  done < <(nmcli -g NAME,connection.zone connection show 2>/dev/null \
+    | awk -F: 'length($2) > 0 { print $1, $2 }')
+fi
+if (( FIREWALL_CHANGED )); then
+  sudo firewall-cmd --reload
+  note "firewalld reloaded"
+fi
+# Fail closed: verify the effective policy.
+[[ $(firewall-cmd --get-default-zone 2>/dev/null) == workstation ]] \
+  || die "the default firewalld zone is not workstation"
+for lan_source in 192.168.1.0/24 192.168.2.0/23; do
+  firewall-cmd --zone=workstation-lan --list-sources 2>/dev/null \
+    | grep -qw "${lan_source}" \
+    || die "workstation-lan does not include ${lan_source}"
+done
+while read -r zone interface; do
+  [[ -n ${zone} && -n ${interface} ]] || continue
+  grep -qw "${zone}" <<<"${STOCK_ZONES}" \
+    && die "${interface} is still in the stock zone ${zone}"
+done < <(firewall-cmd --get-active-zones 2>/dev/null | awk '
+  /^[^ ]/ { zone = $1; next }
+  /^  interfaces:/ { sub(/^  interfaces: */, ""); for (i = 1; i <= NF; i++) print zone, $i }
+')
+note "workstation-lan services: ${FIREWALL_LAN_SERVICES[*]}"
+
+#--- 12. auditd --------------------------------------------------------------
+log "auditd (curated high-signal rules)"
+AUDIT_RULES_CHANGED=0
+put_file -s "${FILES}/etc/audit/rules.d/50-workstation.rules" \
+  /etc/audit/rules.d/50-workstation.rules
+(( PUT_FILE_CHANGED )) && AUDIT_RULES_CHANGED=1
+enable_unit auditd.service
+# Started now (not merely enabled): the rules only protect once loaded.
+systemctl is-active --quiet auditd.service || sudo systemctl start auditd.service
+systemctl is-active --quiet auditd.service || die "auditd did not become active"
+if (( AUDIT_RULES_CHANGED )); then
+  sudo augenrules --load || die "could not load the audit rules"
+  # The watch rules above show up as key-tagged entries in auditctl -l.
+  sudo auditctl -l 2>/dev/null | grep -q 'key=identity' \
+    || die "the identity audit rules are not loaded (auditctl -l)"
+  note "audit rules loaded"
+fi
+
+#--- 13. AIDE ----------------------------------------------------------------
+log "AIDE (configuration integrity baseline)"
+AIDE_UNIT_CHANGED=0
+put_file -s "${FILES}/etc/aide.conf" /etc/aide.conf
+put_file -s "${FILES}/etc/systemd/system/aide-check.service" \
+  /etc/systemd/system/aide-check.service
+(( PUT_FILE_CHANGED )) && AIDE_UNIT_CHANGED=1
+put_file -s "${FILES}/etc/systemd/system/aide-check.timer" \
+  /etc/systemd/system/aide-check.timer
+(( PUT_FILE_CHANGED )) && AIDE_UNIT_CHANGED=1
+(( AIDE_UNIT_CHANGED )) && sudo systemctl daemon-reload
+# /var/lib/aide is root-only (0700): every existence test goes through sudo.
+if ! sudo test -f /var/lib/aide/aide.db.gz; then
+  # One-time baseline. Deliberately not re-run after updates: see the scope
+  # rationale in files/etc/aide.conf (rpm -Va covers packaged files).
+  sudo aide --init || die "could not initialize the AIDE database"
+  sudo test -f /var/lib/aide/aide.db.new.gz \
+    || die "aide --init did not produce /var/lib/aide/aide.db.new.gz"
+  sudo mv /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz \
+    || die "could not activate the AIDE database"
+  if command -v restorecon >/dev/null; then
+    sudo restorecon /var/lib/aide/aide.db.gz \
+      || die "could not restore the SELinux label on the AIDE database"
+  fi
+  note "AIDE database initialized (configuration scope)"
+else
+  note "AIDE database: present"
+fi
+sudo systemctl enable --now aide-check.timer
+systemctl is-active --quiet aide-check.timer \
+  || die "aide-check.timer did not become active"
+
+#--- 14. Wazuh agent ---------------------------------------------------------
+log "Wazuh agent (client only)"
+if ! rpm -q --quiet wazuh-agent 2>/dev/null; then
+  # The repository is disabled by default (version pinning; see 1b), so the
+  # agent is pulled in explicitly. wazuh-agent publishes x86_64 and aarch64
+  # RPMs, so both Fedora architectures install it.
+  sudo dnf -y --enablerepo=wazuh install wazuh-agent \
+    || die "could not install wazuh-agent from the (pinned) Wazuh repository"
+  rpm -q --quiet wazuh-agent || die "wazuh-agent did not install"
+  note "wazuh-agent installed"
+else
+  note "wazuh-agent: installed"
+fi
+if [[ -n ${WAZUH_MANAGER} ]]; then
+  configure_wazuh_agent
+  wazuh_service_action
+else
+  wazuh_service_action
+fi
+
+#--- 15. GDM -----------------------------------------------------------------
 log "GDM"
 # Give the login screen the user's monitor layout
 if [[ -f ${HOME}/.config/monitors.xml ]]; then

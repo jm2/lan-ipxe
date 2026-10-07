@@ -7,3 +7,4 @@ custom_archiso/
 *.iso
 *.img
 *.raw
+__pycache__/

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>OwnTone</short>
+  <description>OwnTone (forked-daapd) DAAP/web interface and its MPD control
+socket.</description>
+  <port protocol="tcp" port="3689"/>
+  <port protocol="tcp" port="6600"/>
+</service>

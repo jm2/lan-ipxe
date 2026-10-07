@@ -52,6 +52,7 @@ jobs:
           tests/test-controller-release-updates.sh
           tests/test-antigravity-migration.sh
           tests/test-workstation-shell-helpers.sh
+          tests/test-scanner-helpers.sh
           tests/test-arch-profiles.sh
           tests/test-fedora-profiles.sh
           tests/test-pacman-update.sh

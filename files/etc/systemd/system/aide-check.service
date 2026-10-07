@@ -1,0 +1,20 @@
+# Managed by setup-{fedora,arch}-workstation.sh. Read-only integrity check;
+# the report lands in the journal (journalctl -u aide-check.service).
+[Unit]
+Description=Daily AIDE configuration integrity check
+Documentation=man:aide(1)
+# AIDE needs its database; the setup script initializes it before enabling
+# the timer, so a missing database here is a real error worth failing on.
+ConditionPathExists=/var/lib/aide/aide.db.gz
+After=local-fs.target
+
+[Service]
+Type=oneshot
+# Bare name: systemd resolves ExecStart against /usr/sbin:/usr/bin, covering
+# Fedora (/usr/sbin/aide) and Arch (/usr/bin/aide) with one unit.
+ExecStart=aide --check
+# Findings must be visible, never auto-rebaselined (see /etc/aide.conf).
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only

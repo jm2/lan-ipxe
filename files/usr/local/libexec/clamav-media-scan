@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+#
+# Read-only ClamAV scan of removable media mounted under /run/media (udisks
+# mounts user-removable drives at /run/media/<user>/<label>). Run by
+# clamav-media-scan.service as `clamav-media-scan --watch`, which scans what is
+# already mounted and then follows the mount table (findmnt --poll) so every
+# later mount is scanned too; without --watch it scans once and exits, which is
+# safe to run by hand. A systemd .path unit cannot do this job: inotify on
+# /run/media only sees /run/media/<user> being created once, never the
+# per-drive mount points one level below it.
+#
+# Design constraints (see the workstation setup scripts that install this):
+#   * Read-only: never --remove/--move/--copy. Detections are logged to the
+#     journal and, best effort, shown to the logged-in desktop user. Removing
+#     files from a user's USB drive automatically is data loss waiting to
+#     happen on a false positive.
+#   * No endless rescans: each distinct filesystem (by mount path + UUID) is
+#     scanned once. The stamp survives reboot and replug, so re-inserting an
+#     already scanned drive does not rescan it; reformatting the drive (new
+#     UUID) or changing its label (new mount path) scans it again.
+#   * Multiple mounts: every unscanned mount under /run/media is handled, so
+#     several drives plugged in at once each get a scan.
+#   * Unprivileged reads: clamdscan --fdpass passes open file descriptors to
+#     the clamd daemon, which can otherwise not traverse 0700 user-owned
+#     mount trees.
+#
+# Notification limitation: a system service has no seat/session environment.
+# Detections are always logged to the journal (journalctl -u
+# clamav-media-scan). The desktop notification additionally runs notify-send
+# inside each logged-in user's user manager via systemd-run --machine; if that
+# user manager lacks a session bus at that moment the notification silently
+# fails and the journal remains the source of truth.
+
+set -euo pipefail
+
+MEDIA_ROOT=/run/media
+STATEDIR=/var/lib/clamav-media-scan
+CLAMDSCAN=(clamdscan --fdpass --multiscan --infected)
+
+log() { printf '%s\n' "$*"; }
+
+# StateDirectory= in clamav-media-scan.service creates this; the install keeps
+# manual runs working.
+install -d -m 0755 -- "${STATEDIR}"
+
+# stamp_key <mountpoint> <uuid>: stable identity for a scanned filesystem.
+stamp_key() {
+  if [[ -n ${2} ]]; then
+    printf '%s-%s' "${1#/}" "${2}"
+  else
+    printf '%s' "${1#/}"
+  fi | tr -c 'A-Za-z0-9_.-' '_'
+}
+
+# notify_users <message>: best-effort desktop notification to every user with
+# a login session (their user manager exists under /run/user).
+notify_users() {
+  local message=$1 user_dir user
+  for user_dir in /run/user/[0-9]*; do
+    [[ -d ${user_dir} ]] || continue
+    user=$(id -un -- "${user_dir#/run/user/}" 2>/dev/null) || continue
+    systemd-run --quiet --collect --machine="${user}@.host" --user \
+      --notify-ready=no -- /usr/bin/notify-send -u critical -t 0 \
+      'ClamAV: threats found on removable media' "${message}" \
+      >/dev/null 2>&1 || log "could not notify ${user} (no session bus); see the journal"
+  done
+}
+
+# scan_new_mounts: scan every mounted, not yet stamped filesystem under
+# MEDIA_ROOT once.
+scan_new_mounts() {
+  local mounts mountpoint stamp waited rc
+  shopt -s nullglob
+  mounts=("${MEDIA_ROOT}"/*/*)
+  shopt -u nullglob
+  for mountpoint in "${mounts[@]}"; do
+    [[ -d ${mountpoint} ]] || continue
+
+    # udisks creates the directory before mounting. Wait briefly for the
+    # mount to land; a directory that never becomes a mountpoint (unplug
+    # race) is left alone and picked up by a later mount event.
+    waited=0
+    until mountpoint -q -- "${mountpoint}"; do
+      (( waited < 10 )) || break
+      sleep 1
+      waited=$((waited + 1))
+    done
+    if ! mountpoint -q -- "${mountpoint}"; then
+      log "${mountpoint}: not a mountpoint (yet); skipping"
+      continue
+    fi
+    # Only now is the filesystem UUID readable; keying the stamp before the
+    # mount landed would let a different drive with the same label (common:
+    # "Untitled", "NO NAME") match an old path-only stamp and skip its scan.
+    stamp=${STATEDIR}/$(stamp_key "${mountpoint}" "$(findmnt -no UUID -- "${mountpoint}" 2>/dev/null || true)")
+    [[ -e ${stamp} ]] && continue
+
+    log "scanning ${mountpoint} (read-only)"
+    rc=0
+    "${CLAMDSCAN[@]}" -- "${mountpoint}" || rc=$?
+    case ${rc} in
+      0)
+        touch -- "${stamp}"
+        log "${mountpoint}: clean"
+        ;;
+      1)
+        touch -- "${stamp}"
+        log "INFECTED files found under ${mountpoint}; see the journal for the list"
+        notify_users "ClamAV found infected files under ${mountpoint}. Run: journalctl -u clamav-media-scan"
+        ;;
+      *)
+        # 2 = error (clamd not reachable, I/O error). Do not stamp so the
+        # next mount event (or service restart) retries the scan.
+        log "${mountpoint}: clamdscan failed (exit ${rc}); not stamped, will retry on the next mount event"
+        ;;
+    esac
+  done
+}
+
+scan_new_mounts
+[[ ${1:-} == --watch ]] || exit 0
+
+# findmnt --poll prints one line per new mount in this mount namespace (host
+# mounts propagate into the service's namespace). Escaped targets (\x20 for
+# spaces) still match the prefix test; the scan itself re-globs MEDIA_ROOT.
+log "watching ${MEDIA_ROOT} for new mounts"
+while read -r target; do
+  [[ ${target} == "${MEDIA_ROOT}"/* ]] || continue
+  scan_new_mounts
+done < <(findmnt --poll=mount --noheadings --raw --output TARGET)
+log "findmnt --poll exited; systemd restarts the watcher"
+exit 1

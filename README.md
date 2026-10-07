@@ -198,6 +198,9 @@ them `-Profile`, `-Check`, `-DryRun`, `-NoUpgrade`):
 - `--no-upgrade` — install what is missing without upgrading what is already
   installed. On Arch this refuses without existing sync databases and warns that it is
   a partial upgrade.
+- `--wazuh-manager HOST` (Linux scripts, or `WAZUH_MANAGER`) — configure and start the
+  Wazuh agent against that manager. Without it the agent is installed but left
+  disabled: no manager exists yet, and an agent newer than its manager cannot connect.
 
 Every platform installs Balun alongside Tributary in core (`balun` from the
 `jmsqrd/balun` COPR on Fedora, `balun-bin` from the AUR on Arch, release apps on macOS
@@ -226,6 +229,12 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   rust-analyzer. `[multilib]` is enabled only by the full profile, which adds Steam,
   Lutris, the lib32 graphics stack, and the AUR games. GNOME uses Vitals for sensors,
   Dash to Dock from the AUR, and the bundled System Monitor extension with `libgtop`.
+  The security baseline (see "Workstation security layer" under the Fedora bullet)
+  uses the same ClamAV/firewalld/auditd/AIDE/Wazuh pieces with Arch package and unit
+  names: `clamav-daemon` on the `/run/clamav/clamd.ctl` socket, `audit` from the
+  official repos (the Arch kernel builds `CONFIG_AUDIT=y`, so no GRUB change), and
+  `aide` + `wazuh-agent` from the AUR — their privileged setup (AIDE database init,
+  Wazuh enablement) runs right after the interactive AUR phase.
 - `setup-fedora-workstation.sh` — run as your normal user; Fedora 41+ (dnf5). Adds the
   signed third-party repos (`files/etc/yum.repos.d/`, the Tributary/Balun coprs, RPM Fusion,
   Microsoft VS Code, Chrome, sing-box; the PowerShell repo on x86_64, plus the Steam/Plex
@@ -261,6 +270,34 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   repo files are preserved (and retired repos disabled). The script also installs a
   deliberately fixed, checksum-pinned Ookla speedtest CLI, then applies dotfiles, zram
   policy, services, and GDM settings.
+  **Workstation security layer** (core profile, Arch gets the same layer with its own
+  package/unit names): ClamAV with a light footprint — the freshclam daemon plus a
+  one-time `freshclam` database bootstrap, `clamd@scan` with a real LocalSocket,
+  notify-only on-access scanning of `~/Downloads` (never all of `/home`; detections
+  are logged, nothing is blocked or quarantined), and a `clamav-media-scan` watcher
+  service that follows the mount table (`findmnt --poll`) and read-only-scans each
+  newly mounted USB/removable filesystem under `/run/media` via
+  `clamdscan --fdpass --multiscan --infected` with per-filesystem scan stamps (each
+  distinct filesystem is scanned once; the journal is the source of truth and desktop
+  notifications are best effort). firewalld replaces the permissive stock
+  FedoraWorkstation default: a custom `workstation` zone keeps SSH broadly reachable
+  (WAN port forwarding is in use) and rejects everything else, while the
+  source-bound `workstation-lan` zone (192.168.1.0/24 + SD-WAN 192.168.2.0/23) opens
+  SSH (firewalld puts each packet in exactly one zone, so LAN peers never fall
+  through to the default zone) plus only the services the selected profile actually
+  installs — Cockpit, GNOME Remote
+  Desktop, mDNS/printer discovery and iperf3 in core; Navidrome, OwnTone, Plex
+  (with its DLNA/GDM ports), Transmission's RPC/peer ports and Steam in-home
+  streaming in full. auditd runs with curated high-signal rules (identity/auth
+  files, sudoers, sshd config, unit/cron/shell-rc persistence, module loading, time
+  changes, mounts, auditd itself — no per-execve logging). AIDE is scoped to
+  configuration trees (`/etc`, `/usr/local`, `/root`) because `rpm -Va` already
+  verifies packaged files and a whole-tree baseline would drown in nightly-update
+  noise; the database is initialized once and a daily timer checks it without
+  auto-rebaselining. The Wazuh agent is installed from Wazuh's signed repository
+  (GPG key pinned by fingerprint, repo disabled by default so the agent never
+  outpaces a future manager) and collects the audit log plus the ClamAV journal
+  units — it stays disabled until `--wazuh-manager` is supplied.
 - `setup-win11-workstation.ps1` — run from an elevated PowerShell (5.1 is enough):
   `powershell -ExecutionPolicy Bypass -File .\setup-win11-workstation.ps1`
   (`-Check`/`-DryRun` also run unelevated). Sets up
@@ -307,10 +344,72 @@ Dotfiles and system config consumed by the workstation setup scripts: `bashrc`,
 `etc/systemd/zram-generator.conf`,
 `etc/cron.daily/pacman-update` (unattended Arch updates + reboot scheduling),
 `etc/dnf/automatic.conf` (Fedora automatic updates + reboot when needed),
+`etc/dnf/libdnf5.conf.d/80-protobuf3-c.conf` (Fedora 45 protobuf-c repair),
 `etc/dconf/db/gdm.d/10-font-settings`, Fedora repo definitions under
-`etc/yum.repos.d/`, and the Fedora Antigravity desktop entry under
-`usr/share/applications/`. `etc/pacman.conf` is kept for reference only — the Arch
-script deliberately does not install it.
+`etc/yum.repos.d/` (including the disabled-by-default `wazuh.repo`), and the Fedora
+Antigravity desktop entry under `usr/share/applications/`. `etc/pacman.conf` is kept
+for reference only — the Arch script deliberately does not install it.
+
+The workstation security layer also lives here, mirroring its destination paths:
+`etc/clamd.d/scan.conf` and `etc/clamav/clamd.conf` (ClamAV daemon configs whose
+watched `~/Downloads` directories are generated at apply time, since clamd.conf has
+no glob support), the `clamav-clamonacc.service.d/` drop-ins (notify-only on-access:
+detections go to the journal; Arch's packaged `--move` quarantine flag is reset),
+`etc/systemd/system/clamav-media-scan.service` plus
+`usr/local/libexec/clamav-media-scan` (mount watcher that read-only-scans newly
+mounted removable media), `etc/firewalld/zones/workstation.xml` and the service
+definitions under `etc/firewalld/services/` (the source-bound
+`workstation-lan.xml` zone is rendered per profile), `etc/audit/rules.d/50-workstation.rules`, `etc/aide.conf`, and the
+`aide-check.{service,timer}` units.
+
+### Untrusted-media malware triage — `scan-untrusted-media.sh`
+
+Read-only triage of untrusted removable media — USB drives from a compromised
+macOS host, disk images, or already-mounted directories. Run as your normal
+user; privileged steps go through sudo. Fedora 41+ installs missing tools with
+dnf; on Arch they must already be present (apfs-fuse is AUR-only).
+
+```bash
+scan-untrusted-media.sh --image-dir /data/images /dev/sdb
+scan-untrusted-media.sh --no-image /dev/sdb        # scan the drive in place
+scan-untrusted-media.sh /data/images/drive1.img    # rescan an existing image
+```
+
+It first hardens the GNOME session (automount, thumbnailers and removable-media
+indexing off; a restore script is written to the report dir). Block devices are
+refused while mounted, set read-only and imaged with ddrescue (image SHA-256 and
+unreadable sectors recorded); the image is attached read-only and every
+partition and APFS volume is mounted `ro,nosuid,nodev,noexec` (APFS via
+apfs-fuse with per-volume enumeration and a FileVault password prompt). Each
+volume is scanned inside a transient systemd sandbox — invoking user +
+`CAP_DAC_READ_SEARCH` only, no network, read-only host: full inventory with
+SHA-256 manifest, ClamAV with raised limits (PUA and macro alerts;
+encrypted/oversize files become coverage gaps, not silent passes), YARA with
+the checksum-verified YARA Forge rules (score ≥ 75 → LIKELY, lower → REVIEW),
+and an executable-content inventory (Mach-O/PE binaries, scripts, .app
+bundles, installers, disk images, LaunchAgents, macro documents, setuid). The
+report lists DEFINITE / LIKELY / REVIEW findings plus coverage gaps; exit 0 no
+findings, 3 findings, 1 error.
+
+- `--image-dir DIR` — where ddrescue images land (default: inside the report
+  dir); `--no-image` scans block devices in place (still strictly read-only);
+  `--report-dir DIR` (default `./media-scan-YYYYmmdd-HHMMSS`); `--resume` continues
+  an interrupted image of the same drive (an existing image or map is otherwise
+  refused, since readers and serial-less sticks would reuse another drive's image).
+- `--yara-set core|extended|full` (default extended), `--yara-rules FILE`,
+  `--no-yara`, `--clam-db PATH`, `--no-update` — rule and signature sources,
+  and whether definitions/rules are refreshed.
+- `--vt` — VirusTotal lookups of SHA-256 hashes only, never file contents (key
+  from `$VT_API_KEY` or `~/.config/virustotal/api-key`), rate-limited to the
+  public-API 4/min (`--vt-rate N`; `--vt-all` looks up every file).
+- `--keep-mounted` — leave volumes mounted read-only for manual review;
+  `--no-session-hardening` — skip the GNOME changes.
+
+Limitations: HFS+ transparent-compression (decmpfs) files read as zero-length
+on Linux; encrypted APFS volumes need an interactive password, and other
+encrypted/container volumes (LUKS, BitLocker, ...) are never opened — both
+surface as coverage gaps; no scan can prove media clean — the coverage-gap
+list is the confidence indicator.
 
 ### Mellanox firmware tool — `mlnx-fw-flash-update.sh`
 

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Transmission daemon</short>
+  <description>transmission-daemon RPC interface and BitTorrent peer
+traffic.</description>
+  <port protocol="tcp" port="9091"/>
+  <port protocol="tcp" port="51413"/>
+  <port protocol="udp" port="51413"/>
+</service>

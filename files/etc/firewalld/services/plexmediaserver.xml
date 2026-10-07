@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Plex Media Server</short>
+  <description>Plex Media Server access, Roku control, and the GDM/DLNA
+discovery surface (1900/udp is also used by DLNA SSDP; 5353/udp overlaps the
+separately allowed mDNS).</description>
+  <port protocol="tcp" port="32400"/>
+  <port protocol="tcp" port="8324"/>
+  <port protocol="tcp" port="32469"/>
+  <port protocol="udp" port="1900"/>
+  <port protocol="udp" port="5353"/>
+  <port protocol="udp" port="32410"/>
+  <port protocol="udp" port="32412-32414"/>
+</service>

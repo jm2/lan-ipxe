@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Steam in-home streaming</short>
+  <description>Steam client LAN/in-home streaming and Remote Play (per Valve's
+in-home streaming documentation).</description>
+  <port protocol="tcp" port="27036-27037"/>
+  <port protocol="udp" port="27031-27036"/>
+</service>
