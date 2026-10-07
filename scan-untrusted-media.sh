@@ -13,8 +13,8 @@
 # primary target (missing tools are installed with dnf); Arch works when the
 # tools are already installed (apfs-fuse is AUR-only there).
 #
-#   scan-untrusted-media.sh --image-dir /data/images /dev/sdb /dev/sdc
-#   scan-untrusted-media.sh --no-image /dev/sdb            # scan the drive in place
+#   scan-untrusted-media.sh /dev/sdb                       # scan the drive in place, read-only
+#   scan-untrusted-media.sh --image-dir /data/images /dev/sdb /dev/sdc   # image first
 #   scan-untrusted-media.sh /data/images/drive1.img        # rescan an existing image
 #   scan-untrusted-media.sh --vt /mnt/already-mounted-dir  # any directory works
 #
@@ -22,8 +22,9 @@
 #   1. hardens the GNOME session first (no automount, thumbnailers or
 #      removable-media indexing: those parse untrusted files automatically)
 #   2. block devices: refuses if anything on them is mounted, marks them
-#      read-only, and (default) images them with ddrescue into --image-dir,
-#      recording the image SHA-256 and any unreadable sectors
+#      read-only, and scans them in place - or, only with --image-dir, images
+#      them with ddrescue first, recording the image SHA-256 and any
+#      unreadable sectors
 #   3. attaches images read-only, detects every partition and APFS volume,
 #      and mounts each one ro,nosuid,nodev,noexec (APFS via apfs-fuse)
 #   4. scans every mounted volume inside a transient systemd sandbox: the
@@ -148,8 +149,10 @@ Read-only malware triage of untrusted media. TARGET is a block device
 (/dev/sdX), a raw disk/partition image, or an already-mounted directory.
 
   --image-dir DIR     image block devices with ddrescue into DIR first and
-                      scan the image (default when a block device is given)
-  --no-image          scan block devices in place (still strictly read-only)
+                      scan the image (default: scan block devices in place,
+                      strictly read-only)
+  --no-image          scan block devices in place (the default; kept for
+                      compatibility)
   --resume            continue an interrupted ddrescue image already in the
                       image dir (refused otherwise: a reader or stick without
                       a unique serial would reuse another drive's image)
@@ -180,7 +183,8 @@ USAGE
 
 #--- Arguments ----------------------------------------------------------------
 IMAGE_DIR=
-IMAGE_MODE=auto
+IMAGE_MODE=direct
+NO_IMAGE_FLAG=0
 REPORT_DIR=
 YARA_SET=extended
 YARA_RULES=
@@ -206,7 +210,7 @@ else
     case $1 in
       -h|--help) usage; exit 0 ;;
       --image-dir)  (( $# >= 2 )) || die "--image-dir needs a directory"; IMAGE_DIR=$2; IMAGE_MODE=image; shift ;;
-      --no-image)   IMAGE_MODE=direct ;;
+      --no-image)   NO_IMAGE_FLAG=1 ;;
       --report-dir) (( $# >= 2 )) || die "--report-dir needs a directory"; REPORT_DIR=$2; shift ;;
       --yara-set)
         (( $# >= 2 )) || die "--yara-set needs core, extended or full"
@@ -585,6 +589,8 @@ if [[ -n ${SESSION_ACTION} ]]; then
   (( ${#TARGETS[@]} == 0 )) || die "--${SESSION_ACTION}-session takes no TARGET"
 else
   (( ${#TARGETS[@]} )) || { usage >&2; die "No TARGET given."; }
+  (( NO_IMAGE_FLAG == 0 || ${#IMAGE_DIR} == 0 )) || die "--no-image and --image-dir contradict each other; pick one"
+  [[ -z ${IMAGE_DIR} || -d ${IMAGE_DIR} ]] || die "--image-dir ${IMAGE_DIR} is not a directory"
 fi
 (( VT_ALL == 0 || USE_VT == 1 )) || die "--vt-all needs --vt"
 [[ -z ${YARA_RULES} || -r ${YARA_RULES} ]] || die "Cannot read --yara-rules ${YARA_RULES}"
@@ -875,8 +881,8 @@ map_unrecovered_bytes() {
   printf '%s' "${total}"
 }
 
-# acquire_device <dev>: refuse mounted devices, set them read-only, image them
-# (unless --no-image). Sets ACQUIRED to the image path or the device.
+# acquire_device <dev>: refuse mounted devices, set them read-only, and image
+# them only with --image-dir. Sets ACQUIRED to the image path or the device.
 acquire_device() {
   local dev=$1 node mp mounted=() dir size avail have serial model name img map bad sum
   while read -r node mp; do
@@ -902,18 +908,11 @@ acquire_device() {
     ACQUIRED=${dev}
     return 0
   fi
-  if [[ -n ${IMAGE_DIR} ]]; then
-    # ddrescue runs as root writing here; a group/world-writable directory
-    # would let another local user plant a symlink for root to truncate.
-    dir=$(readlink -f -- "${IMAGE_DIR}")
-    (( 8#$(stat -c %a -- "${dir}") & 8#077 )) \
-      && die "Image dir ${dir} is group- or world-writable; refusing to write images as root into it."
-  else
-    dir=${REPORT_DIR}/images
-    mkdir -p -- "${dir}"
-    chmod 0700 -- "${dir}"
-    dir=$(readlink -f -- "${dir}")
-  fi
+  # ddrescue runs as root writing here; a group/world-writable directory
+  # would let another local user plant a symlink for root to truncate.
+  dir=$(readlink -f -- "${IMAGE_DIR}")
+  (( 8#$(stat -c %a -- "${dir}") & 8#077 )) \
+    && die "Image dir ${dir} is group- or world-writable; refusing to write images as root into it."
   name=${dev##*/}${serial:+-${serial}}
   name=${name//[^A-Za-z0-9._-]/_}
   img=${dir}/${name}.img map=${dir}/${name}.map

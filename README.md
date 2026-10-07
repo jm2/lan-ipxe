@@ -375,8 +375,8 @@ dnf; on Arch they must already be present (apfs-fuse is AUR-only).
 
 ```bash
 scan-untrusted-media.sh --prepare-session          # first, before any drive is plugged in
-scan-untrusted-media.sh --image-dir /data/images /dev/sdb
-scan-untrusted-media.sh --no-image /dev/sdb        # scan the drive in place
+scan-untrusted-media.sh /dev/sdb                   # scan the drive in place, read-only
+scan-untrusted-media.sh --image-dir /data/images /dev/sdb   # image it first, scan the image
 scan-untrusted-media.sh /data/images/drive1.img    # rescan an existing image
 scan-untrusted-media.sh --restore-session          # afterwards, undo --prepare-session
 ```
@@ -387,8 +387,9 @@ under `~/.local/state/scan-untrusted-media/`) and exits, so a freshly plugged dr
 is never mounted or previewed. A scan run also hardens the session itself, but by
 then a drive plugged in earlier may already be mounted, and the scanner refuses
 mounted devices. Block devices are
-refused while mounted, set read-only and imaged with ddrescue (image SHA-256 and
-unreadable sectors recorded); the image is attached read-only and every
+refused while mounted, set read-only and scanned in place — or, only with
+`--image-dir`, imaged with ddrescue first (image SHA-256 and unreadable
+sectors recorded) and the image attached read-only; every
 partition and APFS volume is mounted `ro,nosuid,nodev,noexec` with journal
 replay off: FAT/exFAT, NTFS, ext2/3/4, XFS, Btrfs, F2FS, HFS+, ISO/UDF,
 SquashFS/EROFS, and APFS via apfs-fuse (per-volume enumeration, FileVault
@@ -422,8 +423,9 @@ typing, classification, ClamAV batches with an ETA, YARA); the data is read
 three times (hashing, ClamAV, YARA), and the classification pass is CPU-only,
 so a pause in disk activity there is expected.
 
-- `--image-dir DIR` — where ddrescue images land (default: inside the report
-  dir); `--no-image` scans block devices in place (still strictly read-only);
+- `--image-dir DIR` — image block devices with ddrescue into DIR (an existing
+  directory) and scan the image; without it devices are scanned in place,
+  strictly read-only (`--no-image` is accepted for compatibility);
   `--report-dir DIR` (default `./media-scan-YYYYmmdd-HHMMSS`); `--resume` continues
   an interrupted image of the same drive (an existing image or map is otherwise
   refused, since readers and serial-less sticks would reuse another drive's image).
