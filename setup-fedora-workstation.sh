@@ -61,8 +61,9 @@
 #      user's ~/Downloads, and a mount-table watcher that read-only-scans each
 #      newly mounted USB/removable drive under /run/media (never whole-/home on-access: the
 #      DDD watch cannot follow later mounts, and developer trees are noisy)
-#  11. firewalld: a custom workstation default zone (SSH broadly reachable
-#      because WAN port forwarding is in use; everything else rejected) plus a
+#  11. firewalld: a custom workstation default zone (SSH and Plex Remote
+#      Access on 32400/tcp broadly reachable because WAN port forwarding is in
+#      use; everything else rejected) plus a
 #      source-bound workstation-lan zone for the LAN 192.168.1.0/24 and the
 #      SD-WAN 192.168.2.0/23 with the profile's LAN services
 #  12. auditd with curated high-signal rules (identity/auth files, sudoers,
@@ -1813,6 +1814,7 @@ select_profile() {
     "etc/firewalld/services/transmission.xml|/etc/firewalld/services/transmission.xml"
     "etc/firewalld/services/iperf3.xml|/etc/firewalld/services/iperf3.xml"
     "etc/firewalld/services/lancache.xml|/etc/firewalld/services/lancache.xml"
+    "etc/firewalld/services/plex-remote.xml|/etc/firewalld/services/plex-remote.xml"
     "etc/systemd/system/clamav-clamonacc.service.d/50-fedora-workstation.conf|/etc/systemd/system/clamav-clamonacc.service.d/50-fedora-workstation.conf"
     "etc/systemd/system/clamav-media-scan.service|/etc/systemd/system/clamav-media-scan.service"
     "usr/local/libexec/clamav-media-scan|/usr/local/libexec/clamav-media-scan"
@@ -1881,7 +1883,7 @@ print_plan() {
   printf 'PLAN: graphical.target default, cockpit.socket, dnf5-automatic.timer\n'
   printf 'PLAN: ClamAV: freshclam daemon + one-time DB bootstrap, clamd@scan,\n'
   printf '      notify-only on-access for ~/Downloads, /run/media mount watcher (read-only scans)\n'
-  printf 'PLAN: firewalld workstation default zone (ssh, dhcpv6-client, mdns; reject\n'
+  printf 'PLAN: firewalld workstation default zone (ssh, plex-remote, dhcpv6-client, mdns; reject\n'
   printf '      otherwise) + workstation-lan source zone (192.168.1.0/24, 192.168.2.0/23):\n'
   printf '  %s\n' "${FIREWALL_LAN_SERVICES[*]}"
   printf 'PLAN: auditd with curated high-signal rules (no per-execve logging)\n'
@@ -2475,6 +2477,8 @@ put_file -s "${FILES}/etc/firewalld/services/transmission.xml" /etc/firewalld/se
 put_file -s "${FILES}/etc/firewalld/services/iperf3.xml" /etc/firewalld/services/iperf3.xml
 (( PUT_FILE_CHANGED )) && FIREWALL_CHANGED=1
 put_file -s "${FILES}/etc/firewalld/services/lancache.xml" /etc/firewalld/services/lancache.xml
+(( PUT_FILE_CHANGED )) && FIREWALL_CHANGED=1
+put_file -s "${FILES}/etc/firewalld/services/plex-remote.xml" /etc/firewalld/services/plex-remote.xml
 (( PUT_FILE_CHANGED )) && FIREWALL_CHANGED=1
 enable_unit firewalld.service
 systemctl is-active --quiet firewalld.service || sudo systemctl start firewalld.service

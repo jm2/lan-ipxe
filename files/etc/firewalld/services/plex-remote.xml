@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Plex Remote Access</short>
+  <description>Plex Media Server's main port only, for Remote Access through a
+WAN port forward. The discovery/DLNA ports in plexmediaserver stay LAN-only.</description>
+  <port protocol="tcp" port="32400"/>
+</service>

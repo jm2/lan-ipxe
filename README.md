@@ -280,8 +280,9 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   `clamdscan --fdpass --multiscan --infected` with per-filesystem scan stamps (each
   distinct filesystem is scanned once; the journal is the source of truth and desktop
   notifications are best effort). firewalld replaces the permissive stock
-  FedoraWorkstation default: a custom `workstation` zone keeps SSH broadly reachable
-  (WAN port forwarding is in use) and rejects everything else, while the
+  FedoraWorkstation default: a custom `workstation` zone keeps SSH and Plex Remote
+  Access (32400/tcp only) broadly reachable (WAN port forwarding is in use) and
+  rejects everything else, while the
   source-bound `workstation-lan` zone (192.168.1.0/24 + SD-WAN 192.168.2.0/23) opens
   SSH (firewalld puts each packet in exactly one zone, so LAN peers never fall
   through to the default zone) plus the LAN services — Cockpit, GNOME Remote

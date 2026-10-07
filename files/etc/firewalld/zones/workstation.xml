@@ -2,13 +2,14 @@
 <zone target="%%REJECT%%">
   <short>Workstation</short>
   <description>Default workstation zone, replacing FedoraWorkstation (which
-permits all initiated-return traffic via 1025-65535/tcp open). SSH stays
-reachable from anywhere because WAN port forwarding to this port is in use;
-DHCPv6 replies and mDNS (link-local discovery) are also allowed. Every other
+permits all initiated-return traffic via 1025-65535/tcp open). SSH and Plex
+Remote Access (32400/tcp only) stay reachable from anywhere because WAN port
+forwarding to them is in use; DHCPv6 replies and mDNS (link-local discovery) are also allowed. Every other
 network service is reachable only through the source-bound workstation-lan
 zone. Unmatched traffic is rejected, not dropped, so misconfigured LAN peers
 fail fast instead of timing out.</description>
   <service name="dhcpv6-client"/>
   <service name="mdns"/>
+  <service name="plex-remote"/>
   <service name="ssh"/>
 </zone>

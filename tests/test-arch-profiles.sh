@@ -297,6 +297,13 @@ test_security_renders() (
   # peers would be rejected instead of falling through to the default zone.
   grep -Fq '<service name="ssh"/>' <<<"${out_core}" \
     || fail 'core LAN zone omits ssh (LAN peers would be rejected)'
+  # WAN-facing default zone: SSH and Plex's main port only, never Plex's
+  # LAN discovery/DLNA ports.
+  local wan_zone=${REPO_ROOT}/files/etc/firewalld/zones/workstation.xml
+  grep -Fq '<service name="plex-remote"/>' "${wan_zone}" \
+    || fail 'default zone omits Plex Remote Access'
+  ! grep -Fq '<service name="plexmediaserver"/>' "${wan_zone}" \
+    || fail 'default zone exposes Plex discovery ports to the WAN'
   # Hand-run servers on these hosts open in every profile.
   for item in lancache nfs mountd rpc-bind samba; do
     grep -Fq "<service name=\"${item}\"/>" <<<"${out_core}" \
