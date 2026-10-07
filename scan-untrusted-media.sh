@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 #
 # Read-only malware triage of untrusted removable media (USB drives, disk
-# images) on a Linux workstation. Written for drives that came from a
-# compromised macOS host: it understands APFS, HFS+, exFAT/FAT, NTFS and ext*
-# volumes, images block devices before touching them, and never mounts
-# anything writable or executable.
+# images) on a Linux workstation, for media from any platform: Windows,
+# macOS, iOS/iPadOS/tvOS/watchOS/visionOS, Linux and Android. It understands
+# APFS, HFS+, exFAT/FAT, NTFS, ext2/3/4, XFS, Btrfs, F2FS, SquashFS/EROFS
+# and optical/ISO volumes, opens LVM and (with your passphrase) LUKS and
+# BitLocker read-only, images block devices before touching them, and never
+# mounts anything writable or executable. Other filesystem types are reported
+# as coverage gaps instead of exposing rarely audited kernel drivers.
 #
 # Run as your normal user; privileged steps go through sudo. Fedora 41+ is the
 # primary target (missing tools are installed with dnf); Arch works when the
@@ -29,9 +32,18 @@
 #        - full inventory and SHA-256 manifest of every file
 #        - ClamAV (fresh definitions, all limits raised, archives/DMG/PKG
 #          unpacked, PUA and macro alerts, encrypted/oversize files reported)
-#        - YARA with the YARA Forge rule set (includes macOS malware rules)
-#        - an inventory of executable content: Mach-O, scripts, app bundles,
-#          installers, disk images, launch agents, macro documents, ...
+#        - YARA with the YARA Forge rule set (Windows, Linux, macOS, Android
+#          and cross-platform malware, webshells, hack tools)
+#        - an inventory of executable and auto-run content for every
+#          platform: PE/ELF/Mach-O/DEX binaries, APK/IPA/MSI/DMG/deb/rpm
+#          packages, scripts, app bundles, iOS/macOS configuration profiles,
+#          shortcuts, disk images, macro documents, and persistence locations
+#          (launch agents, Startup folders, scheduled tasks, autostart,
+#          systemd/cron, shell start-up files)
+#        - content-vs-extension checks: an executable named like a document
+#          is a LIKELY finding, any other mismatch (a ".pdf" that is not a
+#          PDF) a REVIEW finding; OS metadata (AppleDouble ._*, Spotlight,
+#          Recycle Bin) is counted separately
 #   5. optionally looks up hashes on VirusTotal (--vt; hashes only, never
 #      file contents)
 #   6. writes a report: DEFINITE / LIKELY / REVIEW findings plus the coverage
@@ -51,23 +63,75 @@ VT_API=https://www.virustotal.com/api/v3/files
 CLAMAV_DB_DIR=/var/lib/clamav
 # Large enough for real-world installers and disk images; anything still over
 # a limit is reported as a coverage gap instead of being silently "clean".
-CLAM_LIMITS=(--max-filesize=4000M --max-scansize=4000M --max-files=200000
+# ClamAV cannot scan files of 2 GiB or more whatever the limit says; larger
+# files are recorded as coverage gaps by the worker instead.
+CLAMAV_MAX_BYTES=$(( 2 * 1024 * 1024 * 1024 - 1 ))
+CLAM_LIMITS=(--max-filesize=2047M --max-scansize=4000M --max-files=200000
              --max-recursion=40 --max-scantime=900000 --max-partitions=200
              --max-embeddedpe=200M --max-htmlnormalize=200M
              --max-scriptnormalize=200M --max-ziptypercg=200M)
 YARA_MAX_BYTES=$(( 1024 * 1024 * 1024 ))
 YARA_TIMEOUT=120
 # Executable or auto-run content that deserves a human look regardless of
-# scanner verdicts (MIME types reported by file(1)).
-SUSPECT_MIMES='^(application/(x-mach-binary|x-executable|x-pie-executable|x-sharedlib|x-object|x-dosexec|vnd\.microsoft\.portable-executable|x-msdownload|x-msi|java-archive|x-java-applet|x-apple-diskimage|x-xar|x-iso9660-image|x-ms-shortcut|x-bytecode\.python)|text/(x-shellscript|x-script\.python|x-python|x-perl|x-ruby|x-php|x-tcl|x-msdos-batch|x-applescript))$'
+# scanner verdicts, for every platform the media may have touched: Windows,
+# macOS, iOS/iPadOS/tvOS/watchOS/visionOS, Linux, Android and cross-platform
+# runtimes. MIME types are the ones file(1) reports.
+EXEC_MIMES='application/(x-mach-binary|x-executable|x-pie-executable|x-sharedlib|x-object|x-coff|x-coff-executable|x-dosexec|vnd\.microsoft\.portable-executable|x-msdownload|x-ms-ne-executable|x-lx-executable|x-ms-w[34]-executable|vnd\.android\.package-archive|java-archive|x-java-applet|x-bytecode\.python)'
+SUSPECT_MIMES='^('"${EXEC_MIMES}"'|application/(x-msi|x-ms-mst|vnd\.ms-cab-compressed|vnd\.ms-htmlhelp|x-ms-shortcut|x-mswinurl|x-setupscript|msonenote|onenote|x-apple-diskimage|x-xar|x-iso9660-image|x-virtualbox-vhd|vnd\.debian\.binary-package|x-rpm|vnd\.flatpak\.ref|x-shockwave-flash)|text/(x-shellscript|x-script\.python|x-python|x-perl|x-ruby|x-php|x-tcl|x-msdos-batch|x-applescript|x-ms-regedit|x-wine-extension-reg|x-ms-scf|x-ms-rdp))$'
 # File-name patterns (case-insensitive, matched against the relative path).
 # Bundle types are directories, so they match anywhere in the path (every
 # file inside Foo.app/ is app content); every other extension must end the
 # path, or a folder such as "name@icloud.com/" would flag everything below it.
-SUSPECT_NAMES='(\.(app|pkg|mpkg|scptd|workflow|action|bundle|plugin|kext|osax|qlgenerator|mdimporter|saver|prefpane)(/|$)|\.(dmg|command|tool|scpt|applescript|terminal|jar|dylib|so|webloc|inetloc|fileloc|lnk|url|desktop|exe|dll|scr|com|bat|cmd|ps1|psm1|py|pyw|pl|pm|rb|php|pht|vbs|vbe|jse|wsf|hta|msi|iso|docm|dotm|xlsm|xltm|xlam|pptm|potm|ppam|sldm)$|(^|/)(LaunchAgents|LaunchDaemons|StartupItems|Login ?Items|ScriptingAdditions|Extensions)/|(^|/)\.(zshrc|zprofile|zshenv|zlogin|bash_profile|bashrc|profile|login)$|(^|/)(authorized_keys|crontab)$)'
+#   Apple bundles: app, pkg, framework, kext, xpc, appex (iOS/macOS app
+#     extensions), systemextension, driverext, plugins, prefpanes, ...
+#   Apple files: dmg, command, scripts, dylib, ipa (iOS/tvOS/watchOS apps),
+#     mobileconfig (configuration/MDM profiles), mobileprovision, web shortcuts
+#   Windows: PE/DOS executables and libraries, control-panel and console
+#     snap-ins, installers (msi/msix/appx/appinstaller), drivers, scripts
+#     (PowerShell, WSH, batch), HTA/CHM, registry/inf/shortcut/search/library
+#     files, RDP connections, mountable disk images, OneNote, Excel add-ins
+#     and the macro-enabled Office formats
+#   Linux: shell scripts, .run/AppImage, deb/rpm/snap/flatpak refs, desktop
+#     entries, kernel modules, shared objects
+#   Android: apk and split/bundle variants, dex/odex bytecode
+#   Cross-platform: jar/class, Python/Perl/Ruby/PHP scripts, Flash
+# Locations: macOS launch agents/daemons and login items, Windows Startup
+# folders and scheduled tasks, Linux autostart/systemd/cron/init/profile
+# directories and preload hooks, shell start-up files and SSH authorized keys.
+SUSPECT_NAMES='(\.(app|pkg|mpkg|framework|kext|xpc|appex|systemextension|driverext|scptd|workflow|action|bundle|plugin|osax|qlgenerator|mdimporter|saver|prefpane|wdgt)(/|$)'\
+'|\.(dmg|sparseimage|command|tool|scpt|applescript|terminal|dylib|ipa|mobileconfig|mobileprovision|webloc|inetloc|fileloc'\
+'|exe|dll|scr|com|pif|cpl|msc|msi|msp|mst|msix|msixbundle|appx|appxbundle|appinstaller|application|appref-ms|gadget|sys|drv|ocx'\
+'|bat|cmd|ps1|psm1|psd1|ps1xml|vbs|vbe|jse|wsf|wsh|wsc|sct|hta|chm|hlp|reg|inf|lnk|url|scf|library-ms|search-ms|searchconnector-ms|settingcontent-ms|rdp'\
+'|iso|img|vhd|vhdx|one|xll|iqy|slk|docm|dotm|xlsm|xltm|xlam|xlsb|pptm|potm|ppam|ppsm|sldm'\
+'|sh|bash|zsh|ksh|csh|run|appimage|deb|rpm|snap|flatpakref|flatpakrepo|desktop|ko|so'\
+'|apk|apks|xapk|apkm|aab|dex|odex'\
+'|jar|class|py|pyw|pl|pm|rb|php|pht|phtml|swf)$'\
+'|(^|/)(LaunchAgents|LaunchDaemons|StartupItems|Login ?Items|ScriptingAdditions|PrivilegedHelperTools)/'\
+'|(^|/)(Programs/Startup|System32/Tasks|SysWOW64/Tasks)/'\
+'|(^|/)(\.config/autostart|\.config/systemd/user|\.local/share/applications|xdg/autostart|systemd/system|init\.d|rc\.d|profile\.d|cron\.(d|hourly|daily|weekly|monthly))/'\
+'|(^|/)(ld\.so\.preload|rc\.local|autorun\.inf|crontab|authorized_keys)$'\
+'|(^|/)\.ssh/rc$|(^|/)\.(zshrc|zprofile|zshenv|zlogin|zlogout|bash_profile|bash_login|bash_logout|bashrc|profile|login|xprofile|xinitrc|xsessionrc)$)'
+# OS-generated metadata that every platform sprinkles over removable media:
+# AppleDouble "._" companions and macOS volume databases, Windows recycle bin
+# and volume information, freedesktop trash. Still scanned by ClamAV and YARA
+# and still flagged by content type, but kept out of the name-based inventory
+# and the extension checks (a "._report.pdf" is metadata, not a fake PDF).
+OS_METADATA='(^|/)(\._[^/]*|\.DS_Store|Thumbs\.db|desktop\.ini|\.localized)$|(^|/)(\.Spotlight-V100|\.fseventsd|\.Trashes|\.TemporaryItems|\.DocumentRevisions-V100|\.MobileBackups|System Volume Information|\$RECYCLE\.BIN|RECYCLER|\.Trash-[0-9]+)/'
+# Extension -> MIME types its content must have. A mismatch is reported for
+# review; executable content behind a document/media extension (a PE renamed
+# invoice.pdf) is a LIKELY finding. Empty files match anything.
+declare -gA EXPECTED_MIME=(
+  [pdf]='^application/pdf$'
+  [jpg]='^image/' [jpeg]='^image/' [png]='^image/' [gif]='^image/' [heic]='^image/' [webp]='^image/' [tif]='^image/' [tiff]='^image/' [bmp]='^image/'
+  [doc]='^application/(msword|vnd\.ms-|x-ole-storage|CDFV2)' [xls]='^application/(vnd\.ms-|x-ole-storage|CDFV2|msword)' [ppt]='^application/(vnd\.ms-|x-ole-storage|CDFV2|msword)'
+  [docx]='^application/(vnd\.openxmlformats|zip|octet-stream)' [xlsx]='^application/(vnd\.openxmlformats|zip|octet-stream)' [pptx]='^application/(vnd\.openxmlformats|zip|octet-stream)'
+  [txt]='^text/' [csv]='^(text/|application/csv)' [rtf]='^text/rtf$'
+  [mp3]='^audio/' [m4a]='^(audio/|video/mp4)' [wav]='^audio/' [mp4]='^video/' [mov]='^video/' [avi]='^video/' [mkv]='^video/'
+  [zip]='^application/zip$'
+)
 
-PKGS_FEDORA=(apfs-fuse clamav clamav-update curl ddrescue file jq kernel-modules-extra unzip yara)
-PKGS_ARCH=(clamav curl ddrescue file jq unzip yara)
+PKGS_FEDORA=(apfs-fuse clamav clamav-update cryptsetup curl ddrescue file jq kernel-modules-extra lvm2 unzip yara)
+PKGS_ARCH=(clamav cryptsetup curl ddrescue file jq lvm2 unzip yara)
 
 log()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
@@ -175,10 +239,24 @@ fi
 # newline become \\, \t and \n) and leave it in REPLY. Odd names are kept
 # visible, not dropped. No subshell: it runs once per file.
 tsv_esc() {
+  local s c h i
   REPLY=$1
   REPLY=${REPLY//\\/\\\\}
   REPLY=${REPLY//$'\t'/\\t}
   REPLY=${REPLY//$'\n'/\\n}
+  # Every other control character (C0, DEL and, in UTF-8 names, C1) becomes
+  # \xHH or \uHHHH: names come from hostile media, and raw ESC/CSI bytes in a
+  # report would be interpreted by whatever terminal later displays it.
+  [[ ${REPLY} == *[[:cntrl:]]* ]] || return 0
+  s=${REPLY} REPLY=
+  for (( i = 0; i < ${#s}; i++ )); do
+    c=${s:i:1}
+    if [[ ${c} == [[:cntrl:]] ]]; then
+      printf -v h '%x' "'${c}"
+      if (( 16#${h} < 256 )); then printf -v c '\\x%02x' "0x${h}"; else printf -v c '\\u%04x' "0x${h}"; fi
+    fi
+    REPLY+=${c}
+  done
 }
 tsv_escape() { tsv_esc "$1"; printf '%s' "${REPLY}"; }
 
@@ -259,7 +337,7 @@ clam_jobs() {
 #   findings.tsv    class, source, detail, path
 #   gaps.tsv        source, reason, path (everything not fully examined)
 #   suspect.tsv     sha256, mime, size, mtime, reason, path (executable content)
-#   bundles.txt     macOS bundle directories (.app, .pkg, ...)
+#   bundles.txt     Apple bundle directories (.app, .pkg, .framework, .appex, ...)
 #   counts          key=value totals
 #   clamscan.log, yara.log raw scanner output
 # Paths are relative to the volume root and TSV-escaped (see tsv_esc).
@@ -292,12 +370,13 @@ internal_scan() {
   local meta=${out}/files.meta list=${out}/files.lst
   local rec rest path rel erel sum mime size mtime mode line reason f rc
   local files=0 bytes=0 suspects=0 zero_len=0 unix_fs=0 jobs batches per
+  local os_meta=0 mismatches=0 is_meta base ext want
   local total_files total_bytes n done_bytes started xpid
   local -a clam_opts=()
   local -A mime_of=() sum_of=() size_of=()
   [[ -d ${root} && -d ${out} ]] || { echo "internal-scan: bad paths" >&2; return 1; }
   : >"${out}/findings.tsv"; : >"${out}/gaps.tsv"; : >"${out}/suspect.tsv"
-  [[ ${fstype} =~ ^(apfs|hfsplus|hfs|ext[234]|xfs|btrfs)$ ]] && unix_fs=1
+  [[ ${fstype} =~ ^(apfs|hfsplus|ext[234]|xfs|btrfs|f2fs)$ ]] && unix_fs=1
 
   # Inventory: one find pass records size, mtime and mode next to each path
   # (no per-file stat forks). find errors (permission, I/O) are gaps.
@@ -337,7 +416,7 @@ internal_scan() {
     (( n % 2000 )) || scan_progress "${out}" "file types: ${n}/${total_files} files"
   done < <(xargs -0 -r file -N -r -0 --mime-type -- <"${list}" 2>/dev/null)
 
-  exec 3>"${out}/files.tsv" 4>>"${out}/gaps.tsv" 5>>"${out}/suspect.tsv"
+  exec 3>"${out}/files.tsv" 4>>"${out}/gaps.tsv" 5>>"${out}/suspect.tsv" 6>>"${out}/findings.tsv"
   shopt -s nocasematch
   while IFS= read -r -d '' rec; do
     size=${rec%% *}; rest=${rec#* }
@@ -351,6 +430,8 @@ internal_scan() {
     (( files % 5000 )) || scan_progress "${out}" "classifying: ${files}/${total_files} files (CPU only, no disk reads)"
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "${sum}" "${size}" "${mtime}" "${mode}" "${mime}" "${erel}" >&3
     [[ ${sum} == - ]] && printf 'sha256\tunreadable\t%s\n' "${erel}" >&4
+    (( size > CLAMAV_MAX_BYTES )) \
+      && printf 'clamav\tlarger than 2 GiB, which ClamAV cannot scan\t%s\n' "${erel}" >&4
     if (( size > YARA_MAX_BYTES )) && [[ ${yara_rules} != - ]]; then
       printf 'yara\tlarger than %s, not YARA-scanned\t%s\n' "$(human_bytes "${YARA_MAX_BYTES}")" "${erel}" >&4
     fi
@@ -358,9 +439,30 @@ internal_scan() {
     # (decmpfs): such files look empty. Count them as a coverage caveat.
     [[ ${fstype} == hfsplus ]] && (( size == 0 )) && zero_len=$(( zero_len + 1 ))
 
+    is_meta=0
+    [[ ${rel} =~ ${OS_METADATA} ]] && is_meta=1 && os_meta=$(( os_meta + 1 ))
     reason=
     [[ ${mime} =~ ${SUSPECT_MIMES} ]] && reason="type ${mime}"
-    [[ -z ${reason} && ${rel} =~ ${SUSPECT_NAMES} ]] && reason="name/location"
+    # Metadata names are skipped here but not their content type: an
+    # executable hiding as "._x" is still flagged above.
+    (( is_meta )) || { [[ -z ${reason} && ${rel} =~ ${SUSPECT_NAMES} ]] && reason="name/location"; }
+    # Content that does not match the extension: an executable behind a
+    # document/media extension is a classic lure (LIKELY); anything else
+    # (a ".pdf" that is not a PDF) needs a look (REVIEW).
+    base=${rel##*/}
+    if (( ! is_meta )) && [[ ${base} == ?*.?* && ${mime} != inode/x-empty ]]; then
+      ext=${base##*.}; ext=${ext,,}
+      want=${EXPECTED_MIME[${ext}]:-}
+      if [[ -n ${want} && ! ${mime} =~ ${want} ]]; then
+        mismatches=$(( mismatches + 1 ))
+        reason="${reason:+${reason}; }content ${mime} does not match .${ext}"
+        if [[ ${mime} =~ ^(${EXEC_MIMES})$ ]]; then
+          printf 'LIKELY\theuristic\texecutable (%s) disguised as .%s\t%s\n' "${mime}" "${ext}" "${erel}" >&6
+        else
+          printf 'REVIEW\theuristic\tcontent is %s, not what .%s implies\t%s\n' "${mime}" "${ext}" "${erel}" >&6
+        fi
+      fi
+    fi
     # The execute bit only means something on Unix filesystems; FAT/exFAT/NTFS
     # report every file executable.
     if (( unix_fs )); then
@@ -374,7 +476,7 @@ internal_scan() {
     fi
   done <"${meta}"
   shopt -u nocasematch
-  exec 3>&- 4>&- 5>&-
+  exec 3>&- 4>&- 5>&- 6>&-
 
   # ClamAV: everything unpacked as deeply as the engine allows; limits and
   # encryption raise alerts so they surface as gaps, never as silent passes.
@@ -455,13 +557,15 @@ internal_scan() {
     (( rc == 0 )) || printf 'yara\tyara exited %s (see yara.err)\t-\n' "${rc}" >>"${out}/gaps.tsv"
     parse_yara_output "${out}/yara.log" "${out}/findings.tsv" "${root}"
     while IFS= read -r line; do
+      # Oversized files already have a per-file gap from the inventory.
+      [[ ${line} == skipping\ *" because it's larger than "* ]] && continue
       printf 'yara\t%s\t-\n' "$(tsv_escape "${line}")" >>"${out}/gaps.tsv"
     done <"${out}/yara.err"
   fi
 
   scan_progress "${out}" "done"
-  printf 'files=%s\nbytes=%s\nsuspects=%s\nbundles=%s\nzero_len_hfsplus=%s\n' "${files}" \
-    "${bytes}" "${suspects}" "$(wc -l <"${out}/bundles.txt")" "${zero_len}" >"${out}/counts"
+  printf 'files=%s\nbytes=%s\nsuspects=%s\nbundles=%s\nzero_len_hfsplus=%s\nos_metadata=%s\nmismatches=%s\n' "${files}" \
+    "${bytes}" "${suspects}" "$(wc -l <"${out}/bundles.txt")" "${zero_len}" "${os_meta}" "${mismatches}" >"${out}/counts"
   rm -f -- "${list}" "${meta}"
 }
 
@@ -492,6 +596,8 @@ USER_GID=$(id -g)
 MNT_BASE=/run/scan-untrusted-media.$$
 MOUNTS=()
 LOOPS=()
+CRYPT_MAPS=()
+LVM_ACTIVE=()
 RO_DEVS=()
 FRESHCLAM_WAS_ACTIVE=0
 KEEPALIVE_PID=
@@ -564,10 +670,19 @@ cleanup() {
     log "Volumes left mounted read-only (--keep-mounted):"
     for i in "${MOUNTS[@]}"; do note "${i}"; done
     note "Unmount later with: sudo umount ${MNT_BASE}/*; then: sudo losetup -d ${LOOPS[*]:-<none>}"
+    (( ${#LVM_ACTIVE[@]} )) && note "Deactivate LVM: sudo vgchange -an ${LVM_ACTIVE[*]%%|*}"
+    (( ${#CRYPT_MAPS[@]} )) && note "Close unlocked volumes: sudo cryptsetup close ${CRYPT_MAPS[*]}"
   else
     for (( i = ${#MOUNTS[@]} - 1; i >= 0; i-- )); do
       sudo umount -- "${MOUNTS[i]}" 2>/dev/null || sudo umount -l -- "${MOUNTS[i]}" 2>/dev/null
       sudo rmdir -- "${MOUNTS[i]}" 2>/dev/null
+    done
+    # Inner layers first: LVM inside LUKS is the usual Linux full-disk layout.
+    for (( i = ${#LVM_ACTIVE[@]} - 1; i >= 0; i-- )); do
+      sudo vgchange -an --devices "${LVM_ACTIVE[i]#*|}" -- "${LVM_ACTIVE[i]%%|*}" >/dev/null 2>&1
+    done
+    for (( i = ${#CRYPT_MAPS[@]} - 1; i >= 0; i-- )); do
+      sudo cryptsetup close -- "${CRYPT_MAPS[i]}" 2>/dev/null
     done
     for i in "${LOOPS[@]}"; do sudo losetup -d "${i}" 2>/dev/null; done
     [[ -d ${MNT_BASE} ]] && sudo rmdir -- "${MNT_BASE}" 2>/dev/null
@@ -893,6 +1008,63 @@ mount_apfs() { # <node> <tag>
   done
 }
 
+# open_crypt <node> <fstype> <tag>: offer to unlock a LUKS or BitLocker
+# volume read-only (passphrase or BitLocker recovery key from the terminal)
+# and scan what is inside; declining or failing leaves a coverage gap.
+open_crypt() {
+  local node=$1 fstype=$2 tag=$3 type name answer what
+  case ${fstype} in
+    crypto_LUKS) type=luks what='LUKS passphrase' ;;
+    *) type=bitlk what='BitLocker password or 48-digit recovery key' ;;
+  esac
+  if ! { : </dev/tty; } 2>/dev/null; then
+    gap "${tag}" mount "${fstype} volume not opened (no terminal to ask for its passphrase)"
+    return 0
+  fi
+  read -r -p "==> ${node} is an encrypted ${fstype} volume. Unlock it read-only to scan its contents? [y/N] " answer </dev/tty || answer=
+  if [[ ${answer} != [yY]* ]]; then
+    gap "${tag}" mount "${fstype} volume not opened (declined)"
+    return 0
+  fi
+  name=scan-utm-$$-${#CRYPT_MAPS[@]}
+  log "Enter the ${what} for ${node}"
+  if sudo cryptsetup open --readonly --type "${type}" --tries 3 -- "${node}" "${name}" </dev/tty; then
+    CRYPT_MAPS+=("${name}")
+    scan_block "/dev/mapper/${name}" "${tag}"
+  else
+    gap "${tag}" mount "${fstype} volume not opened (unlock failed)"
+  fi
+}
+
+# open_lvm <node> <tag>: activate the volume group on this physical volume
+# with every logical volume read-only and scan each one. --devices confines
+# LVM to this node, so the host's own devices (and its devices file) are not
+# involved. A VG whose name the host already uses is refused: renaming it
+# (vgimportclone) would write to the untrusted media.
+open_lvm() {
+  local node=$1 tag=$2 vg lv lvs name
+  vg=$(sudo pvs --noheadings -o vg_name --devices "${node}" -- "${node}" 2>/dev/null | xargs) || vg=
+  if [[ -z ${vg} ]]; then
+    gap "${tag}" mount "LVM physical volume without a readable volume group"
+    return 0
+  fi
+  if sudo vgs --noheadings -o vg_name 2>/dev/null | xargs -n1 | grep -qxF -- "${vg}"; then
+    gap "${tag}" mount "LVM volume group '${vg}' has the same name as one on this host; not activated"
+    return 0
+  fi
+  if ! sudo vgchange -ay --devices "${node}" \
+         --config 'activation { read_only_volume_list = [ "*" ] }' -- "${vg}" >/dev/null 2>"${REPORT_DIR}/mount.err"; then
+    gap "${tag}" mount "LVM volume group '${vg}' could not be activated (spans other disks?): $(tr '\n' ' ' <"${REPORT_DIR}/mount.err")"
+    return 0
+  fi
+  LVM_ACTIVE+=("${vg}|${node}")
+  lvs=$(sudo lvs --noheadings -o lv_path,lv_name --devices "${node}" -- "${vg}" 2>/dev/null) || lvs=
+  while read -r lv name; do
+    [[ -b ${lv} ]] || continue
+    scan_block "${lv}" "${tag}-${name}"
+  done <<<"${lvs}"
+}
+
 # mount_and_scan <node> <fstype> <tag>
 mount_and_scan() {
   local node=$1 fstype=$2 tag=$3 mp=${MNT_BASE}/$3
@@ -900,22 +1072,37 @@ mount_and_scan() {
   case ${fstype} in
     apfs) mount_apfs "${node}" "${tag}"; return 0 ;;
     swap) note "${tag}: swap, skipped"; return 0 ;;
-    crypto_LUKS|BitLocker|LVM2_member|linux_raid_member|zfs_member|VMFS*|ceph*)
-      gap "${tag}" mount "${fstype} not opened (encrypted or container volume)"; return 0 ;;
+    crypto_LUKS|BitLocker) open_crypt "${node}" "${fstype}" "${tag}"; return 0 ;;
+    LVM2_member) open_lvm "${node}" "${tag}"; return 0 ;;
+    linux_raid_member)
+      gap "${tag}" mount "Linux md RAID member not assembled (do it by hand with mdadm --assemble --readonly, then scan the md device)"; return 0 ;;
+    zfs_member)
+      gap "${tag}" mount "ZFS pool member not imported (import by hand: zpool import -o readonly=on -N -R <dir>)"; return 0 ;;
+    refs|ReFS)
+      gap "${tag}" mount "Windows ReFS has no Linux driver; scan it from Windows or a Windows VM"; return 0 ;;
+  esac
+  # Only these drivers are exposed to hostile metadata. Mounting whatever
+  # blkid names would make the kernel load obscure, rarely audited drivers
+  # (classic HFS, JFS, ReiserFS, UFS, minix, ...): exactly the attack surface
+  # a crafted drive aims at.
+  case ${fstype} in
+    vfat|exfat|ntfs|hfsplus|ext2|ext3|ext4|xfs|btrfs|f2fs|iso9660|udf|squashfs|erofs) ;;
+    *) gap "${tag}" mount "${fstype:-unknown} filesystem not mounted: its driver is not on the allowlist for hostile media"; return 0 ;;
   esac
   case ${fstype} in
     vfat|exfat) try_mount "${node}" "${mp}" "${fstype}" "${base},${own},fmask=0333,dmask=0222" ;;
     ntfs) try_mount "${node}" "${mp}" ntfs3 "${base},${own}" \
             || try_mount "${node}" "${mp}" ntfs-3g "${base},${own}" ;;
-    hfsplus|hfs)
+    hfsplus)
       sudo modprobe "${fstype}" 2>/dev/null \
         || { gap "${tag}" mount "${fstype} kernel module unavailable (install kernel-modules-extra for $(uname -r), or reboot into the kernel it matches)"; return 0; }
       try_mount "${node}" "${mp}" "${fstype}" "${base},${own}" ;;
     ext2|ext3|ext4) try_mount "${node}" "${mp}" "${fstype}" "${base},noload" ;;
     xfs)   try_mount "${node}" "${mp}" xfs "${base},norecovery" ;;
     btrfs) try_mount "${node}" "${mp}" btrfs "${base},rescue=nologreplay" ;;
+    f2fs)  try_mount "${node}" "${mp}" f2fs "${base},norecovery" ;;
     iso9660|udf) try_mount "${node}" "${mp}" "${fstype}" "${base},${own}" ;;
-    *) try_mount "${node}" "${mp}" "${fstype}" "${base}" ;;
+    *) try_mount "${node}" "${mp}" "${fstype}" "${base}" ;;   # squashfs, erofs
   esac || { gap "${tag}" mount "${fstype} mount failed: $(tr '\n' ' ' <"${REPORT_DIR}/mount.err")"; return 0; }
   scan_volume "${mp}" "${fstype}" "${tag}"
 }
@@ -985,6 +1172,7 @@ scan_volume() {
     -p RestrictAddressFamilies=AF_UNIX -p RestrictNamespaces=yes -p RestrictSUIDSGID=yes \
     -p RestrictRealtime=yes -p LockPersonality=yes -p SystemCallArchitectures=native \
     -p Nice=5 -p IOSchedulingClass=best-effort -p IOSchedulingPriority=6 \
+    -p Environment=LC_CTYPE=C.UTF-8 \
     -- "${BASH}" "${SCRIPT_PATH}" --internal-scan "${root}" "${out}" "${fstype}" "${COMPILED_YARA}" "${CLAM_DB:--}" \
     </dev/null || rc=$?
   kill "${poller}" 2>/dev/null || true
@@ -1096,7 +1284,10 @@ collect_results() {
     awk -F'\t' -v OFS='\t' -v vol="${tag}" 'NR == FNR { sha[$6] = $1; next }
       { print $1, $2, $3, vol, (($4 in sha) ? sha[$4] : "-"), $4 }' \
       "${d}files.tsv" "${d}findings.tsv" >>"${REPORT_DIR}/findings.tsv"
-    awk -F'\t' -v OFS='\t' -v vol="${tag}" '{ print vol, $1, $2, $3 }' "${d}gaps.tsv" >>"${REPORT_DIR}/gaps.tsv"
+    # One gap per tool and file: an oversized file is reported both by the
+    # inventory and by ClamAV's own limit alert.
+    awk -F'\t' -v OFS='\t' -v vol="${tag}" '$3 == "-" || !seen[$1 FS $3]++ { print vol, $1, $2, $3 }' \
+      "${d}gaps.tsv" >>"${REPORT_DIR}/gaps.tsv"
   done
 }
 
@@ -1104,7 +1295,7 @@ count_class() { awk -F'\t' -v c="$1" '$1 == c { k[$4 "\t" $6] = 1 } END { print 
 
 write_report() {
   local s=${REPORT_DIR}/summary.txt definite likely review gaps files=0 bytes=0 suspects=0 d k v
-  local vt_known=0 vt_mal=0 vt_unknown=0 vt_unk_exec=0 zero=0
+  local vt_known=0 vt_mal=0 vt_unknown=0 vt_unk_exec=0 zero=0 os_meta=0 mismatches=0
   definite=$(count_class DEFINITE); likely=$(count_class LIKELY); review=$(count_class REVIEW)
   gaps=$(wc -l <"${REPORT_DIR}/gaps.tsv")
   for d in "${REPORT_DIR}"/volumes/*/counts; do
@@ -1113,6 +1304,7 @@ write_report() {
       case ${k} in
         files) files=$(( files + v )) ;; bytes) bytes=$(( bytes + v )) ;;
         suspects) suspects=$(( suspects + v )) ;; zero_len_hfsplus) zero=$(( zero + v )) ;;
+        os_metadata) os_meta=$(( os_meta + v )) ;; mismatches) mismatches=$(( mismatches + v )) ;;
       esac
     done <"${d}"
   done
@@ -1142,8 +1334,10 @@ write_report() {
     fi
     printf 'Volumes scanned (tag, filesystem, mountpoint):\n'
     sed 's/^/  /' "${REPORT_DIR}/volumes.tsv" 2>/dev/null || echo '  none'
-    printf '\nFiles: %s (%s); executable/auto-run items for review: %s\n\n' "${files}" \
+    printf '\nFiles: %s (%s); executable/auto-run items for review: %s\n' "${files}" \
       "$(human_bytes "${bytes}")" "${suspects}"
+    printf 'Content not matching its extension: %s; OS metadata (AppleDouble ._*, Spotlight,\n' "${mismatches}"
+    printf 'Recycle Bin, ...; scanned, kept out of the name inventory): %s\n\n' "${os_meta}"
     printf 'Findings (unique files): DEFINITE %s   LIKELY %s   REVIEW %s\n' "${definite}" "${likely}" "${review}"
     if (( definite + likely )); then
       printf '\nDEFINITE / LIKELY detections (class, source, detail, volume, sha256, path):\n'

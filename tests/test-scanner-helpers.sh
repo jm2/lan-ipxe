@@ -48,6 +48,13 @@ test_tsv_esc() (
   # Every backslash in the escaped cell is part of \\, \t or \n, so %b reads
   # the original field back exactly.
   [[ $(printf '%b' "${REPLY}") == "${raw}" ]] || fail 'escaped cell does not round-trip through printf %b'
+  # Other control characters (terminal escapes from hostile names) are
+  # escaped too and still round-trip.
+  raw=$'evil\e]8;;http://x\a\x7fname'
+  tsv_esc "${raw}"
+  [[ ${REPLY} != *[[:cntrl:]]* ]] || fail "tsv_esc left a control character in [${REPLY}]"
+  [[ ${REPLY} == 'evil\x1b]8;;http://x\x07\x7fname' ]] || fail "tsv_esc control escapes: [${REPLY}]"
+  [[ $(printf '%b' "${REPLY}") == "${raw}" ]] || fail 'control-escaped cell does not round-trip'
   tsv_esc ''
   [[ -z ${REPLY} ]] || fail 'tsv_esc changed an empty field'
   tsv_esc 'plain-name.txt'
@@ -192,7 +199,9 @@ test_suspect_regexes() (
   shopt -s nocasematch
   for value in application/x-mach-binary application/x-executable \
                application/x-apple-diskimage text/x-shellscript text/x-python \
-               Text/X-Shellscript; do
+               Text/X-Shellscript application/vnd.android.package-archive \
+               application/vnd.ms-htmlhelp application/x-ms-shortcut text/x-ms-regedit \
+               application/x-rpm application/vnd.debian.binary-package application/msonenote; do
     [[ ${value} =~ ${SUSPECT_MIMES} ]] || fail "SUSPECT_MIMES does not match ${value}"
   done
   for value in text/plain application/pdf image/jpeg application/octet-stream; do
@@ -200,13 +209,42 @@ test_suspect_regexes() (
   done
   for value in 'Foo.app/' 'note.docm' 'Library/LaunchAgents/com.example.plist' \
                '/home/u/Downloads/notes.txt.py' 'home/u/.bashrc' 'ssh/authorized_keys' \
-               'EVIL.APP/install' 'x/setup.com' 'Kit.kext/Contents/Info.plist'; do
+               'EVIL.APP/install' 'x/setup.com' 'Kit.kext/Contents/Info.plist' \
+               'Payload/Game.ipa' 'profile.mobileconfig' 'Share.appex/Info.plist' \
+               'update.apk' 'classes.dex' 'invoice.pdf.lnk' 'run.ps1' 'help.chm' \
+               'Microsoft/Windows/Start Menu/Programs/Startup/a.txt' 'Windows/System32/Tasks/Updater' \
+               'autorun.inf' 'home/u/.config/autostart/x.desktop' 'etc/ld.so.preload' \
+               'tool.AppImage' 'fix.sh' 'pkg.deb' 'notes.one' 'conn.rdp' 'disk.vhdx'; do
     [[ ${value} =~ ${SUSPECT_NAMES} ]] || fail "SUSPECT_NAMES does not match ${value}"
   done
   for value in photo.jpg report.pdf notes.txt Resume.docx fake.appendix \
-               'someone@icloud.com/Old Downloads/notes.txt' 'backup.exe/readme.txt'; do
+               'someone@icloud.com/Old Downloads/notes.txt' 'backup.exe/readme.txt' \
+               'shell.sh.d/readme.md' 'site.js'; do
     ! [[ ${value} =~ ${SUSPECT_NAMES} ]] || fail "SUSPECT_NAMES unexpectedly matches ${value}"
   done
+)
+
+test_os_metadata_and_exec_mimes() (
+  load_scanner
+  local value
+  shopt -s nocasematch
+  for value in '._report.pdf' 'a/b/._x.dmg' '.DS_Store' 'Thumbs.db' '.Spotlight-V100/Store-V2/x' \
+               '$RECYCLE.BIN/S-1-5/x.exe' 'System Volume Information/x' '.Trash-1000/files/a' '.fseventsd/x'; do
+    [[ ${value} =~ ${OS_METADATA} ]] || fail "OS_METADATA does not match ${value}"
+  done
+  for value in 'report.pdf' 'a._b.pdf' 'My.DS_Store.txt' 'Spotlight/x'; do
+    ! [[ ${value} =~ ${OS_METADATA} ]] || fail "OS_METADATA unexpectedly matches ${value}"
+  done
+  for value in application/x-dosexec application/vnd.microsoft.portable-executable \
+               application/x-mach-binary application/x-pie-executable application/vnd.android.package-archive; do
+    [[ ${value} =~ ^(${EXEC_MIMES})$ ]] || fail "EXEC_MIMES does not match ${value}"
+  done
+  for value in application/pdf image/jpeg application/zip; do
+    ! [[ ${value} =~ ^(${EXEC_MIMES})$ ]] || fail "EXEC_MIMES unexpectedly matches ${value}"
+  done
+  [[ application/pdf =~ ${EXPECTED_MIME[pdf]} ]] || fail 'EXPECTED_MIME[pdf] rejects a PDF'
+  ! [[ application/octet-stream =~ ${EXPECTED_MIME[pdf]} ]] || fail 'EXPECTED_MIME[pdf] accepts octet-stream'
+  [[ image/heic =~ ${EXPECTED_MIME[jpg]} ]] || fail 'EXPECTED_MIME[jpg] rejects another image type'
 )
 
 test_internal_scan_guard() {
@@ -237,5 +275,7 @@ test_clam_jobs_host_value
 printf 'PASS scanner clam_jobs returns 1..4 on the local host\n'
 test_suspect_regexes
 printf 'PASS scanner suspect MIME/name regular expressions\n'
+test_os_metadata_and_exec_mimes
+printf 'PASS scanner OS-metadata, executable-MIME and expected-MIME tables\n'
 test_internal_scan_guard
 printf 'PASS scanner --internal-scan argument-count guard\n'

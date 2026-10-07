@@ -367,8 +367,9 @@ definitions under `etc/firewalld/services/` (the source-bound
 
 ### Untrusted-media malware triage — `scan-untrusted-media.sh`
 
-Read-only triage of untrusted removable media — USB drives from a compromised
-macOS host, disk images, or already-mounted directories. Run as your normal
+Read-only triage of untrusted removable media from any platform (Windows,
+macOS, iOS/iPadOS/tvOS, Linux, Android) — USB drives, disk images, or
+already-mounted directories. Run as your normal
 user; privileged steps go through sudo. Fedora 41+ installs missing tools with
 dnf; on Arch they must already be present (apfs-fuse is AUR-only).
 
@@ -388,15 +389,32 @@ then a drive plugged in earlier may already be mounted, and the scanner refuses
 mounted devices. Block devices are
 refused while mounted, set read-only and imaged with ddrescue (image SHA-256 and
 unreadable sectors recorded); the image is attached read-only and every
-partition and APFS volume is mounted `ro,nosuid,nodev,noexec` (APFS via
-apfs-fuse with per-volume enumeration and a FileVault password prompt). Each
+partition and APFS volume is mounted `ro,nosuid,nodev,noexec` with journal
+replay off: FAT/exFAT, NTFS, ext2/3/4, XFS, Btrfs, F2FS, HFS+, ISO/UDF,
+SquashFS/EROFS, and APFS via apfs-fuse (per-volume enumeration, FileVault
+password prompt). LVM volume groups are activated with every logical volume
+read-only (refused when the VG name clashes with one on the host), and LUKS
+or BitLocker volumes are unlocked read-only after a y/N prompt for their
+passphrase or recovery key, so the usual LUKS→LVM→ext4/XFS layouts are
+covered. Any other filesystem type is not mounted at all: obsolete or rarely
+audited kernel drivers (classic HFS, JFS, ReiserFS, UFS, ...) are not exposed
+to hostile metadata. Each
 volume is scanned inside a transient systemd sandbox — invoking user +
 `CAP_DAC_READ_SEARCH` only, no network, read-only host: full inventory with
 SHA-256 manifest, ClamAV with raised limits (PUA and macro alerts;
 encrypted/oversize files become coverage gaps, not silent passes), YARA with
 the checksum-verified YARA Forge rules (score ≥ 75 → LIKELY, lower → REVIEW),
-and an executable-content inventory (Mach-O/PE binaries, scripts, .app
-bundles, installers, disk images, LaunchAgents, macro documents, setuid). The
+an executable/auto-run inventory for every platform (PE/ELF/Mach-O/DEX
+binaries; APK, IPA, MSI/MSIX, DMG/PKG, deb/rpm/AppImage packages; scripts;
+app bundles and extensions; iOS/macOS configuration profiles; shortcuts and
+disk images; macro documents; launch agents, Startup folders, scheduled tasks,
+autostart/systemd/cron entries, shell start-up files; setuid), and
+content-vs-extension checks (an executable named like a document is LIKELY,
+any other mismatch such as a ".pdf" that is not a PDF is REVIEW). OS metadata
+(AppleDouble `._*`, Spotlight, Recycle Bin) is scanned but counted separately.
+Files of 2 GiB or more are recorded as ClamAV coverage gaps (its hard limit).
+The report TSVs escape every control character in file names, so they are safe
+to view in a terminal; `clamscan.log`/`yara.log` are raw tool output. The
 report lists DEFINITE / LIKELY / REVIEW findings plus coverage gaps; exit 0 no
 findings, 3 findings, 1 error. While each volume scans, its phase and progress are
 printed once a minute (inventory size, hashing files/GiB with an ETA, file
@@ -419,10 +437,11 @@ so a pause in disk activity there is expected.
   `--no-session-hardening` — skip the GNOME changes.
 
 Limitations: HFS+ transparent-compression (decmpfs) files read as zero-length
-on Linux; encrypted APFS volumes need an interactive password, and other
-encrypted/container volumes (LUKS, BitLocker, ...) are never opened — both
-surface as coverage gaps; no scan can prove media clean — the coverage-gap
-list is the confidence indicator.
+on Linux; encrypted volumes need their passphrase at the terminal; md RAID,
+ZFS, Windows ReFS/Storage Spaces, LVM groups spanning other disks and
+unlisted filesystems are not opened — all of these surface as coverage gaps;
+no scan can prove media clean — the coverage-gap list is the confidence
+indicator.
 
 ### Mellanox firmware tool — `mlnx-fw-flash-update.sh`
 
