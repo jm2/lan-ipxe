@@ -74,6 +74,7 @@ die()  { printf '\033[1;31m==> ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 usage() {
   cat <<USAGE
 Usage: ${0##*/} [options] TARGET...
+       ${0##*/} --prepare-session | --restore-session
        ${0##*/} -h|--help
 
 Read-only malware triage of untrusted media. TARGET is a block device
@@ -101,6 +102,10 @@ Read-only malware triage of untrusted media. TARGET is a block device
   --keep-mounted      leave volumes mounted (read-only) for manual review
   --no-session-hardening
                       do not change GNOME automount/thumbnail/index settings
+  --prepare-session   only harden the desktop session (automount, autorun,
+                      thumbnails, removable-media indexing off) and exit; run
+                      this BEFORE plugging in any untrusted drive
+  --restore-session   undo --prepare-session and exit
 
 Exit: 0 no findings, 3 findings in DEFINITE or LIKELY, 1 error.
 USAGE
@@ -121,6 +126,8 @@ VT_RATE=4
 KEEP_MOUNTED=0
 RESUME=0
 HARDEN_SESSION=1
+SESSION_ACTION=
+SESSION_RESTORE=${XDG_STATE_HOME:-${HOME}/.local/state}/scan-untrusted-media/restore-session-settings.sh
 TARGETS=()
 
 # --internal-scan is the sandboxed worker entry point; see scan_volume.
@@ -150,6 +157,8 @@ else
       --keep-mounted) KEEP_MOUNTED=1 ;;
       --resume)     RESUME=1 ;;
       --no-session-hardening) HARDEN_SESSION=0 ;;
+      --prepare-session) SESSION_ACTION=prepare ;;
+      --restore-session) SESSION_ACTION=restore ;;
       --) shift; TARGETS+=("$@"); break ;;
       -*) usage >&2; die "Unknown option: $1" ;;
       *)  TARGETS+=("$1") ;;
@@ -393,7 +402,11 @@ fi
 
 #--- Preflight --------------------------------------------------------------
 (( EUID != 0 )) || die "Run as your normal user; privileged steps use sudo."
-(( ${#TARGETS[@]} )) || { usage >&2; die "No TARGET given."; }
+if [[ -n ${SESSION_ACTION} ]]; then
+  (( ${#TARGETS[@]} == 0 )) || die "--${SESSION_ACTION}-session takes no TARGET"
+else
+  (( ${#TARGETS[@]} )) || { usage >&2; die "No TARGET given."; }
+fi
 (( VT_ALL == 0 || USE_VT == 1 )) || die "--vt-all needs --vt"
 [[ -z ${YARA_RULES} || -r ${YARA_RULES} ]] || die "Cannot read --yara-rules ${YARA_RULES}"
 [[ -z ${CLAM_DB} || -e ${CLAM_DB} ]] || die "No such --clam-db ${CLAM_DB}"
@@ -506,9 +519,12 @@ start_sudo() {
 # lets Tracker index removable devices: all parse untrusted files before any
 # scan runs. Turn them off for this user and leave them off; the report dir
 # gets a script that restores the previous values.
+# harden_session <restore-script>: turn off everything in the desktop session
+# that would open or parse untrusted media on its own, and write a script that
+# restores the previous values. Settings already hardened (for example by an
+# earlier --prepare-session) are left alone and not added to the restore list.
 harden_session() {
-  local spec schema key want cur schemas revert=()
-  (( HARDEN_SESSION )) || return 0
+  local restore=$1 spec schema key want cur schemas revert=()
   if ! command -v gsettings >/dev/null || [[ -z ${DBUS_SESSION_BUS_ADDRESS:-} && ! -S /run/user/${UID}/bus ]]; then
     warn "No desktop session found; make sure nothing automounts or previews the media."
     return 0
@@ -530,10 +546,13 @@ harden_session() {
     fi
   done
   if (( ${#revert[@]} )); then
+    mkdir -p -- "$(dirname -- "${restore}")"
     printf '#!/bin/sh\n# Restore desktop settings changed by scan-untrusted-media.sh\n%s\n' \
-      "$(printf '%s\n' "${revert[@]}")" >"${REPORT_DIR}/restore-session-settings.sh"
-    chmod 0700 "${REPORT_DIR}/restore-session-settings.sh"
-    note "Restore later with: ${REPORT_DIR}/restore-session-settings.sh"
+      "$(printf '%s\n' "${revert[@]}")" >>"${restore}"
+    chmod 0700 "${restore}"
+    note "Restore later with: ${restore}"
+  else
+    note "Desktop session: automount, autorun, thumbnails and removable-media indexing already off"
   fi
   case ${XDG_CURRENT_DESKTOP:-} in
     *GNOME*|'') ;;
@@ -1097,6 +1116,20 @@ unique_tag() {
 
 main() {
   local t img global_gaps ver_opts=()
+  # Session-only modes: no report dir, tools, sudo or scanning.
+  case ${SESSION_ACTION} in
+    prepare)
+      log "Hardening the desktop session before any untrusted drive is attached"
+      harden_session "${SESSION_RESTORE}"
+      log "Ready. Plug the drives in now; nothing will mount or open them. Scan with: ${0##*/} /dev/sdX"
+      return 0 ;;
+    restore)
+      [[ -f ${SESSION_RESTORE} ]] || die "Nothing to restore: ${SESSION_RESTORE} does not exist"
+      sh -- "${SESSION_RESTORE}" || die "restoring the desktop settings failed; see ${SESSION_RESTORE}"
+      rm -f -- "${SESSION_RESTORE}"
+      log "Desktop session settings restored"
+      return 0 ;;
+  esac
   [[ -n ${CLAM_DB} ]] && ver_opts+=(--database="${CLAM_DB}")
   REPORT_DIR=${REPORT_DIR:-${PWD}/media-scan-$(date +%Y%m%d-%H%M%S)}
   mkdir -p -- "${REPORT_DIR}"
@@ -1113,7 +1146,7 @@ main() {
   : >"${REPORT_DIR}/gaps-global.tsv"
   log "Report directory: ${REPORT_DIR}"
 
-  harden_session
+  (( HARDEN_SESSION )) && harden_session "${REPORT_DIR}/restore-session-settings.sh"
   install_tools
   start_sudo
   trap cleanup EXIT

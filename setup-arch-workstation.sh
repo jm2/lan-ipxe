@@ -1981,6 +1981,14 @@ enable_unit firewalld.service
 systemctl is-active --quiet firewalld.service || sudo systemctl start firewalld.service
 systemctl is-active --quiet firewalld.service \
   || die "firewalld did not become active"
+# A running firewalld only knows the zone and service files it loaded at
+# startup: until it reloads, switching to the new workstation zone fails with
+# INVALID_ZONE. The reload below still runs if moving interfaces changes more.
+if (( FIREWALL_CHANGED )); then
+  sudo firewall-cmd --reload || die "firewalld could not load the new zone/service files"
+  FIREWALL_CHANGED=0
+  note "firewalld reloaded (new zone/service definitions)"
+fi
 if [[ $(firewall-cmd --get-default-zone 2>/dev/null) == workstation ]]; then
   note "default zone: workstation"
 else

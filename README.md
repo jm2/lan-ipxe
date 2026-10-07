@@ -372,13 +372,19 @@ user; privileged steps go through sudo. Fedora 41+ installs missing tools with
 dnf; on Arch they must already be present (apfs-fuse is AUR-only).
 
 ```bash
+scan-untrusted-media.sh --prepare-session          # first, before any drive is plugged in
 scan-untrusted-media.sh --image-dir /data/images /dev/sdb
 scan-untrusted-media.sh --no-image /dev/sdb        # scan the drive in place
 scan-untrusted-media.sh /data/images/drive1.img    # rescan an existing image
+scan-untrusted-media.sh --restore-session          # afterwards, undo --prepare-session
 ```
 
-It first hardens the GNOME session (automount, thumbnailers and removable-media
-indexing off; a restore script is written to the report dir). Block devices are
+Run `--prepare-session` before attaching any drive: it turns GNOME automount,
+autorun, thumbnailers and removable-media indexing off (saving a restore script
+under `~/.local/state/scan-untrusted-media/`) and exits, so a freshly plugged drive
+is never mounted or previewed. A scan run also hardens the session itself, but by
+then a drive plugged in earlier may already be mounted, and the scanner refuses
+mounted devices. Block devices are
 refused while mounted, set read-only and imaged with ddrescue (image SHA-256 and
 unreadable sectors recorded); the image is attached read-only and every
 partition and APFS volume is mounted `ro,nosuid,nodev,noexec` (APFS via
