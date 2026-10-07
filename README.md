@@ -447,6 +447,62 @@ unlisted filesystems are not opened — all of these surface as coverage gaps;
 no scan can prove media clean — the coverage-gap list is the confidence
 indicator.
 
+#### Neutralizing reviewed threats (`--export`, `--quarantine`)
+
+Every scan also writes `quarantine.tsv` next to `findings.tsv`: one line per
+flagged file (`volume_tag, sha256, class, detail, relpath`), DEFINITE and LIKELY
+lines active, REVIEW lines commented out with `# `. Review it, uncomment what
+you also want gone and comment out false positives — only active lines are
+acted on. `volumes.tsv` records each volume's source, filesystem UUID, APFS
+volume index and partition number so the same volume is found again later (by
+UUID, else by filesystem type + partition number; ambiguity is refused).
+
+```bash
+scan-untrusted-media.sh --image-dir /data/images /dev/sdb    # 1. scan
+$EDITOR media-scan-*/quarantine.tsv                          # 2. review the selection
+scan-untrusted-media.sh --export media-scan-X ~/clean /dev/sdb   # 3a. copy the rest out
+scan-untrusted-media.sh --quarantine media-scan-X /dev/sdb       # 3b. or neutralize in place
+```
+
+- `--export REPORT_DIR DEST TARGET` (preferred; never writes to the media) —
+  TARGET (the drive, its image, or a scanned directory) is mounted read-only
+  exactly as for a scan, and every regular file is copied to `DEST/<tag>/` inside
+  the same systemd sandbox as the scan worker (user + `CAP_DAC_READ_SEARCH`, no
+  network, writes only to DEST and the report). Left out: selected files and
+  anything else with the SHA-256 of a selected file; files not in the scan's
+  inventory (never scanned); symlinks, devices and FIFOs; OS clutter (`._*`,
+  `.DS_Store`, `.Spotlight-V100`, `.fseventsd`, `.Trashes`, `$RECYCLE.BIN`,
+  `System Volume Information`, ... — `--keep-metadata` keeps it). Copies are
+  plain 0644 files in 0755 directories (no exec/setuid bits, owners, xattrs or
+  ACLs), and each copy's SHA-256 is recomputed and must equal the scan's —
+  otherwise the copy is deleted and logged as changed since the scan. DEST
+  must be new or empty and outside `/tmp`, `/var/tmp` and the media.
+- `--quarantine REPORT_DIR TARGET` (when the drive must stay in use) — after a
+  y/N confirmation (`--yes` skips it), each affected partition (and its disk,
+  if the kernel requires it) is made writable, mounted
+  `rw,nosuid,nodev,noexec`, and every selected file whose SHA-256 still
+  matches is archived to `REPORT_DIR/quarantine/<sha256>.7z` (7-Zip, password
+  `infected`, encrypted headers, member named by its hash), the archive is
+  tested and its content re-hashed, and only then is the original deleted and
+  `<name>.QUARANTINED.txt` left in its place (hash, detection, date, archive,
+  how to restore; never written through a planted symlink). The volume is then
+  synced, unmounted and set read-only again. Only vfat, exfat, ntfs (ntfs3,
+  else ntfs-3g), ext2/3/4, btrfs and xfs are accepted; APFS and HFS+ have no
+  safe Linux write driver — do those on a Mac or macOS VM, or use `--export`.
+  Installs the `7zip` package (provides `7z` on Fedora and Arch) when missing.
+
+Each run writes `REPORT_DIR/export-<timestamp>.log` or
+`quarantine-<timestamp>.log` (one line per file: status, reason, volume,
+SHA-256, path) and prints counts per status and reason; exit 0 complete, 3
+incomplete (mismatches, missing files, unmatched volumes), 1 error.
+
+Residual risk: any mount, read-only included, runs the kernel's filesystem
+driver on metadata an attacker may have crafted, and `--quarantine`'s
+read-write mount also replays journals and exercises the driver's write
+paths. For the highest-risk media, prefer `--export` from the ddrescue image,
+and run `--quarantine` only inside a disposable VM with the drive passed
+through.
+
 ### Mellanox firmware tool — `mlnx-fw-flash-update.sh`
 
 Interactive detector/cross-flasher for ConnectX-3 through ConnectX-7 NICs. Queries

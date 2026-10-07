@@ -253,15 +253,41 @@ test_clam_eta() (
   dir=$(mktemp -d -p "${TMPDIR:-/var/tmp}")
   trap 'rm -rf -- "${dir}"' EXIT
   now=$(date +%s)
-  [[ $(clam_eta "${dir}" 30 4) == estimating ]] || fail 'clam_eta did not wait for a finished batch'
-  # Two finished 60 s batches, 4 jobs, 30 batches: 28 x 60 / 4 = 420 s.
+  [[ $(clam_eta "${dir}" 3000 4) == '0% of data, ETA estimating' ]] || fail 'clam_eta did not wait for a finished batch'
+  # Two finished 60 s batches of weight 100 each, total weight 3000, 4 jobs:
+  # 2800 x (120 s / 200) / 4 = 420 s.
   for id in 00000 00001; do
     touch -d "@$(( now - 60 ))" "${dir}/clamscan.${id}.start"
     echo 0 >"${dir}/clamscan.${id}.rc"; touch -d "@${now}" "${dir}/clamscan.${id}.rc"
+    echo 100 >"${dir}/clambatch.${id}.w"
   done
-  : >"${dir}/clamscan.00002.start"   # still running: ignored
-  out=$(clam_eta "${dir}" 30 4)
-  [[ ${out} == 0h07m ]] || fail "clam_eta gave ${out}, expected 0h07m"
+  : >"${dir}/clamscan.00002.start"; echo 900 >"${dir}/clambatch.00002.w"   # still running
+  out=$(clam_eta "${dir}" 3000 4)
+  [[ ${out} == '6% of data, ETA 0h07m' ]] || fail "clam_eta gave [${out}]"
+)
+
+test_clam_split_batches() (
+  load_scanner
+  local dir f lines weights=() i
+  dir=$(mktemp -d -p "${TMPDIR:-/var/tmp}")
+  trap 'rm -rf -- "${dir}"' EXIT
+  {
+    for i in $(seq 1 100); do printf '50000 1700000000 644 /v/photo%s.jpg\0' "${i}"; done
+    printf '%s\0' '200000000 1700000000 644 /v/big1.dmg' '200000000 1700000000 644 /v/big two.dmg'
+    printf '10 1700000000 644 /v/new\nline.txt\0'
+  } >"${dir}/meta"
+  # 4 batches of the total weight (bytes + 256 KiB per file).
+  clam_split_batches "${dir}/meta" "${dir}" $(( (405000010 + 103 * 262144 + 3) / 4 ))
+  for f in "${dir}"/clambatch.*.lst; do weights+=("$(<"${f%.lst}.w")"); done
+  # Greedy packing: each 200 MB image alone exceeds a quarter of the weight.
+  (( ${#weights[@]} >= 2 && ${#weights[@]} <= 4 )) || fail "clam_split_batches made ${#weights[@]} batches"
+  # The two disk images land in different batches: weight, not file count.
+  ! grep -lx '/v/big1.dmg' "${dir}"/clambatch.*.lst | xargs grep -qx '/v/big two.dmg' \
+    || fail 'both large files ended up in one batch'
+  lines=$(cat "${dir}"/clambatch.*.lst | wc -l)
+  (( lines == 102 )) || fail "batches hold ${lines} paths, expected 102"
+  [[ $(tr -d '\0' <"${dir}/clambatch.nl") == $'/v/new\nline.txt' ]] || fail 'newline name not in the NUL batch'
+  [[ $(<"${dir}/clambatch.nl.w") == $(( 10 + 262144 )) ]] || fail 'newline batch weight wrong'
 )
 
 test_internal_scan_guard() {
@@ -294,7 +320,9 @@ test_suspect_regexes
 printf 'PASS scanner suspect MIME/name regular expressions\n'
 test_os_metadata_and_exec_mimes
 printf 'PASS scanner OS-metadata, executable-MIME and expected-MIME tables\n'
+test_clam_split_batches
+printf 'PASS scanner ClamAV batches balanced by weight, newline names split out\n'
 test_clam_eta
-printf 'PASS scanner ClamAV ETA from finished-batch durations and job count\n'
+printf 'PASS scanner ClamAV ETA from finished-batch weights, durations and job count\n'
 test_internal_scan_guard
 printf 'PASS scanner --internal-scan argument-count guard\n'

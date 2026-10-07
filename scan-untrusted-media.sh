@@ -54,6 +54,11 @@
 # a short gap list plus no findings is the strongest result this can give.
 
 set -euo pipefail
+# Report paths are escaped (tsv_esc) in the scan sandbox, the export sandbox
+# and this shell, and --export/--quarantine match files by that escaped form:
+# the character classes must not depend on the caller's locale.
+unset LC_ALL
+export LC_CTYPE=C.UTF-8
 
 #--- Config -----------------------------------------------------------------
 SCRIPT_PATH=$(readlink -f -- "${BASH_SOURCE[0]}")
@@ -142,6 +147,8 @@ die()  { printf '\033[1;31m==> ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 usage() {
   cat <<USAGE
 Usage: ${0##*/} [options] TARGET...
+       ${0##*/} --export REPORT_DIR DEST [--keep-metadata] TARGET
+       ${0##*/} --quarantine REPORT_DIR [--yes] TARGET
        ${0##*/} --prepare-session | --restore-session
        ${0##*/} -h|--help
 
@@ -175,7 +182,26 @@ Read-only malware triage of untrusted media. TARGET is a block device
                       this BEFORE plugging in any untrusted drive
   --restore-session   undo --prepare-session and exit
 
+Neutralizing reviewed threats (after a scan; review REPORT_DIR/quarantine.tsv
+first: only its active, uncommented lines are acted on):
+  --export REPORT_DIR DEST TARGET
+                      copy every scanned file except the selected ones (and
+                      anything not in the scan inventory) from TARGET, mounted
+                      read-only, into the new or empty directory DEST; each
+                      copy is mode 0644 and re-verified against the scan's
+                      SHA-256. Never writes to TARGET.
+  --keep-metadata     with --export, also copy OS clutter (._*, .DS_Store,
+                      .Spotlight-V100, .Trashes, \$RECYCLE.BIN, ...)
+  --quarantine REPORT_DIR TARGET
+                      on the block device TARGET itself, move each selected
+                      file into REPORT_DIR/quarantine/<sha256>.7z (password
+                      "infected", encrypted names) and leave a
+                      <name>.QUARANTINED.txt stub. Mounts read-write (replays
+                      journals); vfat, exfat, ntfs, ext2/3/4, btrfs, xfs only.
+  --yes               with --quarantine, do not ask for confirmation
+
 Exit: 0 no findings, 3 findings in DEFINITE or LIKELY, 1 error.
+      --export/--quarantine: 0 done, 3 incomplete (see the log), 1 error.
 USAGE
 }
 
@@ -197,12 +223,21 @@ HARDEN_SESSION=1
 SESSION_ACTION=
 SESSION_RESTORE=${XDG_STATE_HOME:-${HOME}/.local/state}/scan-untrusted-media/restore-session-settings.sh
 TARGETS=()
+NZ_MODE=
+NZ_REPORT=
+NZ_DEST=
+KEEP_METADATA=0
+ASSUME_YES=0
 
-# --internal-scan is the sandboxed worker entry point; see scan_volume.
+# --internal-scan and --internal-export are the sandboxed worker entry points;
+# see scan_volume and export_volume.
+INTERNAL_SCAN=0
+INTERNAL_EXPORT=0
 if [[ ${1:-} == --internal-scan ]]; then
   INTERNAL_SCAN=1
+elif [[ ${1:-} == --internal-export ]]; then
+  INTERNAL_EXPORT=1
 else
-  INTERNAL_SCAN=0
   while (( $# )); do
     case $1 in
       -h|--help) usage; exit 0 ;;
@@ -226,6 +261,16 @@ else
       --no-session-hardening) HARDEN_SESSION=0 ;;
       --prepare-session) SESSION_ACTION=prepare ;;
       --restore-session) SESSION_ACTION=restore ;;
+      --export)
+        (( $# >= 3 )) || die "--export needs REPORT_DIR and DEST (then TARGET)"
+        [[ -z ${NZ_MODE} ]] || die "--export and --quarantine are separate runs"
+        NZ_MODE=export NZ_REPORT=$2 NZ_DEST=$3; shift 2 ;;
+      --quarantine)
+        (( $# >= 2 )) || die "--quarantine needs REPORT_DIR (then TARGET)"
+        [[ -z ${NZ_MODE} ]] || die "--export and --quarantine are separate runs"
+        NZ_MODE=quarantine NZ_REPORT=$2; shift ;;
+      --keep-metadata) KEEP_METADATA=1 ;;
+      --yes)        ASSUME_YES=1 ;;
       --) shift; TARGETS+=("$@"); break ;;
       -*) usage >&2; die "Unknown option: $1" ;;
       *)  TARGETS+=("$1") ;;
@@ -365,22 +410,46 @@ eta() {
   printf '%dh%02dm' $(( left / 3600 )) $(( left % 3600 / 60 ))
 }
 
-# clam_eta <out> <batches> <jobs>: time left for the ClamAV batches. Batches
-# run <jobs> at a time, so the remaining ones take (remaining x average
-# finished-batch duration / jobs); a plain done/elapsed rate would overstate
-# the first estimates by up to the job count.
+# clam_split_batches <files.meta> <dir> <weight per batch>: split the
+# inventory ("size mtime mode path" NUL records) into newline-separated
+# --file-list batches dir/clambatch.NNNNN.lst of about <weight per batch>
+# each (bytes plus CLAM_FILE_WEIGHT per file), writing each batch's weight to
+# clambatch.NNNNN.w. Names containing a newline cannot go in a --file-list;
+# they go NUL-separated to clambatch.nl (weight in clambatch.nl.w).
+clam_split_batches() {
+  LC_ALL=C awk -v RS='\0' -v per="$3" -v fw="${CLAM_FILE_WEIGHT}" -v dir="$2" '
+    function close_batch() { if (cur != "") { close(cur); printf "%.0f\n", w > (base ".w"); close(base ".w") } }
+    { p = $0; sub(/^[0-9]+ -?[0-9]+ [0-7]+ /, "", p)
+      if (index(p, "\n")) { printf "%s%c", p, 0 > (dir "/clambatch.nl"); nlw += $1 + fw; next }
+      if (cur == "" || w >= per) { close_batch(); base = sprintf("%s/clambatch.%05d", dir, b++); cur = base ".lst"; w = 0 }
+      print p > cur; w += $1 + fw }
+    END { close_batch(); if (nlw) printf "%.0f\n", nlw > (dir "/clambatch.nl.w") }' "$1"
+}
+
+# clam_eta <out> <total weight> <jobs>: "NN% of data, ETA XhYYm" for the
+# ClamAV batches. Work is measured in batch weights (bytes plus a per-file
+# cost, see the batch split); the time per unit of weight comes from the
+# batches that finished, and <jobs> batches run at once.
+CLAM_FILE_WEIGHT=$(( 256 * 1024 ))
 clam_eta() {
-  local out=$1 total=$2 jobs=$3 rc start sum=0 done=0 left
-  for rc in "${out}"/clamscan.[0-9]*.rc; do
-    start=${rc%.rc}.start
-    [[ -e ${rc} && -e ${start} ]] || continue
-    sum=$(( sum + $(stat -c %Y -- "${rc}") - $(stat -c %Y -- "${start}") ))
-    done=$(( done + 1 ))
+  local out=$1 total=$2 jobs=$3 rc id start wfile secs=0 wdone=0 left pct
+  for rc in "${out}"/clamscan.*.rc; do
+    [[ -e ${rc} ]] || continue
+    id=${rc%.rc}; id=${id##*/clamscan.}
+    start=${out}/clamscan.${id}.start wfile=${out}/clambatch.${id}.w
+    [[ -e ${start} && -r ${wfile} ]] || continue
+    secs=$(( secs + $(stat -c %Y -- "${rc}") - $(stat -c %Y -- "${start}") ))
+    wdone=$(( wdone + $(<"${wfile}") ))
   done
-  (( done > 0 && total > done )) || { printf 'estimating'; return; }
-  left=$(( (total - done) * sum / done / jobs ))
-  (( left > 0 )) || left=60
-  printf '%dh%02dm' $(( left / 3600 )) $(( left % 3600 / 60 ))
+  (( total > 0 )) || total=1
+  pct=$(( wdone * 100 / total ))
+  if (( wdone == 0 || wdone >= total )); then
+    printf '%d%% of data, ETA estimating' "${pct}"
+    return
+  fi
+  left=$(( (total - wdone) * secs / wdone / jobs ))
+  (( left >= 60 )) || left=60
+  printf '%d%% of data, ETA %dh%02dm' "${pct}" $(( left / 3600 )) $(( left % 3600 / 60 ))
 }
 
 internal_scan() {
@@ -388,7 +457,7 @@ internal_scan() {
   local meta=${out}/files.meta list=${out}/files.lst
   local rec rest path rel erel sum mime size mtime mode line reason f rc
   local files=0 bytes=0 suspects=0 zero_len=0 unix_fs=0 jobs batches per
-  local os_meta=0 mismatches=0 is_meta base ext want
+  local os_meta=0 mismatches=0 is_meta base ext want clam_weight
   local total_files total_bytes n done_bytes started xpid
   local -a clam_opts=()
   local -A mime_of=() sum_of=() size_of=()
@@ -516,12 +585,13 @@ internal_scan() {
     batches=$(( (files + 999) / 1000 ))
     (( batches >= jobs )) || batches=${jobs}
     (( batches <= jobs * 20 )) || batches=$(( jobs * 20 ))
-    per=$(( (files + batches - 1) / batches ))
-    awk -v RS='\0' -v per="${per}" -v dir="${out}" '
-      index($0, "\n") { printf "%s%c", $0, 0 > (dir "/clambatch.nl"); next }
-      { b = int(n++ / per); f = sprintf("%s/clambatch.%05d.lst", dir, b)
-        if (f != cur) { if (cur != "") close(cur); cur = f }
-        print > f }' "${list}"
+    # Batches are balanced by work, not file count: a file weighs its size
+    # plus a fixed per-file cost, so a batch of big archives/disk images (which
+    # ClamAV unpacks) is not ten times slower than one of small photos. Each
+    # batch records its weight for the ETA (see clam_eta).
+    clam_weight=$(( bytes + files * CLAM_FILE_WEIGHT ))
+    per=$(( (clam_weight + batches - 1) / batches ))
+    clam_split_batches "${meta}" "${out}" "${per}"
     batches=$(count_existing "${out}"/clambatch.*.lst)
     [[ -s ${out}/clambatch.nl ]] && batches=$(( batches + 1 ))
     started=${EPOCHSECONDS}
@@ -536,6 +606,7 @@ internal_scan() {
       fi
       if [[ -s ${out}/clambatch.nl ]]; then
         rc=0
+        : >"${out}/clamscan.nl.start"
         xargs -0 -r clamscan "${clam_opts[@]}" -- <"${out}/clambatch.nl" \
           >"${out}/clamscan.nl.part" 2>"${out}/clamscan.nl.err" || rc=$?
         echo "${rc}" >"${out}/clamscan.nl.rc"
@@ -544,7 +615,7 @@ internal_scan() {
     xpid=$!
     while kill -0 "${xpid}" 2>/dev/null; do
       n=$(count_existing "${out}"/clamscan.*.rc)
-      scan_progress "${out}" "clamav: ${n}/${batches} batches done, ETA $(clam_eta "${out}" "${batches}" "${jobs}")"
+      scan_progress "${out}" "clamav: ${n}/${batches} batches done, $(clam_eta "${out}" "${clam_weight}" "${jobs}")"
       sleep 10
     done
     wait "${xpid}" || true
@@ -599,6 +670,360 @@ if (( INTERNAL_SCAN )); then
   exit
 fi
 
+#--- Neutralizing reviewed threats: selection, export worker, quarantine ----
+# --export and --quarantine act on a finished report. They find each scanned
+# volume again through volumes.tsv's identity columns (source, filesystem
+# UUID, APFS volume index, partition number) and select files through
+# quarantine.tsv. Relative paths are only ever compared in their escaped form:
+# a path found on the volume is escaped with tsv_esc and matched against the
+# escaped string in the report, never the other way round.
+
+# OS metadata clutter is OS_METADATA (defined with the scan patterns), so the
+# scan's metadata count and --export's left-out set always agree.
+declare -gA Q_REL=() Q_SHA=() Q_INFO=()
+Q_KEYS=()
+
+# is_os_clutter <relative path>: true for OS metadata clutter.
+is_os_clutter() {
+  local rc=1 had=0
+  shopt -q nocasematch && had=1
+  shopt -s nocasematch
+  [[ $1 =~ ${OS_METADATA} ]] && rc=0
+  (( had )) || shopt -u nocasematch
+  return "${rc}"
+}
+
+# write_quarantine_template <report dir>: quarantine.tsv lists each file of
+# findings.tsv once (unique volume, sha256, path) with its strongest class and
+# every distinct "source: detail". DEFINITE and LIKELY lines are active,
+# REVIEW lines are commented out.
+write_quarantine_template() {
+  local dir=$1
+  [[ -f ${dir}/findings.tsv ]] || return 0
+  {
+    cat <<'HEADER'
+# quarantine.tsv - which files --export leaves out and --quarantine archives
+# and removes. Generated from findings.tsv: DEFINITE and LIKELY detections are
+# active, REVIEW findings are commented out. To select a file, delete the
+# leading "# " of its line; to keep a file, put "# " in front of its line.
+# Only active (uncommented) lines are acted on; blank and "#" lines are
+# ignored. --export also leaves out every other file with the SHA-256 of an
+# active line. Keep the five tab-separated columns and do not edit the paths
+# (they are escaped exactly as in findings.tsv).
+# volume_tag	sha256	class	detail	relpath
+HEADER
+    awk -F'\t' -v OFS='\t' '
+      NF >= 6 {
+        r = ($1 == "DEFINITE" ? 3 : ($1 == "LIKELY" ? 2 : ($1 == "REVIEW" ? 1 : 0)))
+        if (!r) next
+        k = $4 OFS $5 OFS $6; d = $2 ": " $3
+        if (!(k in rank)) { order[++n] = k; rank[k] = r; cls[k] = $1; det[k] = d; seen[k, d] = 1; next }
+        if (r > rank[k]) { rank[k] = r; cls[k] = $1 }
+        if (!((k, d) in seen)) { seen[k, d] = 1; det[k] = det[k] "; " d }
+      }
+      END { for (i = 1; i <= n; i++) { k = order[i]; split(k, f, OFS)
+              print (rank[k] >= 2 ? 0 : 1), f[1], f[2], cls[k], det[k], f[3] } }' "${dir}/findings.tsv" \
+      | LC_ALL=C sort -t "$(printf '\t')" -k1,1n -k2,2 -k6,6 \
+      | awk -F'\t' -v OFS='\t' '{ print ($1 == 1 ? "# " : "") $2, $3, $4, $5, $6 }'
+  } >"${dir}/quarantine.tsv"
+}
+
+# load_quarantine_selection <quarantine.tsv>: read the active lines into
+# Q_KEYS (ordered "tag<TAB>escaped relpath"), Q_REL[key]=sha256,
+# Q_INFO[key]="class<TAB>detail" and Q_SHA[sha256]=1. A malformed active line
+# is an error: the selection must be exactly what the user wrote.
+load_quarantine_selection() {
+  local file=$1 line rest tabs tag sum cls det rel key n=0
+  Q_KEYS=(); Q_REL=(); Q_SHA=(); Q_INFO=()
+  [[ -f ${file} && -r ${file} ]] || { printf 'cannot read %s\n' "${file}" >&2; return 1; }
+  while IFS= read -r line || [[ -n ${line} ]]; do
+    n=$(( n + 1 ))
+    line=${line%$'\r'}
+    [[ ${line} =~ ^[[:space:]]*(#|$) ]] && continue
+    tabs=${line//[!$'\t']/}
+    if (( ${#tabs} != 4 )); then
+      printf '%s line %d: expected 5 tab-separated columns (volume_tag, sha256, class, detail, relpath)\n' \
+        "${file##*/}" "${n}" >&2
+      return 1
+    fi
+    tag=${line%%$'\t'*}; rest=${line#*$'\t'}
+    sum=${rest%%$'\t'*}; rest=${rest#*$'\t'}
+    cls=${rest%%$'\t'*}; rest=${rest#*$'\t'}
+    det=${rest%%$'\t'*}; rel=${rest#*$'\t'}
+    if [[ -z ${tag} || -z ${rel} || ! ${sum} =~ ^([0-9a-f]{64}|-)$ ]]; then
+      printf '%s line %d: bad volume tag, sha256 or path\n' "${file##*/}" "${n}" >&2
+      return 1
+    fi
+    key=${tag}$'\t'${rel}
+    [[ -n ${Q_REL[${key}]+x} ]] || Q_KEYS+=("${key}")
+    Q_REL[${key}]=${sum}
+    Q_INFO[${key}]=${cls}$'\t'${det}
+    [[ ${sum} == - ]] || Q_SHA[${sum}]=1
+  done <"${file}"
+}
+
+# match_volume_tag <volumes.tsv> <fstype> <uuid|-> <partition number|-> <APFS volume|->:
+# print the report tag of the scanned volume this one is. The filesystem UUID
+# decides (the partition number breaks a tie between clones); only when one
+# side has no UUID does fstype + partition number decide. Exit 1: no match,
+# 2: ambiguous, 3: the report predates the identity columns.
+match_volume_tag() {
+  awk -F'\t' -v fs="$2" -v uuid="$3" -v part="$4" -v av="$5" '
+    NF < 7 { old = 1; next }
+    $2 != fs || $6 != av { next }
+    uuid != "-" && $5 == uuid { u[++nu] = $1; up[nu] = $7 }
+    (uuid == "-" || $5 == "-") && $7 == part { p[++np] = $1 }
+    END {
+      if (nu == 1) { print u[1]; exit 0 }
+      if (nu > 1) {
+        for (i = 1; i <= nu; i++) if (up[i] == part) { m++; t = u[i] }
+        if (m == 1) { print t; exit 0 }
+        print "ambiguous: " nu " scanned volumes share UUID " uuid > "/dev/stderr"; exit 2
+      }
+      if (np == 1) { print p[1]; exit 0 }
+      if (np > 1) { print "ambiguous: " np " scanned " fs " volumes match partition " part > "/dev/stderr"; exit 2 }
+      if (old) { print "volumes.tsv has no volume identity columns (report from an older version); rescan" > "/dev/stderr"; exit 3 }
+      print "no scanned " fs " volume with UUID " uuid " / partition " part > "/dev/stderr"; exit 1
+    }' "$1"
+}
+
+# quarantine_fs_types <fstype>: the mount types to try for an in-place
+# read-write quarantine, or an explanation and failure for filesystems Linux
+# cannot safely write.
+quarantine_fs_types() {
+  case $1 in
+    vfat|exfat|ext2|ext3|ext4|btrfs|xfs) printf '%s' "$1" ;;
+    ntfs) printf 'ntfs3 ntfs-3g' ;;
+    apfs|hfs|hfsplus)
+      printf '%s has no safe read-write Linux driver: quarantine on a Mac (or a macOS VM), or use --export\n' "$1" >&2
+      return 1 ;;
+    *)
+      printf '%s is not supported for in-place quarantine (only vfat, exfat, ntfs, ext2/3/4, btrfs, xfs); use --export\n' "${1:-unknown}" >&2
+      return 1 ;;
+  esac
+}
+
+# check_export_dest <dest>: print DEST as an absolute path, or explain why it
+# cannot be used: it must be new or empty, outside /tmp and /var/tmp (hidden by
+# the sandbox's PrivateTmp), outside the scanner's mounts, free of whitespace.
+check_export_dest() {
+  local d
+  [[ -n $1 ]] || { echo 'DEST is empty' >&2; return 1; }
+  d=$(readlink -m -- "$1")
+  case ${d} in
+    /tmp|/tmp/*|/var/tmp|/var/tmp/*)
+      echo "DEST ${d} is under /tmp or /var/tmp (PrivateTmp hides it from the export sandbox)" >&2; return 1 ;;
+    /run/scan-untrusted-media.*)
+      echo "DEST ${d} is inside the scanner's mounts" >&2; return 1 ;;
+    /) echo 'DEST must not be /' >&2; return 1 ;;
+  esac
+  [[ ${d} != *[[:space:]]* ]] || { echo "DEST ${d} contains whitespace (systemd sandbox path)" >&2; return 1; }
+  if [[ -e ${d} ]]; then
+    [[ -d ${d} ]] || { echo "DEST ${d} exists and is not a directory" >&2; return 1; }
+    [[ -z $(ls -A -- "${d}") ]] || { echo "DEST ${d} is not empty" >&2; return 1; }
+  fi
+  printf '%s' "${d}"
+}
+
+# export_tree <volume root> <dest dir> <files.tsv> <quarantine.tsv> <tag> <log> <keep metadata 0|1> <progress dir>:
+# the export worker (runs inside the sandbox, or directly in tests). Copies
+# every regular file below <volume root> into <dest dir> unless it is OS
+# clutter, absent from the volume's scan inventory, selected in quarantine.tsv
+# or shares the SHA-256 of a selected file. Copies get mode 0644 (directories
+# 0755) and nothing else from the source: no owner, exec/setuid bits, xattrs
+# or ACLs. Each copy is hashed again and deleted unless it matches files.tsv.
+# Log lines: status, reason, tag, sha256, escaped relpath.
+export_tree() {
+  local root=${1%/} out=${2%/} files_tsv=$3 qfile=$4 tag=$5 log=$6 keep=$7 prog=$8
+  local sum size mtime mode mime erel ty rel src dst want got n=0 total=0 copied=0 bytes=0 lfd line
+  local -A want_sum=() want_size=() seen=()
+  [[ -d ${root} && -d ${out} && -f ${files_tsv} && -d ${prog} ]] \
+    || { echo "internal-export: bad paths" >&2; return 1; }
+  load_quarantine_selection "${qfile}" || return 1
+  umask 022
+  while IFS=$'\t' read -r sum size mtime mode mime erel; do
+    [[ -n ${erel} ]] || continue
+    want_sum[${erel}]=${sum} want_size[${erel}]=${size}
+    total=$(( total + 1 ))
+  done <"${files_tsv}"
+  exec {lfd}>>"${log}"
+  nz_log() { printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "${tag}" "$3" "$4" >&"${lfd}"; }
+  scan_progress "${prog}" "export: 0/${total} files"
+  while IFS= read -r -d '' ty && IFS= read -r -d '' rel; do
+    n=$(( n + 1 ))
+    (( n % 200 )) || scan_progress "${prog}" "export: ${n}/${total} files examined, ${copied} copied ($(human_bytes "${bytes}"))"
+    tsv_esc "${rel}"; erel=${REPLY}
+    [[ ${ty} == f ]] && seen[${erel}]=1
+    want=${want_sum[${erel}]--}
+    if (( ! keep )) && is_os_clutter "${rel}"; then
+      nz_log skipped 'OS metadata (--keep-metadata copies it)' "${want}" "${erel}"; continue
+    fi
+    if [[ ${ty} != f ]]; then
+      nz_log skipped "not a regular file (find type ${ty})" - "${erel}"; continue
+    fi
+    if [[ -z ${want_sum[${erel}]+x} ]]; then
+      nz_log skipped 'not in the scan inventory (files.tsv): never scanned' - "${erel}"; continue
+    fi
+    if [[ ${want} == - ]]; then
+      nz_log skipped 'unreadable at scan time (no sha256 recorded)' - "${erel}"; continue
+    fi
+    if [[ -n ${Q_REL[${tag}$'\t'${erel}]+x} ]]; then
+      nz_log skipped 'selected in quarantine.tsv' "${want}" "${erel}"; continue
+    fi
+    if [[ -n ${Q_SHA[${want}]+x} ]]; then
+      nz_log skipped 'same sha256 as a file selected in quarantine.tsv' "${want}" "${erel}"; continue
+    fi
+    src=${root}/${rel} dst=${out}/${rel}
+    if [[ ${rel} == */* ]] && ! mkdir -p -- "${dst%/*}" 2>/dev/null; then
+      nz_log error 'cannot create the destination directory' "${want}" "${erel}"; continue
+    fi
+    if [[ -e ${dst} || -L ${dst} ]]; then
+      nz_log error 'destination already exists (case-insensitive DEST?)' "${want}" "${erel}"; continue
+    fi
+    # nofollow: a directory TARGET that changes underneath cannot swap in a
+    # symlink to a host file (the hash check below would also catch it).
+    if ! dd if="${src}" iflag=nofollow bs=1M status=none >"${dst}" 2>/dev/null; then
+      rm -f -- "${dst}"
+      nz_log error 'read or write error while copying' "${want}" "${erel}"; continue
+    fi
+    got=$(sha256sum <"${dst}"); got=${got%% *}
+    if [[ ${got} != "${want}" ]]; then
+      rm -f -- "${dst}"
+      nz_log mismatch "file changed since the scan (now ${got}); copy deleted" "${want}" "${erel}"; continue
+    fi
+    chmod 0644 -- "${dst}"
+    nz_log copied - "${want}" "${erel}"
+    copied=$(( copied + 1 )) bytes=$(( bytes + ${want_size[${erel}]:-0} ))
+  done < <(find "${root}" -xdev -mindepth 1 ! -type d -printf '%y\0%P\0' 2>"${prog}/find.err")
+  while IFS= read -r line; do
+    tsv_esc "${line}"
+    nz_log error "find: ${REPLY}" - -
+  done <"${prog}/find.err"
+  for erel in "${!want_sum[@]}"; do
+    [[ -n ${seen[${erel}]+x} ]] || nz_log missing 'in files.tsv but no longer on the volume' "${want_sum[${erel}]}" "${erel}"
+  done
+  exec {lfd}>&-
+  scan_progress "${prog}" "done: ${copied} files copied, $(human_bytes "${bytes}")"
+}
+
+# The conventional password for archived malware samples: it only stops
+# accidental extraction and on-access scanners from re-flagging the archive.
+QUARANTINE_PASSWORD=infected
+NZ_LOG=
+QDIR=
+
+# nz_record <status> <reason> <tag> <sha256> <escaped relpath>: one log line.
+nz_record() { printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" >>"${NZ_LOG}"; }
+
+# nz_summary: counts per status and per reason from the run's log; true when
+# nothing went wrong (no error, mismatch or missing line).
+nz_summary() {
+  echo
+  log "Summary (full list: ${NZ_LOG}):"
+  awk -F'\t' '{ c[$1]++ } END { for (k in c) printf "  %-12s %d\n", k ":", c[k] }' "${NZ_LOG}" | sort
+  awk -F'\t' '$2 != "-" { r = $2; gsub(/ \(now [^)]*\)/, "", r); if (length(r) > 110) r = substr(r, 1, 110) "..."
+                          c[$1 ": " r]++ }
+              END { for (k in c) printf "  %8d  %s\n", c[k], k }' "${NZ_LOG}" | sort -rn | head -n 30
+  ! awk -F'\t' '$1 == "error" || $1 == "mismatch" || $1 == "missing" { f = 1 } END { exit !f }' "${NZ_LOG}"
+}
+
+# nz_verify_archive <archive> <sha256>: 7-Zip's own test passes and the
+# extracted content hashes to <sha256>.
+nz_verify_archive() {
+  local got
+  7z t -p"${QUARANTINE_PASSWORD}" -bd -- "$1" >/dev/null 2>&1 || return 1
+  got=$(7z x -so -p"${QUARANTINE_PASSWORD}" -bd -- "$1" 2>/dev/null | sha256sum) || return 1
+  [[ ${got%% *} == "$2" ]]
+}
+
+# quarantine_file <path> <key>: verify, archive, verify the archive, write the
+# stub, delete the original. Runs file operations through the caller's "run"
+# prefix (sudo on Unix filesystems). Nothing on the volume is ever executed,
+# and the stub is created with O_EXCL|O_NOFOLLOW so a planted symlink cannot
+# redirect a root write onto the host.
+quarantine_file() {
+  local p=$1 key=$2 tag want got arch tmp stub erel cls det base
+  tag=${key%%$'\t'*} erel=${key#*$'\t'} want=${Q_REL[${key}]}
+  cls=${Q_INFO[${key}]%%$'\t'*} det=${Q_INFO[${key}]#*$'\t'}
+  if [[ ${want} == - ]]; then
+    nz_record skipped 'no sha256 recorded at scan time, cannot verify it; left in place' "${tag}" - "${erel}"
+    return 0
+  fi
+  got=$("${run[@]}" sha256sum -z -- "${p}" | tr -d '\0') || got=
+  got=${got%% *}
+  if [[ ${got} != "${want}" ]]; then
+    nz_record mismatch "sha256 differs from quarantine.tsv (now ${got:-unreadable}); left in place" "${tag}" "${want}" "${erel}"
+    return 0
+  fi
+  arch=${QDIR}/${want}.7z
+  if ! { [[ -f ${arch} ]] && nz_verify_archive "${arch}" "${want}"; }; then
+    tmp=${QDIR}/.${want}.partial.7z
+    rm -f -- "${tmp}"
+    # The member is named by its hash: nothing extracts under a name a file
+    # manager would open, and hostile names never reach 7-Zip.
+    if ! "${run[@]}" cat -- "${p}" \
+        | 7z a -t7z -mhe=on -p"${QUARANTINE_PASSWORD}" -bd -si"${want}" -- "${tmp}" >/dev/null 2>&1; then
+      rm -f -- "${tmp}"
+      nz_record error '7-Zip could not archive it; left in place' "${tag}" "${want}" "${erel}"
+      return 0
+    fi
+    if ! nz_verify_archive "${tmp}" "${want}"; then
+      rm -f -- "${tmp}"
+      nz_record error 'archive failed verification; left in place' "${tag}" "${want}" "${erel}"
+      return 0
+    fi
+    chmod 0600 -- "${tmp}"
+    mv -f -- "${tmp}" "${arch}"
+  fi
+  base=${p##*/}
+  tsv_esc "${base}"
+  base=${REPLY}
+  stub=${p}.QUARANTINED.txt
+  if ! nz_stub_text "${base}" "${want}" "${cls}" "${det}" | "${run[@]}" dd of="${stub}" conv=excl oflag=nofollow status=none 2>/dev/null; then
+    stub=${p%/*}/QUARANTINED-${want}.txt
+    nz_stub_text "${base}" "${want}" "${cls}" "${det}" \
+      | "${run[@]}" dd of="${stub}" conv=excl oflag=nofollow status=none 2>/dev/null || {
+        nz_record error 'could not write the stub; original left in place (archive kept)' "${tag}" "${want}" "${erel}"
+        return 0; }
+  fi
+  if ! "${run[@]}" rm -- "${p}"; then
+    "${run[@]}" rm -f -- "${stub}"
+    nz_record error 'could not delete the original (archive kept)' "${tag}" "${want}" "${erel}"
+    return 0
+  fi
+  [[ -s ${QDIR}/index.tsv ]] || printf '# date\tvolume_tag\tsha256\tclass\tdetail\trelpath\n' >"${QDIR}/index.tsv"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -Is)" "${tag}" "${want}" "${cls}" "${det}" "${erel}" >>"${QDIR}/index.tsv"
+  tsv_esc "${stub##*/}"
+  nz_record quarantined "archived as quarantine/${want}.7z, stub ${REPLY}" "${tag}" "${want}" "${erel}"
+}
+
+# nz_stub_text <escaped name> <sha256> <class> <detail>
+nz_stub_text() {
+  cat <<STUB
+This file was removed by scan-untrusted-media.sh --quarantine because it was
+flagged as malware. Do not try to recover it unless you know it is safe.
+
+Original name: $1
+SHA-256:       $2
+Detection:     $3: $4
+Date:          $(date -R)
+Archive:       $2.7z in the quarantine/ folder of the scan report
+               ${NZ_REPORT} on $(uname -n)
+               (7-Zip, password "${QUARANTINE_PASSWORD}", encrypted file names)
+
+To restore (only on a machine where it cannot do harm):
+  7z x -p${QUARANTINE_PASSWORD} $2.7z     # extracts a file named $2
+  then rename that file back to the original name above.
+STUB
+}
+
+if (( INTERNAL_EXPORT )); then
+  shift
+  (( $# == 8 )) || die "--internal-export needs 8 arguments"
+  export_tree "$@"
+  exit
+fi
+
 # Sourced by tests: stop before doing anything.
 [[ ${SCAN_UNTRUSTED_MEDIA_LIB:-0} == 1 ]] && return 0
 
@@ -611,6 +1036,15 @@ else
   [[ -z ${IMAGE_DIR} || -d ${IMAGE_DIR} ]] || die "--image-dir ${IMAGE_DIR} is not a directory"
 fi
 (( VT_ALL == 0 || USE_VT == 1 )) || die "--vt-all needs --vt"
+if [[ -n ${NZ_MODE} ]]; then
+  [[ -z ${SESSION_ACTION} ]] || die "--${NZ_MODE} cannot be combined with --${SESSION_ACTION}-session"
+  (( ${#TARGETS[@]} == 1 )) || die "--${NZ_MODE} takes exactly one TARGET"
+  [[ -z ${IMAGE_DIR} && -z ${REPORT_DIR} ]] \
+    || die "--image-dir and --report-dir do not apply to --${NZ_MODE}"
+  (( ! KEEP_MOUNTED )) || die "--keep-mounted does not apply to --${NZ_MODE}"
+fi
+(( ! KEEP_METADATA )) || [[ ${NZ_MODE} == export ]] || die "--keep-metadata needs --export"
+(( ! ASSUME_YES )) || [[ ${NZ_MODE} == quarantine ]] || die "--yes needs --quarantine"
 [[ -z ${YARA_RULES} || -r ${YARA_RULES} ]] || die "Cannot read --yara-rules ${YARA_RULES}"
 [[ -z ${CLAM_DB} || -e ${CLAM_DB} ]] || die "No such --clam-db ${CLAM_DB}"
 [[ -z ${CLAM_DB} ]] || CLAM_DB=$(readlink -f -- "${CLAM_DB}")
@@ -623,6 +1057,8 @@ LOOPS=()
 CRYPT_MAPS=()
 LVM_ACTIVE=()
 RO_DEVS=()
+RW_NODES=()
+VOLUME_HANDLER=scan_volume
 FRESHCLAM_WAS_ACTIVE=0
 KEEPALIVE_PID=
 CONSOLE_PID=
@@ -643,11 +1079,21 @@ case " ${ID:-} ${ID_LIKE:-} " in
 esac
 
 install_tools() {
-  local p missing=() kver
+  local p missing=() kver mac_fs=1
+  local -a pkgs_fedora=("${PKGS_FEDORA[@]}") pkgs_arch=("${PKGS_ARCH[@]}")
+  local -a need=(clamscan yara yarac ddrescue file jq curl unzip sha256sum systemd-run losetup blkid lsblk)
+  # --export only mounts and copies; --quarantine needs 7-Zip (both distros'
+  # 7zip package provides /usr/bin/7z) and never mounts APFS or HFS+.
+  case ${NZ_MODE} in
+    export) pkgs_fedora=(apfs-fuse kernel-modules-extra) pkgs_arch=()
+            need=(sha256sum systemd-run losetup blkid lsblk find) ;;
+    quarantine) pkgs_fedora=("${PKGS_7ZIP_FEDORA[@]}") pkgs_arch=("${PKGS_7ZIP_ARCH[@]}") mac_fs=0
+            need=(7z sha256sum blkid lsblk blockdev dd find) ;;
+  esac
   kver=$(uname -r)
   case ${DISTRO} in
     fedora)
-      for p in "${PKGS_FEDORA[@]}"; do
+      for p in "${pkgs_fedora[@]}"; do
         [[ ${p} == kernel-modules-extra || ${p} == apfs-fuse ]] && continue
         rpm -q --whatprovides "${p}" >/dev/null 2>&1 || missing+=("${p}")
       done
@@ -657,34 +1103,34 @@ install_tools() {
       fi
       # apfs-fuse exists only in newer Fedora repos (F43+); a missing package
       # must not abort the whole scan - APFS degrades to a coverage gap.
-      if ! rpm -q --whatprovides apfs-fuse >/dev/null 2>&1; then
+      if (( mac_fs )) && ! rpm -q --whatprovides apfs-fuse >/dev/null 2>&1; then
         sudo dnf -y install apfs-fuse \
           || warn "apfs-fuse is not installable on this release; APFS volumes will be reported as coverage gaps."
       fi
       # hfsplus.ko lives in kernel-modules-extra and must match the running
       # kernel; after a kernel update that means installing it and rebooting.
-      if ! rpm -q "kernel-modules-extra-${kver}" >/dev/null 2>&1; then
+      if (( mac_fs )) && ! rpm -q "kernel-modules-extra-${kver}" >/dev/null 2>&1; then
         log "Installing kernel-modules-extra for the running kernel (HFS+ support)"
         sudo dnf -y install "kernel-modules-extra-${kver}" \
           || warn "kernel-modules-extra-${kver} is not installable; HFS+ volumes will not mount until you install kernel-modules-extra and reboot into the matching kernel."
       fi
       ;;
     arch)
-      for p in "${PKGS_ARCH[@]}"; do
+      for p in "${pkgs_arch[@]}"; do
         pacman -Q "${p}" >/dev/null 2>&1 || missing+=("${p}")
       done
       if (( ${#missing[@]} )); then
         log "Installing scanner tools: ${missing[*]}"
         sudo pacman -S --needed --noconfirm "${missing[@]}" || die "pacman install failed"
       fi
-      command -v apfs-fuse >/dev/null || warn "apfs-fuse is missing (AUR: apfs-fuse-git); APFS volumes will be reported as coverage gaps."
+      (( ! mac_fs )) || command -v apfs-fuse >/dev/null || warn "apfs-fuse is missing (AUR: apfs-fuse-git); APFS volumes will be reported as coverage gaps."
       ;;
     *) warn "Unrecognised distribution; tools must already be installed." ;;
   esac
-  for p in clamscan yara yarac ddrescue file jq curl unzip sha256sum systemd-run losetup blkid lsblk; do
+  for p in "${need[@]}"; do
     command -v "${p}" >/dev/null || die "Required tool missing: ${p}"
   done
-  command -v apfs-fuse >/dev/null && command -v apfsutil >/dev/null \
+  (( ! mac_fs )) || { command -v apfs-fuse >/dev/null && command -v apfsutil >/dev/null; } \
     || warn "apfs-fuse/apfsutil missing: APFS volumes cannot be mounted."
 }
 
@@ -712,6 +1158,8 @@ cleanup() {
     for i in "${LOOPS[@]}"; do sudo losetup -d "${i}" 2>/dev/null; done
     [[ -d ${MNT_BASE} ]] && sudo rmdir -- "${MNT_BASE}" 2>/dev/null
   fi
+  # --quarantine interrupted mid-volume: never leave a node writable.
+  for i in "${RW_NODES[@]}"; do sudo blockdev --setro "${i}" 2>/dev/null; done
   # A paused freshclam daemon must not stay down just because the scan ended
   # on an error path (die/INT during prepare_clamav skips its restart).
   (( FRESHCLAM_WAS_ACTIVE )) && sudo systemctl start clamav-freshclam.service 2>/dev/null
@@ -1023,7 +1471,7 @@ mount_apfs() { # <node> <tag>
     sudo mkdir -p -- "${mp}"
     if sudo apfs-fuse -o "allow_other,nosuid,nodev,noexec,uid=${UID},gid=${USER_GID},vol=${v}" "${node}" "${mp}" </dev/tty; then
       MOUNTS+=("${mp}")
-      scan_volume "${mp}" apfs "${tag}-v${v}"
+      "${VOLUME_HANDLER}" "${mp}" apfs "${tag}-v${v}" "${node}" "${v}"
     else
       sudo rmdir -- "${mp}" 2>/dev/null
       gap "${tag}-v${v}" mount "APFS volume ${v} '${vname[${v}]:-}' not mounted${enc[${v}]:+ (encrypted, not unlocked)}"
@@ -1127,7 +1575,7 @@ mount_and_scan() {
     iso9660|udf) try_mount "${node}" "${mp}" "${fstype}" "${base},${own}" ;;
     *) try_mount "${node}" "${mp}" "${fstype}" "${base}" ;;   # squashfs, erofs
   esac || { gap "${tag}" mount "${fstype} mount failed: $(tr '\n' ' ' <"${REPORT_DIR}/mount.err")"; return 0; }
-  scan_volume "${mp}" "${fstype}" "${tag}"
+  "${VOLUME_HANDLER}" "${mp}" "${fstype}" "${tag}" "${node}"
 }
 
 # scan_block <top node> <tag>: every partition / filesystem on a device or
@@ -1161,45 +1609,86 @@ scan_block() {
 }
 
 #--- Scanning -----------------------------------------------------------------
-# scan_volume <root> <fstype> <tag>: run the worker in a transient sandbox as
-# the invoking user. CAP_DAC_READ_SEARCH lets it read files owned by the Mac
-# account (uid 501, mode 0700) without root; no network, read-only host.
-scan_volume() {
-  local root=$1 fstype=$2 tag=$3 out rc=0 poller
-  out=${REPORT_DIR}/volumes/${tag}
-  mkdir -p -- "${out}"
-  printf '%s\t%s\t%s\n' "${tag}" "${fstype}" "${root}" >>"${REPORT_DIR}/volumes.tsv"
-  UNIT_SEQ=$(( UNIT_SEQ + 1 ))
-  log "Scanning ${tag} (${fstype}) at ${root}"
-  # The worker runs as "bash <script>", never by exec'ing the script itself:
-  # under SELinux, systemd (init_t) may not execute a file labeled
-  # user_home_t (a checkout in ~), which fails every scan with 203/EXEC.
-  # bash is bin_t and transitions to unconfined_service_t, which may read it.
-  # Print the worker's progress file once a minute while the sandbox runs.
-  ( last=
-    while sleep 60; do
-      [[ -r ${out}/progress ]] || continue
-      cur=$(<"${out}/progress")
-      [[ ${cur} == "${last}" ]] || note "[${tag} $(date +%H:%M)] ${cur}"
-      last=${cur}
-    done ) &
-  poller=$!
+# volume_identity <node|-> [APFS volume index]: the volumes.tsv identity
+# columns: source (the partition node, or the backing image file of a loop
+# device), filesystem UUID, APFS volume index, partition number (0 for a
+# filesystem on the whole device). --export/--quarantine find the volume
+# again by them. Directory targets have none.
+volume_identity() {
+  local node=$1 av=${2:--} name src uuid part=0
+  if [[ ${node} == - ]]; then printf -- '-\t-\t-\t-'; return 0; fi
+  name=${node##*/}
+  [[ -r /sys/class/block/${name}/partition ]] && part=$(<"/sys/class/block/${name}/partition")
+  src=${node}
+  if [[ ${name} =~ ^(loop[0-9]+) && -r /sys/block/${BASH_REMATCH[1]}/loop/backing_file ]]; then
+    src=$(<"/sys/block/${BASH_REMATCH[1]}/loop/backing_file")
+  fi
+  uuid=$(sudo blkid -p -s UUID -o value -- "${node}" 2>/dev/null) || uuid=
+  [[ ${uuid} =~ ^[A-Za-z0-9._-]+$ ]] || uuid=-
+  tsv_esc "${src}"
+  printf '%s\t%s\t%s\t%s' "${REPLY}" "${uuid}" "${av}" "${part}"
+}
+
+# run_sandboxed <unit> <umask> <read-write paths> <command>...: run a worker
+# in a transient systemd sandbox as the invoking user. CAP_DAC_READ_SEARCH lets
+# it read files owned by the Mac account (uid 501, mode 0700) without root;
+# no network, and the host is read-only except <read-write paths>
+# (space-separated). The worker must be "bash <script>", never the script
+# itself: under SELinux, systemd (init_t) may not execute a file labeled
+# user_home_t (a checkout in ~), which fails every run with 203/EXEC. bash is
+# bin_t and transitions to unconfined_service_t, which may read the script.
+run_sandboxed() {
+  local unit=$1 umask=$2 rw=$3
+  shift 3
   sudo systemd-run --quiet --wait --pipe --collect --expand-environment=no \
-    --unit="scan-utm-${EPOCHSECONDS}-$$-${UNIT_SEQ}" \
-    -p User="${USER_NAME}" -p WorkingDirectory=/ -p UMask=0077 \
+    --unit="${unit}" \
+    -p User="${USER_NAME}" -p WorkingDirectory=/ -p UMask="${umask}" \
     -p AmbientCapabilities=CAP_DAC_READ_SEARCH -p CapabilityBoundingSet=CAP_DAC_READ_SEARCH \
     -p NoNewPrivileges=yes -p PrivateNetwork=yes -p PrivateTmp=yes -p PrivateDevices=yes \
-    -p ProtectSystem=strict -p ProtectHome=read-only -p ReadWritePaths="${REPORT_DIR}" \
+    -p ProtectSystem=strict -p ProtectHome=read-only -p ReadWritePaths="${rw}" \
     -p ProtectKernelTunables=yes -p ProtectKernelModules=yes -p ProtectKernelLogs=yes \
     -p ProtectControlGroups=yes -p ProtectClock=yes -p ProtectHostname=yes \
     -p RestrictAddressFamilies=AF_UNIX -p RestrictNamespaces=yes -p RestrictSUIDSGID=yes \
     -p RestrictRealtime=yes -p LockPersonality=yes -p SystemCallArchitectures=native \
     -p Nice=5 -p IOSchedulingClass=best-effort -p IOSchedulingPriority=6 \
     -p Environment=LC_CTYPE=C.UTF-8 \
-    -- "${BASH}" "${SCRIPT_PATH}" --internal-scan "${root}" "${out}" "${fstype}" "${COMPILED_YARA}" "${CLAM_DB:--}" \
-    </dev/null || rc=$?
-  kill "${poller}" 2>/dev/null || true
-  wait "${poller}" 2>/dev/null || true
+    -- "$@" </dev/null
+}
+
+# start_poller <dir> <label>: print the worker's progress file (see
+# scan_progress) once a minute while a sandbox runs; stop_poller ends it.
+start_poller() {
+  local dir=$1 label=$2
+  ( last=
+    while sleep 60; do
+      [[ -r ${dir}/progress ]] || continue
+      cur=$(<"${dir}/progress")
+      [[ ${cur} == "${last}" ]] || note "[${label} $(date +%H:%M)] ${cur}"
+      last=${cur}
+    done ) &
+  POLLER=$!
+}
+stop_poller() {
+  kill "${POLLER}" 2>/dev/null || true
+  wait "${POLLER}" 2>/dev/null || true
+}
+
+# scan_volume <root> <fstype> <tag> [<node> [<APFS volume index>]]: record the
+# volume (with its identity, see volume_identity) and run the scan worker on
+# it in the sandbox (see run_sandboxed).
+scan_volume() {
+  local root=$1 fstype=$2 tag=$3 node=${4:--} apfs_vol=${5:--} out rc=0
+  out=${REPORT_DIR}/volumes/${tag}
+  mkdir -p -- "${out}"
+  printf '%s\t%s\t%s\t%s\n' "${tag}" "${fstype}" "${root}" "$(volume_identity "${node}" "${apfs_vol}")" \
+    >>"${REPORT_DIR}/volumes.tsv"
+  UNIT_SEQ=$(( UNIT_SEQ + 1 ))
+  log "Scanning ${tag} (${fstype}) at ${root}"
+  start_poller "${out}" "${tag}"
+  run_sandboxed "scan-utm-${EPOCHSECONDS}-$$-${UNIT_SEQ}" 0077 "${REPORT_DIR}" \
+    "${BASH}" "${SCRIPT_PATH}" --internal-scan "${root}" "${out}" "${fstype}" "${COMPILED_YARA}" "${CLAM_DB:--}" \
+    || rc=$?
+  stop_poller
   (( rc == 0 )) || gap "${tag}" scan "sandboxed scan exited ${rc}; results for this volume are incomplete"
   [[ -f ${out}/counts ]] && note "$(tr '\n' ' ' <"${out}/counts")"
 }
@@ -1355,8 +1844,8 @@ write_report() {
       printf 'Acquisition (device, model, serial, bytes, image, sha256, unreadable bytes):\n'
       sed 's/^/  /' "${REPORT_DIR}/acquisition.tsv"; echo
     fi
-    printf 'Volumes scanned (tag, filesystem, mountpoint):\n'
-    sed 's/^/  /' "${REPORT_DIR}/volumes.tsv" 2>/dev/null || echo '  none'
+    printf 'Volumes scanned (tag, filesystem, mountpoint, source, filesystem UUID):\n'
+    cut -f1-5 "${REPORT_DIR}/volumes.tsv" 2>/dev/null | sed 's/^/  /' || echo '  none'
     printf '\nFiles: %s (%s); executable/auto-run items for review: %s\n' "${files}" \
       "$(human_bytes "${bytes}")" "${suspects}"
     printf 'Content not matching its extension: %s; OS metadata (AppleDouble ._*, Spotlight,\n' "${mismatches}"
@@ -1403,6 +1892,329 @@ write_report() {
   echo
   log "Report: ${REPORT_DIR}"
   (( definite + likely == 0 ))
+}
+
+#--- Neutralizing reviewed threats: --export and --quarantine -----------------
+# Both modes start from a finished report and its reviewed quarantine.tsv.
+# --export never writes to the untrusted media: it mounts it read-only the
+# way a scan does and copies what is wanted out through the sandbox.
+# --quarantine changes the media itself and is the riskier of the two.
+PKGS_7ZIP_FEDORA=(7zip)
+PKGS_7ZIP_ARCH=(7zip)
+NZ_TAG=
+NZ_WHY=
+NZ_DEST_DEV=
+POLLER=
+declare -gA Q_FOUND=() NZ_DONE=()
+
+# nz_check_report: validate REPORT_DIR (a finished report from this version,
+# with a quarantine.tsv the user has reviewed) and load the selection.
+nz_check_report() {
+  local d
+  [[ -d ${NZ_REPORT} ]] || die "No such report directory: ${NZ_REPORT}"
+  d=$(readlink -f -- "${NZ_REPORT}")
+  case ${d} in
+    /tmp|/tmp/*|/var/tmp|/var/tmp/*)
+      die "Report dir must not be under /tmp or /var/tmp (PrivateTmp hides it from the sandbox)." ;;
+  esac
+  [[ ${d} != *[[:space:]]* ]] || die "Report dir must not contain whitespace (systemd sandbox path)"
+  [[ -f ${d}/volumes.tsv && -f ${d}/findings.tsv ]] || die "${d} is not a finished scan report (no volumes.tsv/findings.tsv)"
+  awk -F'\t' 'NF < 7 { bad = 1 } END { exit bad }' "${d}/volumes.tsv" \
+    || die "${d}/volumes.tsv has no volume identity columns (report from an older version); rescan the media first."
+  if [[ ! -f ${d}/quarantine.tsv ]]; then
+    write_quarantine_template "${d}"
+    die "Created ${d}/quarantine.tsv from findings.tsv. Review it (only active lines are acted on), then rerun."
+  fi
+  load_quarantine_selection "${d}/quarantine.tsv" || die "Fix ${d}/quarantine.tsv first."
+  NZ_REPORT=${d}
+}
+
+# nz_begin <mode>: the run's log, a private work dir that stands in for
+# REPORT_DIR (mount errors, gaps and APFS listings of the shared mount helpers
+# land there, never in the original report), session hardening, tools, sudo.
+nz_begin() {
+  local ts
+  ts=$(date +%Y%m%d-%H%M%S)
+  NZ_LOG=${NZ_REPORT}/$1-${ts}.log
+  REPORT_DIR=${NZ_REPORT}/$1-${ts}.work
+  mkdir -m 0700 -- "${REPORT_DIR}"
+  : >"${REPORT_DIR}/gaps-global.tsv"
+  printf '# %s %s, report %s, target %s\n# status\treason\tvolume_tag\tsha256\trelpath\n' \
+    "$1" "$(date -R)" "${NZ_REPORT}" "${TARGETS[0]}" >"${NZ_LOG}"
+  (( HARDEN_SESSION )) && harden_session "${REPORT_DIR}/restore-session-settings.sh"
+  install_tools
+  start_sudo
+  trap cleanup EXIT
+  trap 'exit 130' INT TERM
+  sudo mkdir -p -m 0755 -- "${MNT_BASE}"
+}
+
+# nz_log_gaps: volumes the mount helpers could not open become error lines.
+nz_log_gaps() {
+  local vtag src reason
+  while IFS=$'\t' read -r vtag src reason _; do
+    nz_record error "volume not opened (${src}): ${reason}" "${vtag}" - -
+  done <"${REPORT_DIR}/gaps-global.tsv"
+}
+
+# nz_volume_tag <node> <fstype> [APFS volume]: set NZ_TAG to the report tag
+# of a volume found on the target now, or empty with the reason in NZ_WHY.
+nz_volume_tag() {
+  local src uuid av part
+  IFS=$'\t' read -r src uuid av part <<<"$(volume_identity "$1" "${3:--}")"
+  NZ_WHY=
+  NZ_TAG=$(match_volume_tag "${NZ_REPORT}/volumes.tsv" "$2" "${uuid}" "${part}" "${av}" 2>"${REPORT_DIR}/match.err") \
+    || { NZ_TAG=; NZ_WHY="$(<"${REPORT_DIR}/match.err") (source ${src})"; }
+}
+
+# export_volume <mountpoint> <fstype> <probe tag> <node|-> [APFS volume]: the
+# VOLUME_HANDLER in --export mode. Maps the mounted volume to its report tag
+# and runs export_tree on it in the sandbox (see run_sandboxed): the invoking
+# user with CAP_DAC_READ_SEARCH, no network, writing only DEST and the report.
+export_volume() {
+  local mp=$1 fstype=$2 probe=$3 node=${4:--} av=${5:--} tag files out work rc=0
+  NZ_WHY=
+  if [[ ${node} == - ]]; then
+    tag=$(awk -F'\t' -v m="${mp}" 'NF >= 7 && $4 == "-" && $3 == m { print $1; exit }' "${NZ_REPORT}/volumes.tsv")
+    [[ -n ${tag} ]] || NZ_WHY="no scanned directory ${mp} in volumes.tsv"
+  else
+    nz_volume_tag "${node}" "${fstype}" "${av}"
+    tag=${NZ_TAG}
+  fi
+  if [[ -z ${tag} ]]; then
+    warn "${probe} (${node}, ${fstype}) is not exported: ${NZ_WHY:-no matching scanned volume}"
+    nz_record error "volume not exported: ${NZ_WHY:-no matching scanned volume}" "${probe}" - -
+    return 0
+  fi
+  if [[ -n ${NZ_DONE[${tag}]+x} ]]; then
+    warn "${probe} maps to ${tag} again; not exported twice"
+    nz_record error "a second volume on the target maps to this report volume; not exported" "${tag}" - -
+    return 0
+  fi
+  NZ_DONE[${tag}]=1
+  files=${NZ_REPORT}/volumes/${tag}/files.tsv
+  if [[ ! -f ${files} ]]; then
+    nz_record error 'no files.tsv for this volume (its scan did not finish); nothing copied' "${tag}" - -
+    return 0
+  fi
+  [[ $(stat -c %d -- "${mp}") != "${NZ_DEST_DEV}" ]] || die "DEST ${NZ_DEST} is on the untrusted volume ${tag}"
+  out=${NZ_DEST}/${tag} work=${REPORT_DIR}/${tag}
+  mkdir -m 0755 -- "${out}"
+  mkdir -m 0700 -- "${work}"
+  UNIT_SEQ=$(( UNIT_SEQ + 1 ))
+  log "Exporting ${tag} (${fstype}) from ${mp} -> ${out}"
+  start_poller "${work}" "export ${tag}"
+  run_sandboxed "export-utm-${EPOCHSECONDS}-$$-${UNIT_SEQ}" 0022 "${NZ_DEST} ${NZ_REPORT}" \
+    "${BASH}" "${SCRIPT_PATH}" --internal-export "${mp}" "${out}" "${files}" \
+    "${NZ_REPORT}/quarantine.tsv" "${tag}" "${NZ_LOG}" "${KEEP_METADATA}" "${work}" || rc=$?
+  stop_poller
+  if (( rc )); then
+    warn "${tag}: sandboxed export exited ${rc}; this volume is incomplete"
+    nz_record error "sandboxed export exited ${rc}; this volume is incomplete" "${tag}" - -
+  fi
+  [[ -r ${work}/progress ]] && note "${tag}: $(<"${work}/progress")"
+  return 0
+}
+
+export_main() {
+  local target=${TARGETS[0]} free need
+  nz_check_report
+  NZ_DEST=$(check_export_dest "${NZ_DEST}") || die "Choose a new or empty DEST directory."
+  if [[ -d ${target} ]]; then
+    target=$(readlink -f -- "${target}")
+    [[ ${NZ_DEST} != "${target}" && ${NZ_DEST} != "${target}"/* && ${target} != "${NZ_DEST}"/* ]] \
+      || die "DEST and TARGET must not contain each other"
+  fi
+  mkdir -p -- "${NZ_DEST}"
+  chmod 0755 -- "${NZ_DEST}"
+  NZ_DEST_DEV=$(stat -c %d -- "${NZ_DEST}")
+  if [[ -d ${target} && $(stat -c %d -- "${target}") == "${NZ_DEST_DEV}" ]]; then
+    die "DEST ${NZ_DEST} is on the same filesystem as TARGET ${target}"
+  fi
+  need=$(awk -F'\t' '{ s += $2 } END { printf "%.0f", s }' "${NZ_REPORT}"/volumes/*/files.tsv 2>/dev/null) || need=0
+  free=$(df -B1 --output=avail -- "${NZ_DEST}" | tail -n 1)
+  (( free >= ${need:-0} )) \
+    || warn "DEST has $(human_bytes "${free}") free; the scanned volumes hold $(human_bytes "${need}")."
+  nz_begin export
+  log "Exporting ${target} -> ${NZ_DEST}"
+  note "${#Q_KEYS[@]} file(s) selected in quarantine.tsv (and any file with the same SHA-256) are left out."
+  (( KEEP_METADATA )) || note "OS metadata clutter (._*, .DS_Store, .Spotlight-V100, ...) is left out (--keep-metadata keeps it)."
+  VOLUME_HANDLER=export_volume
+  if [[ -b ${target} ]]; then
+    IMAGE_MODE=direct
+    acquire_device "${target}"
+    scan_block "${ACQUIRED}" target
+  elif [[ -f ${target} ]]; then
+    attach_image "$(readlink -f -- "${target}")"
+    scan_block "${ATTACHED}" target
+  else
+    export_volume "${target}" "$(findmnt -no FSTYPE -T "${target}" 2>/dev/null || echo unknown)" dir -
+  fi
+  nz_log_gaps
+  if nz_summary; then
+    log "Export complete: ${NZ_DEST}"
+    return 0
+  fi
+  warn "Export incomplete: see the error/mismatch/missing lines in ${NZ_LOG}"
+  return 3
+}
+
+# nz_set_rw <node>: make one partition writable. On current kernels a
+# partition stays read-only while its whole disk is, so the parent disk is
+# made writable too when (and only when) that is what still blocks it.
+nz_set_rw() {
+  local node=$1 parent
+  sudo blockdev --setrw "${node}" || return 1
+  RW_NODES+=("${node}")
+  [[ $(sudo blockdev --getro "${node}") == 0 ]] && return 0
+  parent=$(lsblk -ndo PKNAME -- "${node}" 2>/dev/null) || parent=
+  [[ -n ${parent} ]] || return 1
+  parent=/dev/${parent##*/}
+  sudo blockdev --setrw "${parent}" || return 1
+  RW_NODES+=("${parent}")
+  [[ $(sudo blockdev --getro "${node}") == 0 ]]
+}
+
+# nz_set_ro: every node nz_set_rw touched goes back to read-only.
+nz_set_ro() {
+  local i
+  for (( i = ${#RW_NODES[@]} - 1; i >= 0; i-- )); do
+    sudo blockdev --setro "${RW_NODES[i]}" || warn "Could not set ${RW_NODES[i]} read-only again"
+  done
+  RW_NODES=()
+}
+
+# quarantine_volume <node> <fstype> <tag>: mount one volume read-write
+# (nosuid,nodev,noexec), quarantine its selected files, unmount, and make the
+# node read-only again.
+quarantine_volume() {
+  local node=$1 fstype=$2 tag=$3 mp=${MNT_BASE}/q-$3 t opts rw_ok=0 p rel
+  local -a types=() run=() hits=()
+  read -r -a types <<<"$(quarantine_fs_types "${fstype}")"
+  case ${fstype} in
+    vfat|exfat) opts="rw,nosuid,nodev,noexec,uid=${UID},gid=${USER_GID},fmask=0133,dmask=0022" ;;
+    ntfs) opts="rw,nosuid,nodev,noexec,uid=${UID},gid=${USER_GID}" ;;
+    *) opts=rw,nosuid,nodev,noexec; run=(sudo) ;;
+  esac
+  log "Quarantining on ${tag} (${fstype}, ${node})"
+  if ! nz_set_rw "${node}"; then
+    nz_set_ro
+    nz_record error "could not make ${node} writable" "${tag}" - -
+    return 0
+  fi
+  for t in "${types[@]}"; do
+    try_mount "${node}" "${mp}" "${t}" "${opts}" && { rw_ok=1; break; }
+  done
+  if (( ! rw_ok )); then
+    nz_set_ro
+    nz_record error "read-write ${fstype} mount failed: $(tr '\n' ' ' <"${REPORT_DIR}/mount.err")" "${tag}" - -
+    return 0
+  fi
+  # Collect the matches first: the walk must not see the volume change.
+  while IFS= read -r -d '' p; do
+    rel=${p#"${mp}"/}
+    tsv_esc "${rel}"
+    [[ -n ${Q_REL[${tag}$'\t'${REPLY}]+x} ]] || continue
+    Q_FOUND[${tag}$'\t'${REPLY}]=1
+    hits+=("${p}")
+  done < <("${run[@]}" find "${mp}" -xdev -type f -print0 2>/dev/null)
+  for p in "${hits[@]}"; do
+    rel=${p#"${mp}"/}
+    tsv_esc "${rel}"
+    quarantine_file "${p}" "${tag}"$'\t'"${REPLY}"
+  done
+  sync
+  if sudo umount -- "${mp}"; then
+    MOUNTS=("${MOUNTS[@]:0:${#MOUNTS[@]}-1}")
+    sudo rmdir -- "${mp}" 2>/dev/null || true
+  else
+    nz_record error "could not unmount ${mp}; it is unmounted on exit" "${tag}" - -
+  fi
+  nz_set_ro
+}
+
+# nz_confirm: y/N from the terminal unless --yes.
+nz_confirm() {
+  local ans=
+  (( ASSUME_YES )) && return 0
+  { : </dev/tty; } 2>/dev/null || die "No terminal to confirm on; rerun with --yes."
+  read -r -p 'Archive and remove these files from the drive? [y/N] ' ans </dev/tty || ans=
+  [[ ${ans} == [yY] || ${ans} == [yY][eE][sS] ]] || die "Aborted; nothing was changed."
+}
+
+quarantine_main() {
+  local target=${TARGETS[0]} key tag fs why node info fstype
+  local -a bad=() nodes=()
+  local -A tag_fs=() tag_dm=() sel_tags=() seen_tags=()
+  nz_check_report
+  [[ -b ${target} ]] || die "--quarantine works on the drive itself (a block device); for an image or a directory use --export."
+  if (( ${#Q_KEYS[@]} == 0 )); then
+    log "quarantine.tsv has no active lines; nothing to do."
+    return 0
+  fi
+  while IFS=$'\t' read -r tag fs _ src _; do
+    tag_fs[${tag}]=${fs}
+    # Volumes inside LUKS or LVM sit on device-mapper nodes (/dev/mapper/x,
+    # /dev/<vg>/<lv>), which --quarantine does not open; say so up front
+    # instead of reporting every selected file there as missing.
+    if [[ ${src} =~ ^/dev/[^/]+/ ]]; then tag_dm[${tag}]=${src}; fi
+  done <"${NZ_REPORT}/volumes.tsv"
+  for key in "${Q_KEYS[@]}"; do sel_tags[${key%%$'\t'*}]=1; done
+  for tag in "${!sel_tags[@]}"; do
+    if [[ -z ${tag_fs[${tag}]+x} ]]; then
+      bad+=("${tag}: not a volume in volumes.tsv")
+    elif [[ -n ${tag_dm[${tag}]+x} ]]; then
+      bad+=("${tag}: inside LUKS/LVM (${tag_dm[${tag}]}); in-place quarantine does not unlock or activate those - use --export")
+    elif ! why=$(quarantine_fs_types "${tag_fs[${tag}]}" 2>&1 >/dev/null); then
+      bad+=("${tag}: ${why}")
+    fi
+  done
+  if (( ${#bad[@]} )); then
+    printf '    %s\n' "${bad[@]}" >&2
+    die "Cannot quarantine in place there; comment those lines out of quarantine.tsv or use --export."
+  fi
+  log "Selected for quarantine on ${target} (volume, class, detail, path):"
+  for key in "${Q_KEYS[@]}"; do
+    note "${key%%$'\t'*}  ${Q_INFO[${key}]%%$'\t'*}  ${Q_INFO[${key}]#*$'\t'}  ${key#*$'\t'}"
+  done
+  warn "The affected volume(s) will be mounted READ-WRITE. That replays filesystem journals and runs the kernel driver's write paths on hostile metadata; for the highest-risk media do this in a disposable VM, or use --export instead."
+  nz_confirm
+  nz_begin quarantine
+  QDIR=${NZ_REPORT}/quarantine
+  mkdir -p -- "${QDIR}"
+  chmod 0700 -- "${QDIR}"
+  IMAGE_MODE=direct
+  acquire_device "${target}"
+  mapfile -t nodes < <(lsblk -nrpo NAME -- "${ACQUIRED}")
+  for node in "${nodes[@]}"; do
+    info=$(sudo blkid -p -o export -- "${node}" 2>/dev/null) || info=
+    fstype=$(sed -n 's/^TYPE=//p' <<<"${info}")
+    [[ -n ${fstype} ]] || continue
+    nz_volume_tag "${node}" "${fstype}"
+    tag=${NZ_TAG}
+    if [[ -z ${tag} ]]; then
+      note "${node} (${fstype}): no scanned volume matches (${NZ_WHY}); left alone"
+      continue
+    fi
+    [[ -n ${sel_tags[${tag}]+x} ]] || continue
+    if [[ -n ${seen_tags[${tag}]+x} ]]; then
+      nz_record error "${node} also maps to this report volume; left alone" "${tag}" - -
+      continue
+    fi
+    seen_tags[${tag}]=1
+    quarantine_volume "${node}" "${fstype}" "${tag}"
+  done
+  for key in "${Q_KEYS[@]}"; do
+    [[ -n ${Q_FOUND[${key}]+x} ]] \
+      || nz_record missing "not found on ${target} (volume not matched, or the file is gone)" \
+           "${key%%$'\t'*}" "${Q_REL[${key}]}" "${key#*$'\t'}"
+  done
+  if nz_summary; then
+    log "Quarantine complete; archives in ${QDIR}"
+    return 0
+  fi
+  warn "Quarantine incomplete: see the error/mismatch/missing lines in ${NZ_LOG}"
+  return 3
 }
 
 #--- Main ---------------------------------------------------------------------
@@ -1500,8 +2312,13 @@ main() {
   tail -n "+$(( global_gaps + 1 ))" -- "${REPORT_DIR}/gaps-global.tsv" >>"${REPORT_DIR}/gaps.tsv"
   rc=0
   write_report || rc=3
+  write_quarantine_template "${REPORT_DIR}" && log "Review ${REPORT_DIR}/quarantine.tsv before --export or --quarantine"
   return "${rc}"
 }
 
+case ${NZ_MODE} in
+  export) export_main; exit $? ;;
+  quarantine) quarantine_main; exit $? ;;
+esac
 main
 exit $?
