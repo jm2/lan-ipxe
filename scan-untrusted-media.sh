@@ -151,8 +151,6 @@ Read-only malware triage of untrusted media. TARGET is a block device
   --image-dir DIR     image block devices with ddrescue into DIR first and
                       scan the image (default: scan block devices in place,
                       strictly read-only)
-  --no-image          scan block devices in place (the default; kept for
-                      compatibility)
   --resume            continue an interrupted ddrescue image already in the
                       image dir (refused otherwise: a reader or stick without
                       a unique serial would reuse another drive's image)
@@ -184,7 +182,6 @@ USAGE
 #--- Arguments ----------------------------------------------------------------
 IMAGE_DIR=
 IMAGE_MODE=direct
-NO_IMAGE_FLAG=0
 REPORT_DIR=
 YARA_SET=extended
 YARA_RULES=
@@ -210,7 +207,6 @@ else
     case $1 in
       -h|--help) usage; exit 0 ;;
       --image-dir)  (( $# >= 2 )) || die "--image-dir needs a directory"; IMAGE_DIR=$2; IMAGE_MODE=image; shift ;;
-      --no-image)   NO_IMAGE_FLAG=1 ;;
       --report-dir) (( $# >= 2 )) || die "--report-dir needs a directory"; REPORT_DIR=$2; shift ;;
       --yara-set)
         (( $# >= 2 )) || die "--yara-set needs core, extended or full"
@@ -589,7 +585,6 @@ if [[ -n ${SESSION_ACTION} ]]; then
   (( ${#TARGETS[@]} == 0 )) || die "--${SESSION_ACTION}-session takes no TARGET"
 else
   (( ${#TARGETS[@]} )) || { usage >&2; die "No TARGET given."; }
-  (( NO_IMAGE_FLAG == 0 || ${#IMAGE_DIR} == 0 )) || die "--no-image and --image-dir contradict each other; pick one"
   [[ -z ${IMAGE_DIR} || -d ${IMAGE_DIR} ]] || die "--image-dir ${IMAGE_DIR} is not a directory"
 fi
 (( VT_ALL == 0 || USE_VT == 1 )) || die "--vt-all needs --vt"

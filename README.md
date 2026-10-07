@@ -425,7 +425,7 @@ so a pause in disk activity there is expected.
 
 - `--image-dir DIR` — image block devices with ddrescue into DIR (an existing
   directory) and scan the image; without it devices are scanned in place,
-  strictly read-only (`--no-image` is accepted for compatibility);
+  strictly read-only;
   `--report-dir DIR` (default `./media-scan-YYYYmmdd-HHMMSS`); `--resume` continues
   an interrupted image of the same drive (an existing image or map is otherwise
   refused, since readers and serial-less sticks would reuse another drive's image).
