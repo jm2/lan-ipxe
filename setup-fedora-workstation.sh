@@ -653,6 +653,41 @@ configure_wazuh_agent() {
     || die "the audit log collection stanza did not land in ${conf}"
 }
 
+# /etc/audit is root-only, so every audit helper reads through sudo; the
+# check mode only calls them after `sudo -n true` succeeds.
+AUDIT_TASK_NEVER_RE='^-a[[:space:]]+(task,never|never,task)'
+
+# disable_audit_task_never: comment out "-a task,never" in rules.d. Fedora's
+# stock audit.rules ships it to avoid per-syscall overhead, but it turns off
+# syscall auditing for every task, so none of the workstation rules (file
+# watches included) would ever record an event. Returns 0 when it edited a
+# file, 1 when there was nothing to do.
+disable_audit_task_never() {
+  local file edited=1
+  while IFS= read -r file; do
+    [[ -n ${file} ]] || continue
+    sudo sed -i -E "s/${AUDIT_TASK_NEVER_RE}/# disabled by ${0##*/} (turns off all syscall auditing): &/" -- "${file}" \
+      || die "could not disable the task,never audit rule in ${file}"
+    note "${file}: task,never audit rule disabled"
+    edited=0
+  done < <(sudo grep -rlE --include='*.rules' "${AUDIT_TASK_NEVER_RE}" /etc/audit/rules.d 2>/dev/null || true)
+  return "${edited}"
+}
+
+# audit_rules_effective: the workstation rules are in the kernel and no
+# task,never rule is suppressing them. auditctl -l prints file watches either
+# as "-w ... -k identity" or as "-F key=identity" depending on how they were
+# written, so accept both. auditctl -R stops at the first rule it cannot load,
+# so the file's first (identity) and last (auditd_config) keys must both be
+# present.
+audit_rules_effective() {
+  local rules
+  rules=$(sudo auditctl -l 2>/dev/null) || return 1
+  grep -Eq '(key=|-k )identity' <<<"${rules}" || return 1
+  grep -Eq '(key=|-k )auditd_config' <<<"${rules}" || return 1
+  ! grep -Eq '(task,never|never,task)' <<<"${rules}"
+}
+
 # wazuh_service_action: enable+start the agent for a configured manager, or
 # disable+stop it when none is (a running agent would only log connection
 # failures, and an enrolled-but-orphaned agent is worse than a disabled one).
@@ -1929,6 +1964,19 @@ check_security_state() {
       check_report DRIFT "unit ${unit}"
     fi
   done
+  # Audit rules: /etc/audit is root-only, so this needs cached sudo.
+  if sudo -n true 2>/dev/null; then
+    if sudo grep -rqE --include='*.rules' "${AUDIT_TASK_NEVER_RE}" /etc/audit/rules.d 2>/dev/null; then
+      check_report DRIFT "audit rules.d: a task,never rule disables all syscall auditing"
+    fi
+    if audit_rules_effective; then
+      check_report CURRENT "audit rules: loaded"
+    else
+      check_report DRIFT "audit rules: not in effect (identity rules missing or task,never loaded)"
+    fi
+  else
+    check_report NOTE "audit rules: unverified (root-only /etc/audit; run sudo -v first)"
+  fi
   if command -v getsebool >/dev/null; then
     # A failing getsebool (SELinux disabled) is a NOTE, not drift.
     state=$(getsebool antivirus_can_scan_system 2>/dev/null) || state=
@@ -2565,12 +2613,14 @@ enable_unit auditd.service
 # Started now (not merely enabled): the rules only protect once loaded.
 systemctl is-active --quiet auditd.service || sudo systemctl start auditd.service
 systemctl is-active --quiet auditd.service || die "auditd did not become active"
-if (( AUDIT_RULES_CHANGED )); then
+disable_audit_task_never && AUDIT_RULES_CHANGED=1
+if (( AUDIT_RULES_CHANGED )) || ! audit_rules_effective; then
   sudo augenrules --load || die "could not load the audit rules"
-  # The watch rules above show up as key-tagged entries in auditctl -l.
-  sudo auditctl -l 2>/dev/null | grep -q 'key=identity' \
-    || die "the identity audit rules are not loaded (auditctl -l)"
+  audit_rules_effective \
+    || die "the workstation audit rules are not fully in effect (check sudo augenrules --load output and sudo auditctl -l: rules missing or a task,never rule remains)"
   note "audit rules loaded"
+else
+  note "audit rules: loaded"
 fi
 
 #--- 13. AIDE ----------------------------------------------------------------

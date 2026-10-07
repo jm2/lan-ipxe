@@ -292,7 +292,8 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   streaming in full. Arch opens the media servers, Transmission and iperf3 in
   every profile because its hosts run them outside the script. auditd runs with curated high-signal rules (identity/auth
   files, sudoers, sshd config, unit/cron/shell-rc persistence, module loading, time
-  changes, mounts, auditd itself — no per-execve logging). AIDE is scoped to
+  changes, mounts, auditd itself — no per-execve logging); Fedora's stock
+  `-a task,never` rule, which silently disables all syscall auditing, is commented out. AIDE is scoped to
   configuration trees (`/etc`, `/usr/local`, `/root`) because `rpm -Va` already
   verifies packaged files and a whole-tree baseline would drown in nightly-update
   noise; the database is initialized once and a daily timer checks it without
