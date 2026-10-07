@@ -284,11 +284,12 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   (WAN port forwarding is in use) and rejects everything else, while the
   source-bound `workstation-lan` zone (192.168.1.0/24 + SD-WAN 192.168.2.0/23) opens
   SSH (firewalld puts each packet in exactly one zone, so LAN peers never fall
-  through to the default zone) plus only the services the selected profile actually
-  installs — Cockpit, GNOME Remote
-  Desktop, mDNS/printer discovery and iperf3 in core; Navidrome, OwnTone, Plex
+  through to the default zone) plus the LAN services — Cockpit, GNOME Remote
+  Desktop, mDNS/printer discovery, iperf3, and the hand-run LanCache (HTTP/HTTPS/DNS),
+  NFS (with mountd/rpcbind) and Samba in every profile; Navidrome, OwnTone, Plex
   (with its DLNA/GDM ports), Transmission's RPC/peer ports and Steam in-home
-  streaming in full. auditd runs with curated high-signal rules (identity/auth
+  streaming in full. Arch opens the media servers, Transmission and iperf3 in
+  every profile because its hosts run them outside the script. auditd runs with curated high-signal rules (identity/auth
   files, sudoers, sshd config, unit/cron/shell-rc persistence, module loading, time
   changes, mounts, auditd itself — no per-execve logging). AIDE is scoped to
   configuration trees (`/etc`, `/usr/local`, `/root`) because `rpm -Va` already

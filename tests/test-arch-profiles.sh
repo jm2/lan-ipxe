@@ -297,6 +297,16 @@ test_security_renders() (
   # peers would be rejected instead of falling through to the default zone.
   grep -Fq '<service name="ssh"/>' <<<"${out_core}" \
     || fail 'core LAN zone omits ssh (LAN peers would be rejected)'
+  # Hand-run servers on these hosts open in every profile.
+  for item in lancache nfs mountd rpc-bind samba; do
+    grep -Fq "<service name=\"${item}\"/>" <<<"${out_core}" \
+      || fail "core LAN zone omits ${item}"
+  done
+  # Arch hosts run the media servers by hand, so every profile opens them.
+  for item in plexmediaserver navidrome owntone transmission iperf3; do
+    grep -Fq "<service name=\"${item}\"/>" <<<"${out_core}" \
+      || fail "Arch core LAN zone omits ${item}"
+  done
   grep -Fq '<service name="cockpit"/>' <<<"${out_core}" \
     || fail 'core LAN zone omits cockpit'
   grep -Fq '<service name="rdp"/>' <<<"${out_core}" \
@@ -315,8 +325,6 @@ test_security_renders() (
   out_full=$(render_lan_zone "${FIREWALL_LAN_SERVICES[@]}")
   grep -Fq '<service name="steam-streaming"/>' <<<"${out_full}" \
     || fail 'full LAN zone omits Steam streaming'
-  ! grep -Fq '<service name="navidrome"/>' <<<"${out_full}" \
-    || fail 'Arch full LAN zone opens navidrome (no such package on Arch)'
 )
 
 test_clamav_db_bootstrap() (

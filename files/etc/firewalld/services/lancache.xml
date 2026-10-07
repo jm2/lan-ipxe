@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>LanCache</short>
+  <description>LanCache game-download cache: the monolithic cache (HTTP), the
+HTTPS SNI passthrough proxy, and lancache-dns, which answers CDN lookups with
+the cache's address.</description>
+  <port protocol="tcp" port="80"/>
+  <port protocol="tcp" port="443"/>
+  <port protocol="tcp" port="53"/>
+  <port protocol="udp" port="53"/>
+</service>

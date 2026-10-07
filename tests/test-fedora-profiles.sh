@@ -306,6 +306,11 @@ test_security_renders() (
   # peers would be rejected instead of falling through to the default zone.
   grep -Fq '<service name="ssh"/>' <<<"${out_core}" \
     || fail 'core LAN zone omits ssh (LAN peers would be rejected)'
+  # Hand-run servers on these hosts open in every profile.
+  for item in lancache nfs mountd rpc-bind samba; do
+    grep -Fq "<service name=\"${item}\"/>" <<<"${out_core}" \
+      || fail "core LAN zone omits ${item}"
+  done
   grep -Fq '<service name="cockpit"/>' <<<"${out_core}" \
     || fail 'core LAN zone omits cockpit'
   grep -Fq '<service name="iperf3"/>' <<<"${out_core}" \

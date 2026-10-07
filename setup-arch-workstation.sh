@@ -359,6 +359,7 @@ MANAGED_FILES=(
   "root|etc/firewalld/services/steam-streaming.xml|/etc/firewalld/services/steam-streaming.xml|0644"
   "root|etc/firewalld/services/transmission.xml|/etc/firewalld/services/transmission.xml|0644"
   "root|etc/firewalld/services/iperf3.xml|/etc/firewalld/services/iperf3.xml|0644"
+  "root|etc/firewalld/services/lancache.xml|/etc/firewalld/services/lancache.xml|0644"
   "root|etc/systemd/system/clamav-clamonacc.service.d/50-arch-workstation.conf|/etc/systemd/system/clamav-clamonacc.service.d/50-arch-workstation.conf|0644"
   "root|etc/systemd/system/clamav-media-scan.service|/etc/systemd/system/clamav-media-scan.service|0644"
   "root|usr/local/libexec/clamav-media-scan|/usr/local/libexec/clamav-media-scan|0755"
@@ -445,15 +446,18 @@ select_profile() {
   esac
   PKGS_OFFICIAL=("${PKGS_OFFICIAL_CORE[@]}")
   PKGS_AUR=("${PKGS_AUR_CORE[@]}")
-  # LAN-reachable services for the source-bound workstation-lan zone: only
-  # services whose server the profile actually installs are opened. SSH is
+  # LAN-reachable services for the source-bound workstation-lan zone. SSH is
   # listed too: firewalld puts each packet in exactly one zone, so LAN peers
   # never fall through to the default workstation zone (where SSH stays
   # broadly reachable for WAN port forwarding) and would otherwise be
   # rejected. GNOME Remote Desktop (rdp), Cockpit and printing discovery
-  # (ipp-client, mdns) are core; this package set ships neither iperf3 nor
-  # the media servers.
-  FIREWALL_LAN_SERVICES=(ssh cockpit rdp ipp-client mdns)
+  # (ipp-client, mdns) are core. The media servers, Transmission, iperf3,
+  # LanCache, NFS (v4 plus the v3 mountd/rpcbind surface) and Samba are not
+  # installed by this script but run by hand on some Arch hosts, so their
+  # ports open in every profile.
+  FIREWALL_LAN_SERVICES=(ssh cockpit rdp ipp-client mdns iperf3
+    plexmediaserver navidrome owntone transmission
+    lancache nfs mountd rpc-bind samba)
   if [[ $1 == full ]]; then
     PKGS_OFFICIAL+=("${PKGS_OFFICIAL_FULL[@]}")
     PKGS_AUR+=("${PKGS_AUR_FULL[@]}")
@@ -1966,6 +1970,8 @@ put_file -s "${FILES}/etc/firewalld/services/steam-streaming.xml" /etc/firewalld
 put_file -s "${FILES}/etc/firewalld/services/transmission.xml" /etc/firewalld/services/transmission.xml
 (( PUT_FILE_CHANGED )) && FIREWALL_CHANGED=1
 put_file -s "${FILES}/etc/firewalld/services/iperf3.xml" /etc/firewalld/services/iperf3.xml
+(( PUT_FILE_CHANGED )) && FIREWALL_CHANGED=1
+put_file -s "${FILES}/etc/firewalld/services/lancache.xml" /etc/firewalld/services/lancache.xml
 (( PUT_FILE_CHANGED )) && FIREWALL_CHANGED=1
 enable_unit firewalld.service
 systemctl is-active --quiet firewalld.service || sudo systemctl start firewalld.service

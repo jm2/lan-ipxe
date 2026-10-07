@@ -1773,14 +1773,16 @@ select_profile() {
     SELECTED_REPOS+=("copr:copr.fedorainfracloud.org:${copr/\//:}")
   done
   SELECTED_TOOLS=(antigravity agy opencode claude codex zed speedtest)
-  # LAN-reachable services for the source-bound workstation-lan zone. Only
-  # services whose server the profile actually installs are opened. SSH is
+  # LAN-reachable services for the source-bound workstation-lan zone. SSH is
   # listed too: firewalld puts each packet in exactly one zone, so LAN peers
   # never fall through to the default workstation zone (where SSH stays
   # broadly reachable for WAN port forwarding) and would otherwise be
   # rejected. GNOME Remote Desktop (rdp) and Cockpit are core; iperf3 ships
-  # in the core package set.
-  FIREWALL_LAN_SERVICES=(ssh cockpit rdp ipp-client mdns iperf3)
+  # in the core package set. LanCache, NFS (v4 plus the v3 mountd/rpcbind
+  # surface) and Samba are not installed by this script but are run by hand
+  # on some of these hosts, so their ports open in every profile.
+  FIREWALL_LAN_SERVICES=(ssh cockpit rdp ipp-client mdns iperf3
+    lancache nfs mountd rpc-bind samba)
   # Config payloads as source under files/|destination (no owner/mode fields:
   # --check only compares content). The *rendered* security configs
   # (/etc/clamd.d/scan.conf, /etc/firewalld/zones/workstation-lan.xml, and
@@ -1810,6 +1812,7 @@ select_profile() {
     "etc/firewalld/services/steam-streaming.xml|/etc/firewalld/services/steam-streaming.xml"
     "etc/firewalld/services/transmission.xml|/etc/firewalld/services/transmission.xml"
     "etc/firewalld/services/iperf3.xml|/etc/firewalld/services/iperf3.xml"
+    "etc/firewalld/services/lancache.xml|/etc/firewalld/services/lancache.xml"
     "etc/systemd/system/clamav-clamonacc.service.d/50-fedora-workstation.conf|/etc/systemd/system/clamav-clamonacc.service.d/50-fedora-workstation.conf"
     "etc/systemd/system/clamav-media-scan.service|/etc/systemd/system/clamav-media-scan.service"
     "usr/local/libexec/clamav-media-scan|/usr/local/libexec/clamav-media-scan"
@@ -2470,6 +2473,8 @@ put_file -s "${FILES}/etc/firewalld/services/steam-streaming.xml" /etc/firewalld
 put_file -s "${FILES}/etc/firewalld/services/transmission.xml" /etc/firewalld/services/transmission.xml
 (( PUT_FILE_CHANGED )) && FIREWALL_CHANGED=1
 put_file -s "${FILES}/etc/firewalld/services/iperf3.xml" /etc/firewalld/services/iperf3.xml
+(( PUT_FILE_CHANGED )) && FIREWALL_CHANGED=1
+put_file -s "${FILES}/etc/firewalld/services/lancache.xml" /etc/firewalld/services/lancache.xml
 (( PUT_FILE_CHANGED )) && FIREWALL_CHANGED=1
 enable_unit firewalld.service
 systemctl is-active --quiet firewalld.service || sudo systemctl start firewalld.service
