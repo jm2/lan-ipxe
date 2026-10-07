@@ -260,21 +260,53 @@ clam_jobs() {
 #   counts          key=value totals
 #   clamscan.log, yara.log raw scanner output
 # Paths are relative to the volume root and TSV-escaped (see tsv_esc).
+# scan_progress <out> <text>: publish the worker's current phase for the host
+# side to print (atomic replace; the host polls it while the sandbox runs).
+scan_progress() {
+  printf '%s\n' "$2" >"$1/progress.tmp" && mv -f -- "$1/progress.tmp" "$1/progress"
+}
+
+# count_existing <path>...: how many of the (glob-expanded) paths exist; an
+# unmatched glob stays literal and counts as 0. Never fails, unlike a
+# `compgen -G | wc -l` pipeline under pipefail.
+count_existing() {
+  local f c=0
+  for f in "$@"; do [[ -e ${f} ]] && c=$(( c + 1 )); done
+  printf '%s' "${c}"
+}
+
+# eta <done> <total> <start-epoch>: rough time left at the rate so far.
+eta() {
+  local done=$1 total=$2 start=$3 elapsed left
+  elapsed=$(( EPOCHSECONDS - start ))
+  (( done > 0 && elapsed > 0 && total > done )) || { printf '?'; return; }
+  left=$(( (total - done) * elapsed / done ))
+  printf '%dh%02dm' $(( left / 3600 )) $(( left % 3600 / 60 ))
+}
+
 internal_scan() {
   local root=${1%/} out=$2 fstype=$3 yara_rules=$4 clam_db=$5
   local meta=${out}/files.meta list=${out}/files.lst
   local rec rest path rel erel sum mime size mtime mode line reason f rc
-  local files=0 bytes=0 suspects=0 zero_len=0 unix_fs=0 jobs chunk
+  local files=0 bytes=0 suspects=0 zero_len=0 unix_fs=0 jobs batches per
+  local total_files total_bytes n done_bytes started xpid
   local -a clam_opts=()
-  local -A mime_of=() sum_of=()
+  local -A mime_of=() sum_of=() size_of=()
   [[ -d ${root} && -d ${out} ]] || { echo "internal-scan: bad paths" >&2; return 1; }
   : >"${out}/findings.tsv"; : >"${out}/gaps.tsv"; : >"${out}/suspect.tsv"
   [[ ${fstype} =~ ^(apfs|hfsplus|hfs|ext[234]|xfs|btrfs)$ ]] && unix_fs=1
 
   # Inventory: one find pass records size, mtime and mode next to each path
   # (no per-file stat forks). find errors (permission, I/O) are gaps.
+  scan_progress "${out}" "inventory: listing files"
   find "${root}" -xdev -type f -printf '%s %Ts %m %p\0' >"${meta}" 2>"${out}/find.err" || true
   sed -z 's/^[0-9]* -\{0,1\}[0-9]* [0-7]* //' "${meta}" >"${list}"
+  total_files=0 total_bytes=0
+  while IFS=' ' read -r -d '' size mtime mode path; do
+    size_of[${path}]=${size}
+    total_files=$(( total_files + 1 )); total_bytes=$(( total_bytes + size ))
+  done <"${meta}"
+  scan_progress "${out}" "inventory: ${total_files} files, $(human_bytes "${total_bytes}") of data (each is read three times: hashing, ClamAV, YARA)"
   while IFS= read -r line; do
     printf 'find\t%s\t-\n' "$(tsv_escape "${line}")" >>"${out}/gaps.tsv"
   done <"${out}/find.err"
@@ -285,15 +317,21 @@ internal_scan() {
 
   # Hashes and MIME types. sha256sum -z disables name escaping; file -r keeps
   # names raw (it would otherwise print a newline as \012).
+  n=0 done_bytes=0 started=${EPOCHSECONDS}
   while IFS= read -r -d '' sum && IFS= read -r -d '' path; do
     sum_of[${path}]=${sum}
+    n=$(( n + 1 )); done_bytes=$(( done_bytes + ${size_of[${path}]:-0} ))
+    (( n % 500 )) || scan_progress "${out}" "hashing: ${n}/${total_files} files, $(human_bytes "${done_bytes}")/$(human_bytes "${total_bytes}"), ETA $(eta "${done_bytes}" "${total_bytes}" "${started}")"
   done < <(xargs -0 -r sha256sum -z -- <"${list}" 2>"${out}/sha256.err" \
              | sed -z 's/^\([0-9a-f]\{64\}\)  /\1\x00/')
   while IFS= read -r line; do
     printf 'sha256\t%s\t-\n' "$(tsv_escape "${line}")" >>"${out}/gaps.tsv"
   done <"${out}/sha256.err"
+  n=0
   while IFS= read -r -d '' path && IFS= read -r rest; do
     mime_of[${path}]=${rest#: }
+    n=$(( n + 1 ))
+    (( n % 2000 )) || scan_progress "${out}" "file types: ${n}/${total_files} files"
   done < <(xargs -0 -r file -N -r -0 --mime-type -- <"${list}" 2>/dev/null)
 
   exec 3>"${out}/files.tsv" 4>>"${out}/gaps.tsv" 5>>"${out}/suspect.tsv"
@@ -307,6 +345,7 @@ internal_scan() {
     mime=${mime_of[${path}]:-unknown}
     tsv_esc "${rel}"; erel=${REPLY}
     files=$(( files + 1 )); bytes=$(( bytes + size ))
+    (( files % 5000 )) || scan_progress "${out}" "classifying: ${files}/${total_files} files (CPU only, no disk reads)"
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "${sum}" "${size}" "${mtime}" "${mode}" "${mime}" "${erel}" >&3
     [[ ${sum} == - ]] && printf 'sha256\tunreadable\t%s\n' "${erel}" >&4
     if (( size > YARA_MAX_BYTES )) && [[ ${yara_rules} != - ]]; then
@@ -336,21 +375,52 @@ internal_scan() {
 
   # ClamAV: everything unpacked as deeply as the engine allows; limits and
   # encryption raise alerts so they surface as gaps, never as silent passes.
-  # Files are passed as arguments (NUL-safe, unlike --file-list) to a few
-  # parallel clamscan processes, each with its own log.
+  # The file list is split into batches read with --file-list, so each
+  # clamscan loads its signature database once per batch (passing names as
+  # arguments made xargs split at its 128 KiB command-line limit and relaunch
+  # clamscan, reloading ~1 GB of signatures, far more often). --file-list is
+  # line-based, so the rare names containing a newline go as arguments in a
+  # batch of their own. Batches also give a progress measure.
   clam_opts=(--stdout --infected --no-summary --allmatch=yes --detect-pua=yes
              --heuristic-alerts=yes --alert-encrypted=yes --alert-exceeds-max=yes
              --alert-macros=yes --alert-partition-intersection=yes "${CLAM_LIMITS[@]}")
   [[ ${clam_db} != - ]] && clam_opts+=(--database="${clam_db}")
   if (( files > 0 )); then
     jobs=$(clam_jobs)
-    chunk=$(( (files + jobs - 1) / jobs ))
+    # About 20 batches per job: fine-grained progress, few database loads.
+    per=$(( (files + jobs * 20 - 1) / (jobs * 20) ))
+    (( per >= 200 )) || per=200
+    awk -v RS='\0' -v per="${per}" -v dir="${out}" '
+      index($0, "\n") { printf "%s%c", $0, 0 > (dir "/clambatch.nl"); next }
+      { b = int(n++ / per); f = sprintf("%s/clambatch.%05d.lst", dir, b)
+        if (f != cur) { if (cur != "") close(cur); cur = f }
+        print > f }' "${list}"
+    batches=$(count_existing "${out}"/clambatch.*.lst)
+    [[ -s ${out}/clambatch.nl ]] && batches=$(( batches + 1 ))
+    started=${EPOCHSECONDS}
     # shellcheck disable=SC2016 # expanded by the inner bash
-    xargs -0 -r -P "${jobs}" -n "${chunk}" bash -c '
-      out=$1 n=$2; shift 2; opts=("${@:1:n}"); shift "${n}"
-      rc=0; clamscan "${opts[@]}" -- "$@" >"${out}/clamscan.$$.part" 2>"${out}/clamscan.$$.err" || rc=$?
-      echo "${rc}" >"${out}/clamscan.$$.rc"' _ "${out}" "${#clam_opts[@]}" "${clam_opts[@]}" \
-      <"${list}" || true
+    {
+      if [[ -e ${out}/clambatch.00000.lst ]]; then
+        printf '%s\0' "${out}"/clambatch.*.lst | xargs -0 -r -P "${jobs}" -I{} bash -c '
+          out=$1 batch=$2 n=$3; shift 3; id=${batch##*/clambatch.}; id=${id%.lst}
+          rc=0; clamscan "${@:1:n}" --file-list="${batch}" >"${out}/clamscan.${id}.part" 2>"${out}/clamscan.${id}.err" || rc=$?
+          echo "${rc}" >"${out}/clamscan.${id}.rc"' _ "${out}" {} "${#clam_opts[@]}" "${clam_opts[@]}"
+      fi
+      if [[ -s ${out}/clambatch.nl ]]; then
+        rc=0
+        xargs -0 -r clamscan "${clam_opts[@]}" -- <"${out}/clambatch.nl" \
+          >"${out}/clamscan.nl.part" 2>"${out}/clamscan.nl.err" || rc=$?
+        echo "${rc}" >"${out}/clamscan.nl.rc"
+      fi
+    } &
+    xpid=$!
+    while kill -0 "${xpid}" 2>/dev/null; do
+      n=$(count_existing "${out}"/clamscan.*.rc)
+      scan_progress "${out}" "clamav: ${n}/${batches} batches done, ETA $(eta "${n}" "${batches}" "${started}")"
+      sleep 10
+    done
+    wait "${xpid}" || true
+    rm -f -- "${out}"/clambatch.*
   fi
   cat "${out}"/clamscan.*.part >"${out}/clamscan.log" 2>/dev/null || : >"${out}/clamscan.log"
   cat "${out}"/clamscan.*.err >"${out}/clamscan.err" 2>/dev/null || : >"${out}/clamscan.err"
@@ -366,7 +436,7 @@ internal_scan() {
     [[ -e ${f%.part}.rc ]] \
       || printf 'clamav\tclamscan worker died before finishing (chunk not fully scanned; see clamscan.log)\t-\n' >>"${out}/gaps.tsv"
   done
-  rm -f -- "${out}"/clamscan.*.part "${out}"/clamscan.[0-9]*.err "${out}"/clamscan.*.rc
+  rm -f -- "${out}"/clamscan.*.part "${out}"/clamscan.[0-9n]*.err "${out}"/clamscan.*.rc
   parse_clam_log "${out}/clamscan.log" "${out}/findings.tsv" "${out}/gaps.tsv" "${root}"
   while IFS= read -r line; do
     [[ ${line} == *ERROR:* || ${line} == *'Access denied'* || ${line} == *"Can't"* ]] || continue
@@ -374,6 +444,7 @@ internal_scan() {
   done <"${out}/clamscan.err"
 
   if [[ ${yara_rules} != - ]]; then
+    scan_progress "${out}" "yara: scanning $(human_bytes "${total_bytes}") since $(date +%H:%M) (no per-file progress)"
     rc=0
     yara --compiled-rules --recursive --no-follow-symlinks --print-meta --no-warnings \
       --threads="$(nproc)" --timeout="${YARA_TIMEOUT}" --skip-larger="${YARA_MAX_BYTES}" \
@@ -385,6 +456,7 @@ internal_scan() {
     done <"${out}/yara.err"
   fi
 
+  scan_progress "${out}" "done"
   printf 'files=%s\nbytes=%s\nsuspects=%s\nbundles=%s\nzero_len_hfsplus=%s\n' "${files}" \
     "${bytes}" "${suspects}" "$(wc -l <"${out}/bundles.txt")" "${zero_len}" >"${out}/counts"
   rm -f -- "${list}" "${meta}"
@@ -879,7 +951,7 @@ scan_block() {
 # the invoking user. CAP_DAC_READ_SEARCH lets it read files owned by the Mac
 # account (uid 501, mode 0700) without root; no network, read-only host.
 scan_volume() {
-  local root=$1 fstype=$2 tag=$3 out rc=0
+  local root=$1 fstype=$2 tag=$3 out rc=0 poller
   out=${REPORT_DIR}/volumes/${tag}
   mkdir -p -- "${out}"
   printf '%s\t%s\t%s\n' "${tag}" "${fstype}" "${root}" >>"${REPORT_DIR}/volumes.tsv"
@@ -889,6 +961,15 @@ scan_volume() {
   # under SELinux, systemd (init_t) may not execute a file labeled
   # user_home_t (a checkout in ~), which fails every scan with 203/EXEC.
   # bash is bin_t and transitions to unconfined_service_t, which may read it.
+  # Print the worker's progress file once a minute while the sandbox runs.
+  ( last=
+    while sleep 60; do
+      [[ -r ${out}/progress ]] || continue
+      cur=$(<"${out}/progress")
+      [[ ${cur} == "${last}" ]] || note "[${tag} $(date +%H:%M)] ${cur}"
+      last=${cur}
+    done ) &
+  poller=$!
   sudo systemd-run --quiet --wait --pipe --collect --expand-environment=no \
     --unit="scan-utm-${EPOCHSECONDS}-$$-${UNIT_SEQ}" \
     -p User="${USER_NAME}" -p WorkingDirectory=/ -p UMask=0077 \
@@ -902,6 +983,8 @@ scan_volume() {
     -p Nice=5 -p IOSchedulingClass=best-effort -p IOSchedulingPriority=6 \
     -- "${BASH}" "${SCRIPT_PATH}" --internal-scan "${root}" "${out}" "${fstype}" "${COMPILED_YARA}" "${CLAM_DB:--}" \
     </dev/null || rc=$?
+  kill "${poller}" 2>/dev/null || true
+  wait "${poller}" 2>/dev/null || true
   (( rc == 0 )) || gap "${tag}" scan "sandboxed scan exited ${rc}; results for this volume are incomplete"
   [[ -f ${out}/counts ]] && note "$(tr '\n' ' ' <"${out}/counts")"
 }

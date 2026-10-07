@@ -398,7 +398,11 @@ the checksum-verified YARA Forge rules (score ≥ 75 → LIKELY, lower → REVIE
 and an executable-content inventory (Mach-O/PE binaries, scripts, .app
 bundles, installers, disk images, LaunchAgents, macro documents, setuid). The
 report lists DEFINITE / LIKELY / REVIEW findings plus coverage gaps; exit 0 no
-findings, 3 findings, 1 error.
+findings, 3 findings, 1 error. While each volume scans, its phase and progress are
+printed once a minute (inventory size, hashing files/GiB with an ETA, file
+typing, classification, ClamAV batches with an ETA, YARA); the data is read
+three times (hashing, ClamAV, YARA), and the classification pass is CPU-only,
+so a pause in disk activity there is expected.
 
 - `--image-dir DIR` — where ddrescue images land (default: inside the report
   dir); `--no-image` scans block devices in place (still strictly read-only);
