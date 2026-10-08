@@ -355,9 +355,45 @@ test_clam_split_batches() (
     || fail 'both large files ended up in one batch'
   lines=$(cat "${dir}"/clambatch.*.lst | wc -l)
   (( lines == 102 )) || fail "batches hold ${lines} paths, expected 102"
-  [[ $(tr -d '\0' <"${dir}/clambatch.nl") == $'/v/new\nline.txt/v/carriage\rreturn.txt'"${long}" ]] \
+  [[ $(tr -d '\0' <"${dir}/clambatch.alias") == $'/v/new\nline.txt/v/carriage\rreturn.txt'"${long}" ]] \
     || fail 'newline/CR/long names not all in the NUL batch'
-  [[ $(<"${dir}/clambatch.nl.w") == $(( 10 + 20 + 30 + 3 * 262144 )) ]] || fail 'NUL batch weight wrong'
+  [[ $(<"${dir}/clambatch.alias.w") == $(( 10 + 20 + 30 + 3 * 262144 )) ]] || fail 'NUL batch weight wrong'
+)
+
+test_hardening_regressions() (
+  load_scanner
+  local dir root out link
+  # Raw C1 bytes (OSC 0x9d, APC 0x9f) and zero-width characters are escaped.
+  tsv_esc $'a\x9db\x9fc'
+  [[ ${REPLY} == 'a\x9db\x9fc' ]] || fail "raw C1 bytes not escaped: [${REPLY}]"
+  tsv_esc $'zero\u200bwidth\ufeff'
+  [[ ${REPLY} == 'zero\u200bwidth\ufeff' ]] || fail "zero-width characters not escaped: [${REPLY}]"
+  dir=$(mktemp -d -p "${TMPDIR:-/var/tmp}")
+  trap 'rm -rf -- "${dir}"' EXIT
+  root=${dir}/vol out=${dir}/out
+  mkdir -p "${root}" "${out}"
+  printf 'x' >"${root}/"$'evil\nname.exe'
+  # A ClamAV detection reported through a symlink alias maps back to the file.
+  printf '%s\0' "${root}/"$'evil\nname.exe' >"${out}/clambatch.alias"
+  clam_alias_batch "${out}"
+  link=$(head -n 1 "${out}/clambatch.alias.lst")
+  [[ -L ${link} ]] || fail 'clam_alias_batch did not create the alias'
+  printf '%s: Win.Test.Evil FOUND\n' "${link}" >"${out}/clamscan.log"
+  : >"${out}/findings.tsv"; : >"${out}/gaps.tsv"
+  parse_clam_log "${out}/clamscan.log" "${out}/findings.tsv" "${out}/gaps.tsv" "${root}" "${out}/clamlinks"
+  [[ $(cut -f4 "${out}/findings.tsv") == 'evil\nname.exe' ]] || fail "alias did not map back: $(cat "${out}/findings.tsv")"
+  [[ ! -s ${out}/gaps.tsv ]] || fail "alias mapping left a gap: $(cat "${out}/gaps.tsv")"
+  # YARA prints the newline as the text \n; the decoded name is the file.
+  printf 'Test_Rule [score=80] %s/evil\\nname.exe\n' "${root}" >"${out}/yara.log"
+  : >"${out}/findings.tsv"
+  parse_yara_output "${out}/yara.log" "${out}/findings.tsv" "${out}/gaps.tsv" "${root}"
+  [[ $(cut -f4 "${out}/findings.tsv") == 'evil\nname.exe' ]] || fail "YARA name not decoded: $(cat "${out}/findings.tsv")"
+  # A forged FOUND line with a signature outside the charset is a gap.
+  printf '%s/a: \e]0;x\a FOUND\n' "${root}" >"${out}/clamscan.log"
+  : >"${out}/findings.tsv"; : >"${out}/gaps.tsv"
+  parse_clam_log "${out}/clamscan.log" "${out}/findings.tsv" "${out}/gaps.tsv" "${root}"
+  [[ ! -s ${out}/findings.tsv && -s ${out}/gaps.tsv ]] || fail 'forged clamscan line became a finding'
+  ! grep -q $'\e' "${out}/gaps.tsv" || fail 'raw ESC reached gaps.tsv'
 )
 
 test_internal_scan_guard() {
@@ -396,5 +432,7 @@ test_clam_split_batches
 printf 'PASS scanner ClamAV batches balanced by weight, newline names split out\n'
 test_clam_eta
 printf 'PASS scanner ClamAV ETA from finished-batch weights, durations and job count\n'
+test_hardening_regressions
+printf 'PASS scanner hardening: C1/zero-width escapes, ClamAV aliases, YARA names, forged lines\n'
 test_internal_scan_guard
 printf 'PASS scanner --internal-scan argument-count guard\n'

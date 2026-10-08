@@ -308,7 +308,7 @@ tsv_esc() {
   # The bracket below is a set of literal characters, not a range, so it works
   # the same under any collation.
   if [[ ${REPLY} != *[[:cntrl:]]* && ${REPLY} != *[$'\x80'-$'\x9f']* \
-        && ${REPLY} != *[$'\u200e'$'\u200f'$'\u202a'$'\u202b'$'\u202c'$'\u202d'$'\u202e'$'\u2066'$'\u2067'$'\u2068'$'\u2069']* ]]; then
+        && ${REPLY} != *[$'\u200b'$'\u200c'$'\u200d'$'\u200e'$'\u200f'$'\u2028'$'\u2029'$'\u202a'$'\u202b'$'\u202c'$'\u202d'$'\u202e'$'\u2060'$'\u2066'$'\u2067'$'\u2068'$'\u2069'$'\ufeff']* ]]; then
     return 0
   fi
   s=${REPLY} REPLY=
@@ -317,8 +317,10 @@ tsv_esc() {
     printf -v h '%x' "'${c}"
     code=$(( 16#${h} ))
     if [[ ${c} == [[:cntrl:]] ]] \
-       || (( code >= 128 && code <= 155 )) \
-       || { (( code >= 0x200e && code <= 0x200f )); } \
+       || (( code >= 128 && code <= 159 )) \
+       || { (( code >= 0x200b && code <= 0x200f )); } \
+       || { (( code >= 0x2028 && code <= 0x2029 )); } \
+       || (( code == 0x2060 || code == 0xfeff )) \
        || { (( code >= 0x202a && code <= 0x202e )); } \
        || { (( code >= 0x2066 && code <= 0x2069 )); }; then
       if (( code < 256 )); then printf -v c '\\x%02x' "${code}"; else printf -v c '\\u%04x' "${code}"; fi
@@ -352,7 +354,11 @@ classify_clam_signature() {
 # forge a finding with raw escape sequences in it. Anything that does not
 # parse is recorded as a gap - never silently dropped.
 parse_clam_log() {
-  local log_file=$1 findings=$2 gaps=$3 root=$4 line path sig cls
+  local log_file=$1 findings=$2 gaps=$3 root=$4 links=${5:-} line path sig cls k v
+  local -A alias_of=()
+  if [[ -n ${links} && -s ${links}.idx ]]; then
+    while IFS= read -r -d '' k && IFS= read -r -d '' v; do alias_of[${k}]=${v}; done <"${links}.idx"
+  fi
   while IFS= read -r line; do
     if [[ ${line} != *' FOUND' ]]; then
       [[ -n ${line} ]] || continue
@@ -368,6 +374,8 @@ parse_clam_log() {
       printf 'clamav\tsuspicious clamscan line (signature not recognized):\t%s\n' "${REPLY}" >>"${gaps}"
       continue
     fi
+    # A symlink alias (awkward original name) maps back to its file.
+    [[ -n ${alias_of[${path}]+x} ]] && path=${alias_of[${path}]}
     path=${path#"${root}"/}
     cls=$(classify_clam_signature "${sig}")
     tsv_esc "${path}"
@@ -398,6 +406,22 @@ parse_yara_output() {
     fi
     rest=${line%%"] ${root}/"*}
     path=${line#*"] ${root}/"}
+    # YARA prints CR and LF in names as the text \r and \n (and backslashes
+    # as they are): when the printed name is not a file but its decoded form
+    # is, the decoded form is the file. Both existing is ambiguous: keep the
+    # printed one and say so.
+    if [[ ${path} == *\\* ]]; then
+      local decoded=${path//\\n/$'\n'}
+      decoded=${decoded//\\r/$'\r'}
+      if [[ ${decoded} != "${path}" && ( -e ${root}/${decoded} || -L ${root}/${decoded} ) ]]; then
+        if [[ -e ${root}/${path} || -L ${root}/${path} ]]; then
+          tsv_esc "${path}"
+          printf 'yara\tdetection name is ambiguous (a file with literal \\n/\\r and one with a real line break both exist); attributed to the literal one:\t%s\n' "${REPLY}" >>"${gaps}"
+        else
+          path=${decoded}
+        fi
+      fi
+    fi
     rule=${rest%% \[*}
     meta=${rest#*\[}
     if [[ ! ${rule} =~ ^[A-Za-z0-9_]+$ ]]; then
@@ -471,16 +495,36 @@ eta() {
 # clambatch.NNNNN.w. Names that cannot ride a --file-list line - a newline,
 # a carriage return (clamscan strips a trailing CR from list lines) or a
 # path of CLAM_LIST_MAX bytes or more (it splits list lines at 1023) - go
-# NUL-separated to clambatch.nl (weight in clambatch.nl.w), which the worker
-# passes as arguments instead.
+# NUL-separated to clambatch.alias (weight in clambatch.alias.w); the worker
+# scans them through short symlink aliases (see clam_alias_batch).
 clam_split_batches() {
   LC_ALL=C awk -v RS='\0' -v per="$3" -v fw="${CLAM_FILE_WEIGHT}" -v lmax="${CLAM_LIST_MAX}" -v dir="$2" '
     function close_batch() { if (cur != "") { close(cur); printf "%.0f\n", w > (base ".w"); close(base ".w") } }
     { p = $0; sub(/^[0-9]+ -?[0-9]+ [0-7]+ /, "", p)
-      if (index(p, "\n") || index(p, "\r") || length(p) >= lmax) { printf "%s%c", p, 0 > (dir "/clambatch.nl"); nlw += $1 + fw; next }
+      if (index(p, "\n") || index(p, "\r") || length(p) >= lmax) { printf "%s%c", p, 0 > (dir "/clambatch.alias"); nlw += $1 + fw; next }
       if (cur == "" || w >= per) { close_batch(); base = sprintf("%s/clambatch.%05d", dir, b++); cur = base ".lst"; w = 0 }
       print p > cur; w += $1 + fw }
-    END { close_batch(); if (nlw) printf "%.0f\n", nlw > (dir "/clambatch.nl.w") }' "$1"
+    END { close_batch(); if (nlw) printf "%.0f\n", nlw > (dir "/clambatch.alias.w") }' "$1"
+}
+
+# clam_alias_batch <dir>: turn clambatch.alias (NUL-separated awkward names)
+# into the list batch clambatch.alias.lst of symlinks dir/clamlinks/NNNNNNN.
+# clamscan follows a symlink named in its file list and reports the link's
+# own (safe) name, so every detection maps back to exactly one file through
+# dir/clamlinks.idx - scanning the names as arguments instead let a newline in
+# a name split, and forge, clamscan's line-based output.
+clam_alias_batch() {
+  local dir=$1 p i=0 link
+  [[ -s ${dir}/clambatch.alias ]] || return 0
+  mkdir -p -- "${dir}/clamlinks"
+  : >"${dir}/clamlinks.idx"
+  while IFS= read -r -d '' p; do
+    i=$(( i + 1 ))
+    printf -v link '%s/clamlinks/%07d' "${dir}" "${i}"
+    ln -s -- "${p}" "${link}"
+    printf '%s\0%s\0' "${link}" "${p}" >>"${dir}/clamlinks.idx"
+    printf '%s\n' "${link}" >>"${dir}/clambatch.alias.lst"
+  done <"${dir}/clambatch.alias"
 }
 
 # clam_eta <out> <total weight> <jobs>: "NN% of data, ETA XhYYm" for the
@@ -686,30 +730,17 @@ internal_scan() {
     clam_weight=$(( bytes + files * CLAM_FILE_WEIGHT ))
     per=$(( (clam_weight + batches - 1) / batches ))
     clam_split_batches "${meta}" "${out}" "${per}"
+    clam_alias_batch "${out}"
     batches=$(count_existing "${out}"/clambatch.*.lst)
-    [[ -s ${out}/clambatch.nl ]] && batches=$(( batches + 1 ))
     started=${EPOCHSECONDS}
     # shellcheck disable=SC2016 # expanded by the inner bash
     {
-      if [[ -e ${out}/clambatch.00000.lst ]]; then
+      if (( batches > 0 )); then
         printf '%s\0' "${out}"/clambatch.*.lst | xargs -0 -r -P "${jobs}" -I{} bash -c '
           out=$1 batch=$2 n=$3; shift 3; id=${batch##*/clambatch.}; id=${id%.lst}
           : >"${out}/clamscan.${id}.start"
           rc=0; clamscan "${@:1:n}" --file-list="${batch}" >"${out}/clamscan.${id}.part" 2>"${out}/clamscan.${id}.err" || rc=$?
           echo "${rc}" >"${out}/clamscan.${id}.rc"' _ "${out}" {} "${#clam_opts[@]}" "${clam_opts[@]}"
-      fi
-      if [[ -s ${out}/clambatch.nl ]]; then
-        rc=0
-        : >"${out}/clamscan.nl.start"
-        # The argument batch: run clamscan directly (no xargs) so the exit
-        # status is clamscan's own - xargs would fold any detection (exit 1)
-        # into 123 and the worker would report a false gap for every find.
-        # A pathological number of newline-named files can exceed the exec
-        # limit; that fails loudly here and becomes a gap, not a skip.
-        mapfile -d '' -t nl_files <"${out}/clambatch.nl"
-        clamscan "${clam_opts[@]}" -- "${nl_files[@]}" \
-          >"${out}/clamscan.nl.part" 2>"${out}/clamscan.nl.err" || rc=$?
-        echo "${rc}" >"${out}/clamscan.nl.rc"
       fi
     } &
     xpid=$!
@@ -735,8 +766,11 @@ internal_scan() {
     [[ -e ${f%.part}.rc ]] \
       || printf 'clamav\tclamscan worker died before finishing (chunk not fully scanned; see clamscan.log)\t-\n' >>"${out}/gaps.tsv"
   done
-  rm -f -- "${out}"/clamscan.*.part "${out}"/clamscan.[0-9n]*.err "${out}"/clamscan.*.rc
-  parse_clam_log "${out}/clamscan.log" "${out}/findings.tsv" "${out}/gaps.tsv" "${root}"
+  rm -f -- "${out}"/clamscan.*.part "${out}"/clamscan.[0-9a]*.err "${out}"/clamscan.*.rc
+  parse_clam_log "${out}/clamscan.log" "${out}/findings.tsv" "${out}/gaps.tsv" "${root}" "${out}/clamlinks"
+  # The aliases must not outlive the scan: the host rejects symlinks in a
+  # worker's output directory as tampering.
+  rm -rf -- "${out}/clamlinks" "${out}/clamlinks.idx"
   # clamscan prints access failures ("WARNING: ...: Can't access file") on
   # stdout mixed with the FOUND lines, and libclamav messages on stderr:
   # both mean files this run did not fully examine. Every such line is a gap;
@@ -1220,6 +1254,8 @@ fi
 USER_NAME=$(id -un)
 USER_GID=$(id -g)
 MNT_BASE=/run/scan-untrusted-media.$$
+SYSTEMD_VERSION=$(systemctl --version 2>/dev/null | awk 'NR == 1 { print $2 + 0 }') || SYSTEMD_VERSION=0
+[[ ${SYSTEMD_VERSION} =~ ^[0-9]+$ ]] || SYSTEMD_VERSION=0
 MOUNTS=()
 LOOPS=()
 CRYPT_MAPS=()
@@ -1777,7 +1813,7 @@ open_crypt() {
 }
 
 # open_lvm <node> <tag>: activate the volume group on this physical volume
-# with every logical volume read-only and scan each one. --devices confines
+# with each eligible logical volume read-only and scan it. --devices confines
 # LVM to this node, so the host's own devices (and its devices file) are not
 # involved. A VG whose name the host already uses is refused: renaming it
 # (vgimportclone) would write to the untrusted media. Only linear and striped
@@ -1796,25 +1832,28 @@ open_lvm() {
   # A VG name the host already uses (in its own devices) means activating the
   # untrusted one would clash; renaming it would write to the media.
   while IFS= read -r n; do
+    n=${n//[[:space:]]/}   # vgs pads its columns
     [[ ${n} == "${vg}" ]] && clash=1
   done < <(sudo vgs --noheadings -o vg_name 2>/dev/null || true)
   if (( clash )); then
     gap "${tag}" mount "LVM volume group '${vg}' has the same name as one on this host; not activated"
     return 0
   fi
-  if ! sudo vgchange -ay --devices "${node}" \
-         --config 'activation { read_only_volume_list = [ "*" ] }' -- "${vg}" >/dev/null 2>"${REPORT_DIR}/mount.err"; then
-    gap "${tag}" mount "LVM volume group '${vg}' could not be activated (spans other disks?): $(tr '\n' ' ' <"${REPORT_DIR}/mount.err")"
-    return 0
-  fi
-  LVM_ACTIVE+=("${vg}|${node}")
-  # Segment types per LV, so each LV can be scanned or refused on its own.
-  # lvs columns are space-padded; read with the default IFS splits them.
+  # Segment types per LV, read from the metadata before anything is
+  # activated: only linear and striped LVs are activated at all, one at a
+  # time. Activating the whole VG would set up thin/cache/raid/vdo/integrity
+  # targets too, exposing their kernel parsers to hostile metadata even if
+  # the LV is never scanned. lvs prints one row per segment.
   while read -r name segtypes; do
     [[ -n ${name} ]] || continue
     if [[ -z ${lv_seen[${name}]+x} ]]; then lv_seen[${name}]=1; lv_names+=("${name}"); fi
     lv_segs[${name}]+=" ${segtypes}"
   done < <(sudo lvs --noheadings -o lv_name,segtype --devices "${node}" -- "${vg}" 2>/dev/null || true)
+  if (( ${#lv_names[@]} == 0 )); then
+    gap "${tag}" mount "LVM volume group '${vg}' lists no logical volumes (or spans other disks)"
+    return 0
+  fi
+  LVM_ACTIVE+=("${vg}|${node}")
   for name in "${lv_names[@]}"; do
     local bad_seg=
     # shellcheck disable=SC2206 # the segment types are a space-joined list
@@ -1822,13 +1861,15 @@ open_lvm() {
     for segtypes in "${segs[@]}"; do
       case ${segtypes} in linear|striped) ;; *) bad_seg=${segtypes} ;; esac
     done
-    lv=/dev/${vg}/${name}
     if [[ -n ${bad_seg} ]]; then
-      gap "${tag}-${name}" lvm "logical volume uses segment type '${bad_seg}' (thin/cache/raid/vdo); not activated to avoid exposing its kernel parser"
+      gap "${tag}-${name}" mount "LVM logical volume '${vg}/${name}' uses segment type '${bad_seg}'; not activated (its kernel target is not exposed to hostile metadata)"
       continue
     fi
-    if [[ ! -b ${lv} ]]; then
-      gap "${tag}-${name}" lvm "logical volume did not activate (activation skip or activation failure); not scanned"
+    lv=/dev/${vg}/${name}
+    if ! sudo lvchange -ay --devices "${node}" \
+           --config 'activation { read_only_volume_list = [ "*" ] }' -- "${vg}/${name}" >/dev/null 2>"${REPORT_DIR}/mount.err" \
+       || [[ ! -b ${lv} ]]; then
+      gap "${tag}-${name}" mount "LVM logical volume '${vg}/${name}' did not activate (spans other disks, activation skip, or error): $(tr '\n' ' ' <"${REPORT_DIR}/mount.err")"
       continue
     fi
     scan_block "${lv}" "${tag}-${name}"
@@ -1947,12 +1988,19 @@ volume_identity() {
 # unconfined_service_t, which may read the script.
 run_sandboxed() {
   local unit=$1 umask=$2 rw=$3
-  local -a hide=(/root /etc/shadow /etc/shadow- /etc/ssh)
+  # Secrets a CAP_DAC_READ_SEARCH worker could otherwise read straight
+  # through ProtectSystem/ProtectHome=read-only and copy into its output.
+  # The "-" prefix: a path that does not exist on this host is skipped
+  # instead of failing the unit (every scan would die with 226/NAMESPACE).
+  local -a hide=(-/root -/etc/shadow -/etc/shadow- -/etc/gshadow -/etc/gshadow- -/etc/ssh
+                 "-${HOME}/.ssh" "-${HOME}/.gnupg" "-${VT_KEY_FILE%/*}")
+  local -a pids=()
   shift 3
-  # ~/.ssh and ~/.gnupg are the crown jewels a CAP_DAC_READ_SEARCH worker
-  # could read straight through ProtectHome=read-only; hide them outright.
-  [[ -d ${HOME}/.ssh ]] && hide+=("${HOME}/.ssh")
-  [[ -d ${HOME}/.gnupg ]] && hide+=("${HOME}/.gnupg")
+  # systemd 257+: the worker gets its own PID namespace and sees no host
+  # process at all. Without it, a compromised worker (same uid, more
+  # capabilities than this script) could write this script's memory through
+  # /proc/<pid>/mem, which needs no ptrace syscall.
+  (( SYSTEMD_VERSION >= 257 )) && pids=(-p PrivatePIDs=yes)
   sudo systemd-run --quiet --wait --pipe --collect --expand-environment=no \
     --unit="${unit}" \
     -p User="${USER_NAME}" -p WorkingDirectory=/ -p UMask="${umask}" \
@@ -1965,11 +2013,24 @@ run_sandboxed() {
     -p 'RestrictAddressFamilies=~af_unix af_inet af_inet6 af_netlink af_packet af_key af_alg af_bluetooth af_vsock af_xdp af_rds af_tipc af_iucv af_can af_mctp af_ax25 af_ipx af_appletalk af_x25 af_atmpvc af_atmsvc af_irda af_pppox af_llc af_ib af_mpls af_phonet af_ieee802154 af_caif af_nfc af_kcm af_qipcrtr af_smc af_netrom af_bridge af_rose af_netbeui af_econet af_ash af_sna af_wanpipe' \
     -p RestrictNamespaces=yes -p RestrictSUIDSGID=yes \
     -p RestrictRealtime=yes -p LockPersonality=yes -p SystemCallArchitectures=native \
-    -p SystemCallFilter=@system-service \
+    -p SystemCallFilter=@system-service "${pids[@]}" \
     -p InaccessiblePaths="${hide[*]}" \
     -p Nice=5 -p IOSchedulingClass=best-effort -p IOSchedulingPriority=6 \
     -p Environment=LC_CTYPE=C.UTF-8 \
     -- "$@" </dev/null
+}
+
+# worker_output_tampered <dir>: remove symlinks and special files a worker
+# left in its output directory and print how many there were. The host only
+# ever reads regular files from there; a planted symlink (to ~/.ssh/id_*, say)
+# would make the host itself copy a secret into the report.
+worker_output_tampered() {
+  local f n=0
+  while IFS= read -r -d '' f; do
+    rm -f -- "${f}"
+    n=$(( n + 1 ))
+  done < <(find "$1" -mindepth 1 \( -type l -o \( ! -type f ! -type d \) \) -print0 2>/dev/null)
+  printf '%s' "${n}"
 }
 
 # start_poller <dir> <label>: print the worker's progress file (see
@@ -1999,7 +2060,7 @@ stop_poller() {
 # volume (with its identity, see volume_identity) and run the scan worker on
 # it in the sandbox (see run_sandboxed).
 scan_volume() {
-  local root=$1 fstype=$2 tag=$3 node=${4:--} apfs_vol=${5:--} out rc=0 walk
+  local root=$1 fstype=$2 tag=$3 node=${4:--} apfs_vol=${5:--} out rc=0 walk tampered
   out=${REPORT_DIR}/volumes/${tag}
   mkdir -p -- "${out}"
   tsv_esc "${root}"
@@ -2022,6 +2083,9 @@ scan_volume() {
     || rc=$?
   stop_poller
   (( rc == 0 )) || gap "${tag}" scan "sandboxed scan exited ${rc}; results for this volume are incomplete"
+  tampered=$(worker_output_tampered "${out}")
+  (( tampered == 0 )) \
+    || gap "${tag}" scan "the scan worker left ${tampered} symlink(s)/special file(s) in its output (removed): treat this volume's results as tampered"
   [[ -f ${out}/counts ]] && note "$(tr '\n' ' ' <"${out}/counts")"
 }
 
@@ -2118,7 +2182,7 @@ vt_lookup_all() {
 count_class() { awk -F'\t' -v c="$1" '$1 == c { k[$4 "\t" $6] = 1 } END { print length(k) }' "${REPORT_DIR}/findings.tsv"; }
 
 write_report() {
-  local s=${REPORT_DIR}/summary.txt definite likely review gaps files=0 bytes=0 suspects=0 d k v
+  local s=${REPORT_DIR}/summary.txt definite likely review gaps files=0 bytes=0 suspects=0 d k v tag
   local vt_known=0 vt_mal=0 vt_unknown=0 vt_unk_exec=0 zero=0 os_meta=0 mismatches=0
   definite=$(count_class DEFINITE); likely=$(count_class LIKELY); review=$(count_class REVIEW)
   gaps=$(wc -l <"${REPORT_DIR}/gaps.tsv")
@@ -2131,8 +2195,9 @@ write_report() {
     # as zero and is flagged.
     while IFS='=' read -r k v; do
       if [[ ! ${v} =~ ^[0-9]+$ ]]; then
-        printf -- '%s\tsanitization\tworker %s wrote unparsable counts (ignored; treat its volume as unreliable)\t-\n' \
-          "${d%/}" "${k}" >>"${REPORT_DIR}/gaps.tsv"
+        tag=${d%/counts}; tag=${tag##*/}
+        printf -- '%s\tsanitization\tworker wrote an unparsable "%s" count (ignored; treat this volume as unreliable)\t-\n' \
+          "${tag}" "$(tsv_escape "${k}")" >>"${REPORT_DIR}/gaps.tsv"
         gaps=$(( gaps + 1 ))
         continue
       fi
@@ -2299,7 +2364,7 @@ nz_volume_tag() {
 # host reads back). The worker's log lines are collected from the work dir
 # afterwards and appended to the run log.
 export_volume() {
-  local mp=$1 fstype=$2 probe=$3 node=${4:--} av=${5:--} tag files out work rc=0 walk
+  local mp=$1 fstype=$2 probe=$3 node=${4:--} av=${5:--} tag files out work rc=0 walk tampered
   NZ_WHY=
   if [[ ${node} == - ]]; then
     # volumes.tsv stores the directory path in its escaped form (see tsv_esc);
@@ -2342,6 +2407,9 @@ export_volume() {
     "${BASH}" "${SCRIPT_PATH}" --internal-export "${mp}" "${out}" "${files}" \
     "${NZ_REPORT}/quarantine.tsv" "${tag}" "${work}/export.log" "${KEEP_METADATA}" "${work}" "${walk}" || rc=$?
   stop_poller
+  tampered=$(worker_output_tampered "${work}")
+  (( tampered == 0 )) \
+    || nz_record error "the export worker left ${tampered} symlink(s)/special file(s) in its work dir (removed); treat this volume's export as tampered" "${tag}" - -
   # The worker could not append to the run log itself (no write access to the
   # report); splice its lines in now, in order.
   cat -- "${work}/export.log" >>"${NZ_LOG}" 2>/dev/null || true
@@ -2351,6 +2419,28 @@ export_volume() {
   fi
   [[ -r ${work}/progress ]] && note "${tag}: $(<"${work}/progress")"
   return 0
+}
+
+# nz_check_selection_mapped: every active quarantine.tsv line must name a file
+# of the scan inventory (same volume, path and SHA-256). A line that does not
+# map - a detection whose scanner output could not be tied to a file - would
+# leave nothing out, and the file it meant could be copied: refuse up front.
+nz_check_selection_mapped() {
+  local key tag rel want files
+  local -a bad=()
+  for key in "${Q_KEYS[@]}"; do
+    tag=${key%%$'\t'*} rel=${key#*$'\t'} want=${Q_REL[${key}]}
+    files=${NZ_REPORT}/volumes/${tag}/files.tsv
+    if [[ ${want} == - ]]; then
+      bad+=("${tag}  ${rel}  (no SHA-256: the detection did not map to a scanned file)")
+    elif [[ ! -f ${files} ]] || ! awk -F'\t' -v r="${rel}" -v s="${want}" \
+           '$6 == r && $1 == s { f = 1; exit } END { exit !f }' "${files}"; then
+      bad+=("${tag}  ${rel}  (not in the scan inventory with that SHA-256)")
+    fi
+  done
+  (( ${#bad[@]} == 0 )) && return 0
+  printf '    %s\n' "${bad[@]}" >&2
+  die "These active quarantine.tsv lines do not map to a scanned file, so --export could not leave them out. Find the real file in volumes/<tag>/files.tsv and fix the line (or comment it out deliberately), then rerun."
 }
 
 export_main() {
@@ -2372,6 +2462,7 @@ export_main() {
   free=$(df -B1 --output=avail -- "${NZ_DEST}" | tail -n 1)
   (( free >= ${need:-0} )) \
     || warn "DEST has $(human_bytes "${free}") free; the scanned volumes hold $(human_bytes "${need}")."
+  nz_check_selection_mapped
   nz_begin export
   log "Exporting ${target} -> ${NZ_DEST}"
   note "${#Q_KEYS[@]} file(s) selected in quarantine.tsv (and any file with the same SHA-256) are left out."
@@ -2433,7 +2524,7 @@ quarantine_volume() {
     ntfs) opts="rw,nosuid,nodev,noexec,uid=${UID},gid=${USER_GID}" ;;
     # The scan mounted subvolid=5 (the volume's top level) and walked the
     # subvolumes; quarantine must resolve the same paths.
-    btrfs) opts="rw,nosuid,nodev,noexec,subvolid=5"; xdev=() ;;
+    btrfs) opts="rw,nosuid,nodev,noexec,subvolid=5"; xdev=(); run=(sudo) ;;
     *) opts=rw,nosuid,nodev,noexec; run=(sudo) ;;
   esac
   log "Quarantining on ${tag} (${fstype}, ${node})"
@@ -2632,7 +2723,11 @@ main() {
     {
       t = $0; n = split(t, a, /\033\[[0-9;]*m/, seps)
       t = ""
-      for (i = 1; i <= n; i++) { gsub(/[\001-\010\013-\014\016-\037\177]/, "", a[i]); t = t a[i] (i < n ? seps[i] : "") }
+      for (i = 1; i <= n; i++) {
+        gsub(/[\001-\010\013-\014\016-\037\177]/, "", a[i])
+        # Only the colour codes log/warn/die emit survive (no conceal etc.).
+        if (i < n && seps[i] !~ /^\033\[(0|1;3[123])m$/) seps[i] = ""
+        t = t a[i] (i < n ? seps[i] : "") }
       print t; fflush()
       s = $0; gsub(/\033\[[0-9;]*m/, "", s); gsub(/[\001-\010\013-\037\177]/, "", s)
       print s >> logfile; fflush(logfile) }') 2>&1
