@@ -1753,8 +1753,32 @@ try_mount() {
   return 1
 }
 
+# apfs_fuse_try <log> <apfs-fuse args...>: run apfs-fuse (through the
+# caller's fuse_cmd) with its output on the terminal - its "Enter Password:"
+# prompt has no newline and would stay invisible behind the line-buffered
+# console logger - and copied to <log> for the gap reason. The passphrase is
+# typed at that prompt, never passed as -r/pass= (visible in the process list).
+apfs_fuse_try() {
+  local out=$1
+  shift
+  if { : >/dev/tty; } 2>/dev/null; then
+    "${fuse_cmd[@]}" apfs-fuse "$@" </dev/tty 2>&1 | tee -- "${out}" >/dev/tty
+  else
+    "${fuse_cmd[@]}" apfs-fuse "$@" </dev/null >"${out}" 2>&1
+  fi
+}
+
+# apfs_last_error <file>: the last non-empty line of a tool's output, escaped
+# (it may quote names from the media), for a gap reason.
+apfs_last_error() {
+  local line last=
+  while IFS= read -r line; do [[ -n ${line//[[:space:]]/} ]] && last=${line}; done <"$1"
+  tsv_esc "${last:-no error message}"
+  printf '%s' "${REPLY}"
+}
+
 mount_apfs() { # <node> <tag>
-  local node=$1 tag=$2 line v mp vols=() listing fuseopts
+  local node=$1 tag=$2 line v mp vols=() listing fuseopts flog why
   local -A enc=() vname=()
   local -a list_cmd=(sudo) fuse_cmd=(sudo)
   command -v apfs-fuse >/dev/null || { gap "${tag}" mount "APFS container not mounted: apfs-fuse missing"; return 0; }
@@ -1776,6 +1800,7 @@ mount_apfs() { # <node> <tag>
   fi
   listing=$("${list_cmd[@]}" apfsutil "${node}" 2>&1) || true
   printf '%s\n' "${listing}" >"${REPORT_DIR}/apfs-${tag}.txt"
+  printf '%s\n' "${listing}" >"${REPORT_DIR}/apfs-${tag}.err"
   while IFS= read -r line; do
     if [[ ${line} =~ ^[[:space:]]*Volume[[:space:]]+([0-9]+) ]]; then
       v=${BASH_REMATCH[1]}; vols+=("${v}")
@@ -1788,7 +1813,13 @@ mount_apfs() { # <node> <tag>
       vname[${v}]=${REPLY}
     fi
   done <<<"${listing}"
-  (( ${#vols[@]} )) || vols=(0)
+  if (( ${#vols[@]} == 0 )); then
+    # apfsutil could not list the container; apfs-fuse may still open
+    # volume 0, but say why the listing (names, FileVault state) is missing.
+    gap "${tag}" mount "apfsutil listed no APFS volumes ($(apfs_last_error "${REPORT_DIR}/apfs-${tag}.err")); trying volume 0 blind"
+    vols=(0)
+  fi
+  rm -f -- "${REPORT_DIR}/apfs-${tag}.err"
   for v in "${vols[@]}"; do
     mp=${MNT_BASE}/${tag}-v${v}
     if [[ -n ${enc[${v}]:-} ]]; then
@@ -1806,13 +1837,27 @@ mount_apfs() { # <node> <tag>
       sudo install -d -o "${USER_NAME}" -g "${USER_GID}" -m 0755 -- "${mp}"
       fuseopts="nosuid,nodev,noexec,uid=${UID},gid=${USER_GID}"
     fi
-    if "${fuse_cmd[@]}" apfs-fuse -o "${fuseopts},vol=${v}" "${node}" "${mp}" </dev/tty; then
+    flog=${REPORT_DIR}/apfs-fuse-${tag}-v${v}.txt
+    if apfs_fuse_try "${flog}" -o "${fuseopts},vol=${v}" "${node}" "${mp}"; then
       MOUNTS+=("${mp}")
       "${VOLUME_HANDLER}" "${mp}" apfs "${tag}-v${v}" "${node}" "${v}"
-    else
-      sudo rmdir -- "${mp}" 2>/dev/null
-      gap "${tag}-v${v}" mount "APFS volume ${v} '${vname[${v}]:-}' not mounted${enc[${v}]:+ (encrypted, not unlocked)}"
+      continue
     fi
+    why=$(apfs_last_error "${flog}")
+    # Anything but a passphrase problem: retry once in apfs-fuse's tolerant
+    # mode (-l), which returns possibly corrupt data instead of refusing
+    # structures this reverse-engineered driver does not fully understand.
+    # A volume read that way is scanned, with a gap saying so.
+    if ! grep -qiE 'password|passphrase' -- "${flog}" \
+       && apfs_fuse_try "${flog}.tolerant" -l -o "${fuseopts},vol=${v}" "${node}" "${mp}"; then
+      MOUNTS+=("${mp}")
+      gap "${tag}-v${v}" mount "APFS volume ${v} '${vname[${v}]:-}' only mounted in apfs-fuse tolerant mode (-l) after: ${why}; data may be read incorrectly - treat a clean result with caution"
+      "${VOLUME_HANDLER}" "${mp}" apfs "${tag}-v${v}" "${node}" "${v}"
+      continue
+    fi
+    [[ -f ${flog}.tolerant ]] && why="${why}; tolerant mode: $(apfs_last_error "${flog}.tolerant")"
+    sudo rmdir -- "${mp}" 2>/dev/null || true
+    gap "${tag}-v${v}" mount "APFS volume ${v} '${vname[${v}]:-}' not mounted${enc[${v}]:+ (encrypted, not unlocked)}: ${why}"
   done
 }
 
