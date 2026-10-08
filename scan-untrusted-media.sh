@@ -1992,8 +1992,11 @@ run_sandboxed() {
   # through ProtectSystem/ProtectHome=read-only and copy into its output.
   # The "-" prefix: a path that does not exist on this host is skipped
   # instead of failing the unit (every scan would die with 226/NAMESPACE).
-  local -a hide=(-/root -/etc/shadow -/etc/shadow- -/etc/gshadow -/etc/gshadow- -/etc/ssh
-                 "-${HOME}/.ssh" "-${HOME}/.gnupg" "-${VT_KEY_FILE%/*}")
+  # /etc/shadow and /etc/gshadow cannot be hidden this way: SELinux denies
+  # init_t "mounton" for shadow_t, so overlaying them fails every scan with
+  # 226/NAMESPACE on Fedora. A compromised worker can read the hashes; it
+  # has no network to send them anywhere and writes only its output dir.
+  local -a hide=(-/root -/etc/ssh "-${HOME}/.ssh" "-${HOME}/.gnupg" "-${VT_KEY_FILE%/*}")
   local -a pids=()
   shift 3
   # systemd 257+: the worker gets its own PID namespace and sees no host

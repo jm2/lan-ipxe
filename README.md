@@ -415,9 +415,9 @@ Each
 volume is scanned inside a transient systemd sandbox — invoking user +
 `CAP_DAC_READ_SEARCH` only, no network, no sockets at all, a `@system-service`
 syscall allowlist (no ptrace), its own PID namespace on systemd 257+ (no
-view of the scan script's process at all), `/root`, `/etc/shadow`,
-`/etc/gshadow`, `/etc/ssh`, `~/.ssh`, `~/.gnupg` and the VirusTotal key
-inaccessible, and the worker's only writable path is its own output
+view of the scan script's process at all), `/root`, `/etc/ssh`, `~/.ssh`,
+`~/.gnupg` and the VirusTotal key inaccessible (`/etc/shadow` cannot be
+hidden: SELinux forbids systemd from mounting over it), and the worker's only writable path is its own output
 directory, where any symlink or special file it leaves is removed and
 recorded as tampering: a compromised scanner cannot rewrite the report the
 host reads back, reach the session bus or trace the scan script (it still runs as your user, so treat a scanner compromise as a
