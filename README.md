@@ -383,25 +383,43 @@ scan-untrusted-media.sh --restore-session          # afterwards, undo --prepare-
 
 Run `--prepare-session` before attaching any drive: it turns GNOME automount,
 autorun, thumbnailers and removable-media indexing off (saving a restore script
-under `~/.local/state/scan-untrusted-media/`) and exits, so a freshly plugged drive
-is never mounted or previewed. A scan run also hardens the session itself, but by
-then a drive plugged in earlier may already be mounted, and the scanner refuses
-mounted devices. Block devices are
-refused while mounted, set read-only and scanned in place — or, only with
+under `~/.local/state/scan-untrusted-media/`), installs a runtime udev rule that
+keeps udev from auto-processing untrusted block devices (no md RAID assembly,
+btrfs device scan or LVM auto-activation on plug or revalidation — USB drives
+and the loop devices `--image-dir` uses alike; `/run`-local, gone at reboot)
+and exits, so a freshly plugged drive is not mounted, previewed or parsed
+before the scan starts. `--restore-session` undoes both and removes the rule.
+A scan run installs the same protections for its duration (needs sudo). Block devices are
+refused while mounted or held by md/LVM/device-mapper, set read-only and
+scanned in place — or, only with
 `--image-dir`, imaged with ddrescue first (image SHA-256 and unreadable
 sectors recorded) and the image attached read-only; every
 partition and APFS volume is mounted `ro,nosuid,nodev,noexec` with journal
-replay off: FAT/exFAT, NTFS, ext2/3/4, XFS, Btrfs, F2FS, HFS+, ISO/UDF,
+replay off: FAT/exFAT, NTFS, ext2/3/4, XFS, Btrfs (at `subvolid=5`, the
+volume's real top level, so the media cannot point the scan at an empty
+default subvolume; subvolumes are scanned, each one an honest gap if that
+fails), F2FS, HFS+, ISO/UDF,
 SquashFS/EROFS, and APFS via apfs-fuse (per-volume enumeration, FileVault
-password prompt). LVM volume groups are activated with every logical volume
-read-only (refused when the VG name clashes with one on the host), and LUKS
+password prompt; apfs-fuse and apfsutil run as your user, not root, over an
+ACL-granted read-only device node). LVM volume groups are activated with every
+logical volume read-only and only linear/striped segments (thin/cache/raid/vdo
+LVs stay down as coverage gaps; refused when the VG name clashes with one on
+the host), and LUKS
 or BitLocker volumes are unlocked read-only after a y/N prompt for their
 passphrase or recovery key, so the usual LUKS→LVM→ext4/XFS layouts are
 covered. Any other filesystem type is not mounted at all: obsolete or rarely
 audited kernel drivers (classic HFS, JFS, ReiserFS, UFS, ...) are not exposed
-to hostile metadata. Each
+to hostile metadata, and there is no ntfs-3g fallback (its userspace parser
+has a history of heap overflows; NTFS goes through the kernel's ntfs3 only).
+Each
 volume is scanned inside a transient systemd sandbox — invoking user +
-`CAP_DAC_READ_SEARCH` only, no network, read-only host: full inventory with
+`CAP_DAC_READ_SEARCH` only, no network, no sockets at all, a `@system-service`
+syscall allowlist (no ptrace), `/proc` hiding, `/root`, `/etc/shadow`,
+`/etc/ssh`, `~/.ssh` and `~/.gnupg` inaccessible, and the worker's only
+writable path is its own output directory: a compromised scanner cannot
+rewrite the report the host reads back, reach the session bus or ptrace the
+scan script (it still runs as your user, so treat a scanner compromise as a
+user-account compromise). Inside: full inventory with
 SHA-256 manifest, ClamAV with raised limits (PUA and macro alerts;
 encrypted/oversize files become coverage gaps, not silent passes), YARA with
 the checksum-verified YARA Forge rules (score ≥ 75 → LIKELY, lower → REVIEW),
@@ -414,12 +432,15 @@ content-vs-extension checks (an executable named like a document is LIKELY,
 any other mismatch such as a ".pdf" that is not a PDF is REVIEW). OS metadata
 (AppleDouble `._*`, Spotlight, Recycle Bin) is scanned but counted separately.
 Files of 2 GiB or more are recorded as ClamAV coverage gaps (its hard limit).
-The report TSVs escape every control character in file names, so they are safe
+The report TSVs escape every control character in file names — including raw
+C1 bytes and Unicode bidi overrides, which a terminal would otherwise execute
+or use to disguise a path — so they are safe
 to view in a terminal; `clamscan.log`/`yara.log` are raw tool output. The
 report lists DEFINITE / LIKELY / REVIEW findings plus coverage gaps; exit 0 no
-findings, 3 findings, 1 error. Everything printed during the run is also saved as
+DEFINITE or LIKELY findings (REVIEW-only findings also exit 0), 3 findings, 1
+error. Everything printed during the run is also saved as
 `console.log` in the report directory (colour codes and control characters
-stripped), so the report folder alone is a complete record. While each volume scans, its phase and progress are
+stripped from both the terminal and the log copy), so the report folder alone is a complete record. While each volume scans, its phase and progress are
 printed once a minute (inventory size, hashing files/GiB with an ETA, file
 typing, classification, ClamAV batches with an ETA, YARA); the data is read
 three times (hashing, ClamAV, YARA), and the classification pass is CPU-only,
@@ -442,10 +463,13 @@ so a pause in disk activity there is expected.
 
 Limitations: HFS+ transparent-compression (decmpfs) files read as zero-length
 on Linux; encrypted volumes need their passphrase at the terminal; md RAID,
-ZFS, Windows ReFS/Storage Spaces, LVM groups spanning other disks and
-unlisted filesystems are not opened — all of these surface as coverage gaps;
-no scan can prove media clean — the coverage-gap list is the confidence
-indicator.
+ZFS, Windows ReFS/Storage Spaces, thin/cache/raid LVM volumes, LVM groups
+spanning other disks and unlisted filesystems are not opened — all of these
+surface as coverage gaps; installing `kernel-modules-extra` for HFS+ leaves
+the classic HFS and similar modules loadable on the host even after
+`--restore-session` (blacklist them with `install <module> /bin/false` in
+`/etc/modprobe.d` if that matters to you); no scan can prove media clean —
+the coverage-gap list is the confidence indicator.
 
 #### Neutralizing reviewed threats (`--export`, `--quarantine`)
 
@@ -486,22 +510,27 @@ scan-untrusted-media.sh --quarantine media-scan-X /dev/sdb       # 3b. or neutra
   tested and its content re-hashed, and only then is the original deleted and
   `<name>.QUARANTINED.txt` left in its place (hash, detection, date, archive,
   how to restore; never written through a planted symlink). The volume is then
-  synced, unmounted and set read-only again. Only vfat, exfat, ntfs (ntfs3,
-  else ntfs-3g), ext2/3/4, btrfs and xfs are accepted; APFS and HFS+ have no
+  synced, unmounted and set read-only again. Only vfat, exfat, ntfs (ntfs3),
+  ext2/3/4, btrfs and xfs are accepted; APFS and HFS+ have no
   safe Linux write driver — do those on a Mac or macOS VM, or use `--export`.
   Installs the `7zip` package (provides `7z` on Fedora and Arch) when missing.
 
 Each run writes `REPORT_DIR/export-<timestamp>.log` or
 `quarantine-<timestamp>.log` (one line per file: status, reason, volume,
 SHA-256, path) and prints counts per status and reason; exit 0 complete, 3
-incomplete (mismatches, missing files, unmatched volumes), 1 error.
+incomplete (mismatches, missing files, unmatched volumes, selected lines that
+matched nothing), 1 error.
 
 Residual risk: any mount, read-only included, runs the kernel's filesystem
 driver on metadata an attacker may have crafted, and `--quarantine`'s
 read-write mount also replays journals and exercises the driver's write
-paths. For the highest-risk media, prefer `--export` from the ddrescue image,
-and run `--quarantine` only inside a disposable VM with the drive passed
-through.
+paths. The allowlisted drivers (ntfs3, hfsplus, f2fs, udf, ...) have open
+syzbot bugs, and cryptsetup's BitLocker parser, LVM metadata and `blkid`
+still run as root. The scan worker itself runs as your user with
+`CAP_DAC_READ_SEARCH`, so a parser compromise there means user-account
+compromise. For truly hostile media, do the whole scan inside a disposable VM
+(prefer `--export` from the ddrescue image, and run `--quarantine` only
+there); on the host, prefer `--export` over `--quarantine`.
 
 ### Mellanox firmware tool — `mlnx-fw-flash-update.sh`
 

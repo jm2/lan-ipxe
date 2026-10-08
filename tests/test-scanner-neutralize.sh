@@ -212,7 +212,7 @@ test_match_volume_tag() (
 test_quarantine_fs_types() (
   load_scanner
   local fs
-  [[ $(quarantine_fs_types ntfs) == 'ntfs3 ntfs-3g' ]] || fail 'ntfs must try ntfs3 then ntfs-3g'
+  [[ $(quarantine_fs_types ntfs) == 'ntfs3' ]] || fail 'ntfs must try the ntfs3 kernel driver only (ntfs-3g is an unsandboxed root parser)'
   for fs in vfat exfat ext2 ext3 ext4 btrfs xfs; do
     [[ $(quarantine_fs_types "${fs}") == "${fs}" ]] || fail "${fs} should be writable in place"
   done
@@ -291,6 +291,10 @@ make_export_fixture() {
     printf '# vol1\t%s\tREVIEW\tpua\tdocs/report.pdf\n' "$(sha_of "${root}/docs/report.pdf")"
     # Another volume's selection by path must not reach vol1's photo.
     printf 'vol2\t%s\tDEFINITE\tclamav: Z\tphotos/IMG_0001.JPG\n' "${S4}"
+    # An active line whose path is on no file: a detection that never mapped
+    # to the inventory (spoofed or malformed scanner output). Nothing can be
+    # left out for it, so the run must end with an error, not a quiet pass.
+    printf 'vol1\t%s\tDEFINITE\tclamav: forged\tnot/a/real/path.exe\n' "${S2}"
   } >"${rep}/quarantine.tsv"
 }
 
@@ -338,6 +342,9 @@ test_export_tree() (
   expect_status gone.txt missing
   expect_status link-to-passwd skipped 'not a regular file'
   expect_status pipe skipped 'not a regular file'
+  # The active selection whose path matched nothing is an error line: the
+  # export must not report success while a selected detection went unmatched.
+  expect_status 'not/a/real/path.exe' error 'never matched a file on this volume'
   for f in .DS_Store docs/._report.pdf .Spotlight-V100/Store-V2/store.db '$RECYCLE.BIN/S-1-5/desktop.ini' \
            'System Volume Information/IndexerVolumeGuid' .Trash-1000/files/old.txt .fseventsd/0000; do
     expect_status "${f}" skipped 'OS metadata'
@@ -414,6 +421,15 @@ test_quarantine_file() (
   grep -q $'^quarantined\t' "${NZ_LOG}" || fail 'quarantine not logged'
   grep -q "${good}" "${QDIR}/index.tsv" || fail 'index.tsv not written'
 
+  # A selection with no sha256 (a detection that never mapped to a scanned
+  # file) is an error, never a quiet skip: nothing was verified or removed.
+  printf 'unread\n' >"${vol}/d/unmapped.exe"
+  Q_REL[vol1$'\t'd/unmapped.exe]=-
+  Q_INFO[vol1$'\t'd/unmapped.exe]=$'DEFINITE\tclamav: forged'
+  quarantine_file "${vol}/d/unmapped.exe" "vol1"$'\t'"d/unmapped.exe"
+  [[ -f ${vol}/d/unmapped.exe ]] || fail 'unmapped selection was removed'
+  grep -q $'^error\tno sha256 recorded at scan time' "${NZ_LOG}" || fail 'unmapped selection not logged as an error'
+
   # sha256 no longer matches the selection: left in place, no archive.
   quarantine_file "${vol}/d/changed.exe" "vol1"$'\t'"d/changed.exe"
   [[ -f ${vol}/d/changed.exe && ! -e ${vol}/d/changed.exe.QUARANTINED.txt ]] || fail 'mismatched file touched'
@@ -474,6 +490,16 @@ test_option_validation() {
   expect_die '--yes needs --quarantine' --yes --export "${rep}" "${FIXTURE_ROOT}/d1" "${img}"
   expect_die 'do not apply to --export' --export "${rep}" "${FIXTURE_ROOT}/d1" --image-dir "${FIXTURE_ROOT}" "${img}"
   expect_die '--keep-mounted does not apply' --quarantine "${rep}" --keep-mounted "${img}"
+  # Scan-time options are rejected while neutralizing a finished report.
+  expect_die 'scan-time option' --export "${rep}" "${FIXTURE_ROOT}/d1" --vt "${img}"
+  expect_die 'scan-time option' --quarantine "${rep}" --no-yara "${img}"
+  expect_die 'scan-time option' --export "${rep}" "${FIXTURE_ROOT}/d1" --no-update "${img}"
+  # Contradictory or inapplicable scan options are refused up front.
+  expect_die 'needs --image-dir' --resume "${img}"
+  expect_die 'only applies with --vt' --vt-rate 9 "${img}"
+  expect_die 'contradict each other' --yara-rules "${img}" --no-yara "${img}"
+  expect_die 'cannot be combined with --yara-set' --yara-set full --yara-rules "${img}" "${img}"
+  expect_die 'contradicts it' --prepare-session --no-session-hardening
   expect_die 'under /tmp or /var/tmp' --export "${rep}" /tmp/scanner-neutralize-dest "${img}"
   expect_die 'under /tmp or /var/tmp' --export "${rep}" "${TEST_ROOT}/dest" "${img}"
   expect_die 'is not empty' --export "${rep}" "${FIXTURE_ROOT}/full" "${img}"
@@ -527,6 +553,11 @@ case $1 in
   -v|-n) exit 0 ;;
   systemd-run) while (( $# )) && [[ $1 != -- ]]; do shift; done; shift; exec "$@" ;;
   mkdir|rmdir|dnf|pacman) exit 0 ;;
+  # The runtime udev hold rule: tee/udevadm are no-ops here (no real /run/udev
+  # write happens from the test), rm only ever targets the rule file.
+  tee) cat >/dev/null; exit 0 ;;
+  udevadm) exit 0 ;;
+  rm) [[ $3 == /run/udev/rules.d/61-scan-untrusted-media.rules ]] && exit 0 ;;
   *) echo "SHIM sudo refused: $*" >&2; exit 97 ;;
 esac
 EOF

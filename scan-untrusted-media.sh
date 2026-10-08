@@ -28,8 +28,12 @@
 #   3. attaches images read-only, detects every partition and APFS volume,
 #      and mounts each one ro,nosuid,nodev,noexec (APFS via apfs-fuse)
 #   4. scans every mounted volume inside a transient systemd sandbox: the
-#      invoking user plus CAP_DAC_READ_SEARCH only, no network, read-only
-#      host, so a parser exploit in a scanner gains nothing useful
+#      invoking user plus CAP_DAC_READ_SEARCH only, no network, no sockets,
+#      a system-service syscall allowlist (no ptrace), and its only writable
+#      path is the per-volume output directory - a parser exploit in a
+#      scanner cannot rewrite the report, reach the session bus or trace the
+#      host script (it still runs as your user: treat a scanner compromise
+#      as a user-account compromise)
 #        - full inventory and SHA-256 manifest of every file
 #        - ClamAV (fresh definitions, all limits raised, archives/DMG/PKG
 #          unpacked, PUA and macro alerts, encrypted/oversize files reported)
@@ -178,9 +182,12 @@ Read-only malware triage of untrusted media. TARGET is a block device
   --no-session-hardening
                       do not change GNOME automount/thumbnail/index settings
   --prepare-session   only harden the desktop session (automount, autorun,
-                      thumbnails, removable-media indexing off) and exit; run
-                      this BEFORE plugging in any untrusted drive
-  --restore-session   undo --prepare-session and exit
+                      thumbnails, removable-media indexing off) and install a
+                      runtime udev rule that stops md/btrfs/LVM from
+                      auto-processing untrusted drives, then exit; run this
+                      BEFORE plugging in any untrusted drive (needs sudo)
+  --restore-session   undo --prepare-session (desktop settings and the udev
+                      rule) and exit
 
 Neutralizing reviewed threats (after a scan; review REPORT_DIR/quarantine.tsv
 first: only its active, uncommented lines are acted on):
@@ -197,10 +204,12 @@ first: only its active, uncommented lines are acted on):
                       file into REPORT_DIR/quarantine/<sha256>.7z (password
                       "infected", encrypted names) and leave a
                       <name>.QUARANTINED.txt stub. Mounts read-write (replays
-                      journals); vfat, exfat, ntfs, ext2/3/4, btrfs, xfs only.
+                      journals); vfat, exfat, ntfs (ntfs3), ext2/3/4, btrfs,
+                      xfs only.
   --yes               with --quarantine, do not ask for confirmation
 
-Exit: 0 no findings, 3 findings in DEFINITE or LIKELY, 1 error.
+Exit: 0 no DEFINITE or LIKELY findings (REVIEW-only findings exit 0 too),
+      3 findings in DEFINITE or LIKELY, 1 error.
       --export/--quarantine: 0 done, 3 incomplete (see the log), 1 error.
 USAGE
 }
@@ -217,6 +226,7 @@ UPDATE=1
 USE_VT=0
 VT_ALL=0
 VT_RATE=4
+VT_RATE_SET=0
 KEEP_MOUNTED=0
 RESUME=0
 HARDEN_SESSION=1
@@ -255,7 +265,7 @@ else
       --vt-all)     VT_ALL=1 ;;
       --vt-rate)
         (( $# >= 2 )) && [[ $2 =~ ^[1-9][0-9]*$ ]] || die "--vt-rate needs a positive integer"
-        VT_RATE=$2; shift ;;
+        VT_RATE=$2; VT_RATE_SET=1; shift ;;
       --keep-mounted) KEEP_MOUNTED=1 ;;
       --resume)     RESUME=1 ;;
       --no-session-hardening) HARDEN_SESSION=0 ;;
@@ -284,7 +294,7 @@ fi
 # newline become \\, \t and \n) and leave it in REPLY. Odd names are kept
 # visible, not dropped. No subshell: it runs once per file.
 tsv_esc() {
-  local s c h i
+  local s c h i code
   REPLY=$1
   REPLY=${REPLY//\\/\\\\}
   REPLY=${REPLY//$'\t'/\\t}
@@ -292,13 +302,26 @@ tsv_esc() {
   # Every other control character (C0, DEL and, in UTF-8 names, C1) becomes
   # \xHH or \uHHHH: names come from hostile media, and raw ESC/CSI bytes in a
   # report would be interpreted by whatever terminal later displays it.
-  [[ ${REPLY} == *[[:cntrl:]]* ]] || return 0
+  # [[:cntrl:]] alone misses a raw C1 byte such as 0x9b (invalid UTF-8, but a
+  # terminal executes it as CSI) and the Unicode bidi overrides, which can
+  # visually reorder a path to disguise it - both are escaped as well.
+  # The bracket below is a set of literal characters, not a range, so it works
+  # the same under any collation.
+  if [[ ${REPLY} != *[[:cntrl:]]* && ${REPLY} != *[$'\x80'-$'\x9f']* \
+        && ${REPLY} != *[$'\u200e'$'\u200f'$'\u202a'$'\u202b'$'\u202c'$'\u202d'$'\u202e'$'\u2066'$'\u2067'$'\u2068'$'\u2069']* ]]; then
+    return 0
+  fi
   s=${REPLY} REPLY=
   for (( i = 0; i < ${#s}; i++ )); do
     c=${s:i:1}
-    if [[ ${c} == [[:cntrl:]] ]]; then
-      printf -v h '%x' "'${c}"
-      if (( 16#${h} < 256 )); then printf -v c '\\x%02x' "0x${h}"; else printf -v c '\\u%04x' "0x${h}"; fi
+    printf -v h '%x' "'${c}"
+    code=$(( 16#${h} ))
+    if [[ ${c} == [[:cntrl:]] ]] \
+       || (( code >= 128 && code <= 155 )) \
+       || { (( code >= 0x200e && code <= 0x200f )); } \
+       || { (( code >= 0x202a && code <= 0x202e )); } \
+       || { (( code >= 0x2066 && code <= 0x2069 )); }; then
+      if (( code < 256 )); then printf -v c '\\x%02x' "${code}"; else printf -v c '\\u%04x' "${code}"; fi
     fi
     REPLY+=${c}
   done
@@ -323,14 +346,28 @@ classify_clam_signature() {
 
 # parse_clam_log <clamscan stdout> <findings.tsv> <gaps.tsv> <root>: clamscan
 # prints "<path>: <signature> FOUND". The path may itself contain ": ", so
-# split on the last one. Paths are stored relative to <root>.
+# split on the last one. Paths are stored relative to <root>. The signature
+# must match a restricted charset: it comes from the same line as the hostile
+# file name, and a file named "x: <CSI junk>Evil FOUND\ny" would otherwise
+# forge a finding with raw escape sequences in it. Anything that does not
+# parse is recorded as a gap - never silently dropped.
 parse_clam_log() {
   local log_file=$1 findings=$2 gaps=$3 root=$4 line path sig cls
   while IFS= read -r line; do
-    [[ ${line} == *' FOUND' ]] || continue
+    if [[ ${line} != *' FOUND' ]]; then
+      [[ -n ${line} ]] || continue
+      tsv_esc "${line}"
+      printf 'clamav\tunrecognized clamscan output line (treated as unscanned):\t%s\n' "${REPLY}" >>"${gaps}"
+      continue
+    fi
     line=${line% FOUND}
     sig=${line##*: }
     path=${line%: *}
+    if [[ ! ${sig} =~ ^[A-Za-z0-9._:@-]+$ ]]; then
+      tsv_esc "${line}"
+      printf 'clamav\tsuspicious clamscan line (signature not recognized):\t%s\n' "${REPLY}" >>"${gaps}"
+      continue
+    fi
     path=${path#"${root}"/}
     cls=$(classify_clam_signature "${sig}")
     tsv_esc "${path}"
@@ -342,15 +379,32 @@ parse_clam_log() {
   done <"${log_file}"
 }
 
-# parse_yara_output <yara -m stdout> <findings.tsv> <root>: lines look like
-# "RULE [meta...] /path". YARA Forge rules carry score=0..100 metadata; a
-# score of 75+ is treated as LIKELY, anything lower as REVIEW.
+# parse_yara_output <yara -m stdout> <findings.tsv> <gaps.tsv> <root>: lines
+# look like "RULE [meta...] /path". YARA Forge rules carry score=0..100
+# metadata; a score of 75+ is treated as LIKELY, anything lower as REVIEW.
+# YARA prints CR and LF in names as the two-byte text "\r"/"\n", so a line
+# holds at most one name, but the name may contain any other bytes (including
+# invalid UTF-8): a $'.' regex under C.UTF-8 would drop such lines wholesale,
+# so the line is split with globs on the trusted "] ${root}/" boundary, which
+# no scanner output can silently mangle. Anything unparsable becomes a gap.
 parse_yara_output() {
-  local out=$1 findings=$2 root=$3 line rule meta path score cls
+  local out=$1 findings=$2 gaps=$3 root=$4 line rule meta path score cls rest
   while IFS= read -r line; do
-    [[ ${line} =~ ^([A-Za-z0-9_]+)\ \[(.*)\]\ (/.*)$ ]] || continue
-    rule=${BASH_REMATCH[1]} meta=${BASH_REMATCH[2]} path=${BASH_REMATCH[3]}
-    path=${path#"${root}"/}
+    if [[ ${line} != *"] ${root}/"* || ${line} != *\ [* ]]; then
+      [[ -n ${line} ]] || continue
+      tsv_esc "${line}"
+      printf 'yara\tunrecognized yara output line (treated as unscanned):\t%s\n' "${REPLY}" >>"${gaps}"
+      continue
+    fi
+    rest=${line%%"] ${root}/"*}
+    path=${line#*"] ${root}/"}
+    rule=${rest%% \[*}
+    meta=${rest#*\[}
+    if [[ ! ${rule} =~ ^[A-Za-z0-9_]+$ ]]; then
+      tsv_esc "${line}"
+      printf 'yara\tunrecognized yara output line (rule name not valid):\t%s\n' "${REPLY}" >>"${gaps}"
+      continue
+    fi
     score=0
     # yara 4.5 prints "score =80"; tolerate optional spaces around the
     # list separator and the = of either spelling.
@@ -414,13 +468,16 @@ eta() {
 # inventory ("size mtime mode path" NUL records) into newline-separated
 # --file-list batches dir/clambatch.NNNNN.lst of about <weight per batch>
 # each (bytes plus CLAM_FILE_WEIGHT per file), writing each batch's weight to
-# clambatch.NNNNN.w. Names containing a newline cannot go in a --file-list;
-# they go NUL-separated to clambatch.nl (weight in clambatch.nl.w).
+# clambatch.NNNNN.w. Names that cannot ride a --file-list line - a newline,
+# a carriage return (clamscan strips a trailing CR from list lines) or a
+# path of CLAM_LIST_MAX bytes or more (it splits list lines at 1023) - go
+# NUL-separated to clambatch.nl (weight in clambatch.nl.w), which the worker
+# passes as arguments instead.
 clam_split_batches() {
-  LC_ALL=C awk -v RS='\0' -v per="$3" -v fw="${CLAM_FILE_WEIGHT}" -v dir="$2" '
+  LC_ALL=C awk -v RS='\0' -v per="$3" -v fw="${CLAM_FILE_WEIGHT}" -v lmax="${CLAM_LIST_MAX}" -v dir="$2" '
     function close_batch() { if (cur != "") { close(cur); printf "%.0f\n", w > (base ".w"); close(base ".w") } }
     { p = $0; sub(/^[0-9]+ -?[0-9]+ [0-7]+ /, "", p)
-      if (index(p, "\n")) { printf "%s%c", p, 0 > (dir "/clambatch.nl"); nlw += $1 + fw; next }
+      if (index(p, "\n") || index(p, "\r") || length(p) >= lmax) { printf "%s%c", p, 0 > (dir "/clambatch.nl"); nlw += $1 + fw; next }
       if (cur == "" || w >= per) { close_batch(); base = sprintf("%s/clambatch.%05d", dir, b++); cur = base ".lst"; w = 0 }
       print p > cur; w += $1 + fw }
     END { close_batch(); if (nlw) printf "%.0f\n", nlw > (dir "/clambatch.nl.w") }' "$1"
@@ -431,6 +488,10 @@ clam_split_batches() {
 # cost, see the batch split); the time per unit of weight comes from the
 # batches that finished, and <jobs> batches run at once.
 CLAM_FILE_WEIGHT=$(( 256 * 1024 ))
+# clamscan reads --file-list lines with a 1023-byte limit and strips a
+# trailing CR; names at or above this length (or containing CR) are passed as
+# arguments instead of through a list.
+CLAM_LIST_MAX=1000
 clam_eta() {
   local out=$1 total=$2 jobs=$3 rc id start wfile secs=0 wdone=0 left pct
   for rc in "${out}"/clamscan.*.rc; do
@@ -453,22 +514,41 @@ clam_eta() {
 }
 
 internal_scan() {
-  local root=${1%/} out=$2 fstype=$3 yara_rules=$4 clam_db=$5
+  local root=${1%/} out=$2 fstype=$3 yara_rules=$4 clam_db=$5 walk=${6:-strict}
   local meta=${out}/files.meta list=${out}/files.lst
   local rec rest path rel erel sum mime size mtime mode line reason f rc
   local files=0 bytes=0 suspects=0 zero_len=0 unix_fs=0 jobs batches per
-  local os_meta=0 mismatches=0 is_meta base ext want clam_weight
+  local os_meta=0 mismatches=0 is_meta base ext want clam_weight dev0 dev
   local total_files total_bytes n done_bytes started xpid
-  local -a clam_opts=()
+  local -a xdev=(-xdev) clam_opts=()
   local -A mime_of=() sum_of=() size_of=()
   [[ -d ${root} && -d ${out} ]] || { echo "internal-scan: bad paths" >&2; return 1; }
+  # walk mode: "strict" never crosses a subvolume/mount boundary (find -xdev);
+  # "cross" scans btrfs subvolumes of the volume this tool mounted itself
+  # (each has its own st_dev, but they are media content, not foreign mounts);
+  # "dir" is strict for a caller-supplied directory, whose nested mounts are
+  # not media and become coverage gaps.
+  [[ ${walk} == cross ]] && xdev=()
   : >"${out}/findings.tsv"; : >"${out}/gaps.tsv"; : >"${out}/suspect.tsv"
   [[ ${fstype} =~ ^(apfs|hfsplus|ext[234]|xfs|btrfs|f2fs)$ ]] && unix_fs=1
 
   # Inventory: one find pass records size, mtime and mode next to each path
   # (no per-file stat forks). find errors (permission, I/O) are gaps.
   scan_progress "${out}" "inventory: listing files"
-  find "${root}" -xdev -type f -printf '%s %Ts %m %p\0' >"${meta}" 2>"${out}/find.err" || true
+  find "${root}" "${xdev[@]}" -type f -printf '%s %Ts %m %p\0' >"${meta}" 2>"${out}/find.err" || true
+  if [[ ${walk} == dir ]]; then
+    # Anything with a different st_dev below the target was skipped by the
+    # -xdev walk (a nested mount, or a btrfs subvolume): an honest gap, never
+    # a silent hole in the inventory.
+    dev0=$(stat -c %d -- "${root}" || printf 0)
+    while IFS= read -r line; do
+      [[ -n ${line} ]] || continue
+      dev=${line%% *}; path=${line#* }
+      [[ ${dev} == "${dev0}" ]] && continue
+      tsv_esc "${path#"${root}"/}"
+      printf 'find\tnested filesystem (mount or subvolume) not scanned:\t%s\n' "${REPLY}" >>"${out}/gaps.tsv"
+    done < <(find "${root}" -type d -printf '%D %p\n' 2>/dev/null || true)
+  fi
   sed -z 's/^[0-9]* -\{0,1\}[0-9]* [0-7]* //' "${meta}" >"${list}"
   total_files=0 total_bytes=0
   while IFS=' ' read -r -d '' size mtime mode path; do
@@ -479,7 +559,7 @@ internal_scan() {
   while IFS= read -r line; do
     printf 'find\t%s\t-\n' "$(tsv_escape "${line}")" >>"${out}/gaps.tsv"
   done <"${out}/find.err"
-  find "${root}" -xdev -type d \( -iname '*.app' -o -iname '*.pkg' -o -iname '*.mpkg' \
+  find "${root}" "${xdev[@]}" -type d \( -iname '*.app' -o -iname '*.pkg' -o -iname '*.mpkg' \
       -o -iname '*.bundle' -o -iname '*.plugin' -o -iname '*.kext' -o -iname '*.framework' \
       -o -iname '*.workflow' -o -iname '*.scptd' -o -iname '*.prefpane' \) -prune \
       -printf '%P\n' >"${out}/bundles.txt" 2>/dev/null || true
@@ -501,7 +581,21 @@ internal_scan() {
     mime_of[${path}]=${rest#: }
     n=$(( n + 1 ))
     (( n % 2000 )) || scan_progress "${out}" "file types: ${n}/${total_files} files"
-  done < <(xargs -0 -r file -N -r -0 --mime-type -- <"${list}" 2>/dev/null)
+  done < <(xargs -0 -r file -N -r -0 --mime-type -- <"${list}" 2>"${out}/file.err"; echo $? >"${out}/file.rc")
+  # file(1) killed by a signal (its seccomp SIGSYS, or a parser crash on
+  # hostile content) leaves the rest of the inventory untyped and the
+  # content-vs-extension checks silently skipped: stderr is kept and a short
+  # count is a gap, never a quiet pass.
+  while IFS= read -r line; do
+    printf 'file\t%s\t-\n' "$(tsv_escape "${line}")" >>"${out}/gaps.tsv"
+  done <"${out}/file.err"
+  if (( n < total_files )); then
+    printf 'file\tfile(1) reported a type for %s of %s files (crashed or stopped early; content checks incomplete)\t-\n' \
+      "${n}" "${total_files}" >>"${out}/gaps.tsv"
+    rc=$(<"${out}/file.rc")
+    (( rc == 0 )) || printf 'file\tfile type detection exited %s\t-\n' "${rc}" >>"${out}/gaps.tsv"
+  fi
+  rm -f -- "${out}/file.rc"
 
   exec 3>"${out}/files.tsv" 4>>"${out}/gaps.tsv" 5>>"${out}/suspect.tsv" 6>>"${out}/findings.tsv"
   shopt -s nocasematch
@@ -607,7 +701,13 @@ internal_scan() {
       if [[ -s ${out}/clambatch.nl ]]; then
         rc=0
         : >"${out}/clamscan.nl.start"
-        xargs -0 -r clamscan "${clam_opts[@]}" -- <"${out}/clambatch.nl" \
+        # The argument batch: run clamscan directly (no xargs) so the exit
+        # status is clamscan's own - xargs would fold any detection (exit 1)
+        # into 123 and the worker would report a false gap for every find.
+        # A pathological number of newline-named files can exceed the exec
+        # limit; that fails loudly here and becomes a gap, not a skip.
+        mapfile -d '' -t nl_files <"${out}/clambatch.nl"
+        clamscan "${clam_opts[@]}" -- "${nl_files[@]}" \
           >"${out}/clamscan.nl.part" 2>"${out}/clamscan.nl.err" || rc=$?
         echo "${rc}" >"${out}/clamscan.nl.rc"
       fi
@@ -637,8 +737,16 @@ internal_scan() {
   done
   rm -f -- "${out}"/clamscan.*.part "${out}"/clamscan.[0-9n]*.err "${out}"/clamscan.*.rc
   parse_clam_log "${out}/clamscan.log" "${out}/findings.tsv" "${out}/gaps.tsv" "${root}"
+  # clamscan prints access failures ("WARNING: ...: Can't access file") on
+  # stdout mixed with the FOUND lines, and libclamav messages on stderr:
+  # both mean files this run did not fully examine. Every such line is a gap;
+  # nothing is filtered away on trust.
   while IFS= read -r line; do
-    [[ ${line} == *ERROR:* || ${line} == *'Access denied'* || ${line} == *"Can't"* ]] || continue
+    [[ ${line} == WARNING:* || ${line} == ERROR:* ]] || continue
+    printf 'clamav\t%s\t-\n' "$(tsv_escape "${line}")" >>"${out}/gaps.tsv"
+  done <"${out}/clamscan.log"
+  while IFS= read -r line; do
+    [[ -n ${line} ]] || continue
     printf 'clamav\t%s\t-\n' "$(tsv_escape "${line}")" >>"${out}/gaps.tsv"
   done <"${out}/clamscan.err"
 
@@ -649,7 +757,7 @@ internal_scan() {
       --threads="$(nproc)" --timeout="${YARA_TIMEOUT}" --skip-larger="${YARA_MAX_BYTES}" \
       "${yara_rules}" "${root}" >"${out}/yara.log" 2>"${out}/yara.err" || rc=$?
     (( rc == 0 )) || printf 'yara\tyara exited %s (see yara.err)\t-\n' "${rc}" >>"${out}/gaps.tsv"
-    parse_yara_output "${out}/yara.log" "${out}/findings.tsv" "${root}"
+    parse_yara_output "${out}/yara.log" "${out}/findings.tsv" "${out}/gaps.tsv" "${root}"
     while IFS= read -r line; do
       # Oversized files already have a per-file gap from the inventory.
       [[ ${line} == skipping\ *" because it's larger than "* ]] && continue
@@ -665,7 +773,7 @@ internal_scan() {
 
 if (( INTERNAL_SCAN )); then
   shift
-  (( $# == 5 )) || die "--internal-scan needs 5 arguments"
+  (( $# == 5 || $# == 6 )) || die "--internal-scan needs 5 arguments (a 6th, the walk mode, is optional)"
   internal_scan "$@"
   exit
 fi
@@ -787,13 +895,15 @@ match_volume_tag() {
     }' "$1"
 }
 
-# quarantine_fs_types <fstype>: the mount types to try for an in-place
+# quarantine_fs_types <fstype>: the mount type to try for an in-place
 # read-write quarantine, or an explanation and failure for filesystems Linux
 # cannot safely write.
 quarantine_fs_types() {
   case $1 in
     vfat|exfat|ext2|ext3|ext4|btrfs|xfs) printf '%s' "$1" ;;
-    ntfs) printf 'ntfs3 ntfs-3g' ;;
+    # ntfs3 only: ntfs-3g is a userspace parser of hostile metadata and would
+    # run as root through try_mount's sudo.
+    ntfs) printf 'ntfs3' ;;
     apfs|hfs|hfsplus)
       printf '%s has no safe read-write Linux driver: quarantine on a Mac (or a macOS VM), or use --export\n' "$1" >&2
       return 1 ;;
@@ -825,18 +935,22 @@ check_export_dest() {
   printf '%s' "${d}"
 }
 
-# export_tree <volume root> <dest dir> <files.tsv> <quarantine.tsv> <tag> <log> <keep metadata 0|1> <progress dir>:
+# export_tree <volume root> <dest dir> <files.tsv> <quarantine.tsv> <tag> <log> <keep metadata 0|1> <progress dir> [walk]:
 # the export worker (runs inside the sandbox, or directly in tests). Copies
 # every regular file below <volume root> into <dest dir> unless it is OS
 # clutter, absent from the volume's scan inventory, selected in quarantine.tsv
-# or shares the SHA-256 of a selected file. Copies get mode 0644 (directories
-# 0755) and nothing else from the source: no owner, exec/setuid bits, xattrs
-# or ACLs. Each copy is hashed again and deleted unless it matches files.tsv.
-# Log lines: status, reason, tag, sha256, escaped relpath.
+# or shares the SHA-256 of a selected file. walk is "strict" (find -xdev) or
+# "cross" (btrfs subvolumes of this tool's own mount; see internal_scan).
+# Copies get mode 0644 (directories 0755) and nothing else from the source:
+# no owner, exec/setuid bits, xattrs or ACLs. Each copy is hashed again and
+# deleted unless it matches files.tsv. Log lines: status, reason, tag, sha256,
+# escaped relpath.
 export_tree() {
-  local root=${1%/} out=${2%/} files_tsv=$3 qfile=$4 tag=$5 log=$6 keep=$7 prog=$8
-  local sum size mtime mode mime erel ty rel src dst want got n=0 total=0 copied=0 bytes=0 lfd line
+  local root=${1%/} out=${2%/} files_tsv=$3 qfile=$4 tag=$5 log=$6 keep=$7 prog=$8 walk=${9:-strict}
+  local sum size mtime mode mime erel ty rel src dst want got n=0 total=0 copied=0 bytes=0 lfd line key
+  local -a xdev=(-xdev)
   local -A want_sum=() want_size=() seen=()
+  [[ ${walk} == cross ]] && xdev=()
   [[ -d ${root} && -d ${out} && -f ${files_tsv} && -d ${prog} ]] \
     || { echo "internal-export: bad paths" >&2; return 1; }
   load_quarantine_selection "${qfile}" || return 1
@@ -894,13 +1008,24 @@ export_tree() {
     chmod 0644 -- "${dst}"
     nz_log copied - "${want}" "${erel}"
     copied=$(( copied + 1 )) bytes=$(( bytes + ${want_size[${erel}]:-0} ))
-  done < <(find "${root}" -xdev -mindepth 1 ! -type d -printf '%y\0%P\0' 2>"${prog}/find.err")
+  done < <(find "${root}" "${xdev[@]}" -mindepth 1 ! -type d -printf '%y\0%P\0' 2>"${prog}/find.err")
   while IFS= read -r line; do
     tsv_esc "${line}"
     nz_log error "find: ${REPLY}" - -
   done <"${prog}/find.err"
   for erel in "${!want_sum[@]}"; do
     [[ -n ${seen[${erel}]+x} ]] || nz_log missing 'in files.tsv but no longer on the volume' "${want_sum[${erel}]}" "${erel}"
+  done
+  # An active quarantine.tsv line whose (tag, path) never matched a file on
+  # this volume means the detection's path did not map to the inventory (a
+  # spoofed or malformed scanner line): nothing was left out for it, and the
+  # file it was meant to select may be sitting in DEST. That is an error, not
+  # a quiet success.
+  for key in "${Q_KEYS[@]}"; do
+    [[ ${key%%$'\t'*} == "${tag}" ]] || continue
+    [[ -z ${seen[${key#*$'\t'}]+x} ]] \
+      && nz_log error 'selected in quarantine.tsv but never matched a file on this volume (detection did not map to a scanned file)' \
+           "${Q_REL[${key}]}" "${key#*$'\t'}"
   done
   exec {lfd}>&-
   scan_progress "${prog}" "done: ${copied} files copied, $(human_bytes "${bytes}")"
@@ -946,7 +1071,7 @@ quarantine_file() {
   tag=${key%%$'\t'*} erel=${key#*$'\t'} want=${Q_REL[${key}]}
   cls=${Q_INFO[${key}]%%$'\t'*} det=${Q_INFO[${key}]#*$'\t'}
   if [[ ${want} == - ]]; then
-    nz_record skipped 'no sha256 recorded at scan time, cannot verify it; left in place' "${tag}" - "${erel}"
+    nz_record error 'no sha256 recorded at scan time (the detection never mapped to a scanned file); left in place and nothing else was removed for it' "${tag}" - "${erel}"
     return 0
   fi
   got=$("${run[@]}" sha256sum -z -- "${p}" | tr -d '\0') || got=
@@ -1019,10 +1144,37 @@ STUB
 
 if (( INTERNAL_EXPORT )); then
   shift
-  (( $# == 8 )) || die "--internal-export needs 8 arguments"
+  (( $# == 8 || $# == 9 )) || die "--internal-export needs 8 arguments (a 9th, the walk mode, is optional)"
   export_tree "$@"
   exit
 fi
+
+#--- Report merge (pure helpers; also reached by tests) -----------------------
+# collect_results: merge per-volume findings and gaps (adding the volume tag
+# and each file's SHA-256) into findings.tsv and gaps.tsv at the top level.
+collect_results() {
+  local d tag
+  : >"${REPORT_DIR}/findings.tsv"
+  cp -- "${REPORT_DIR}/gaps-global.tsv" "${REPORT_DIR}/gaps.tsv"
+  for d in "${REPORT_DIR}"/volumes/*/; do
+    [[ -f ${d}files.tsv ]] || continue
+    tag=${d%/}; tag=${tag##*/}
+    # A finding whose path is not in the volume's inventory means the scanner
+    # printed a path that maps to no scanned file (a malformed or forged
+    # scanner line). It keeps its finding row (with sha "-") so nothing is
+    # hidden, and also becomes a gap so --export can never treat the volume
+    # as fully triaged while a detection went unmatched.
+    awk -F'\t' -v OFS='\t' -v vol="${tag}" -v gaps="${REPORT_DIR}/gaps.tsv" 'NR == FNR { sha[$6] = $1; next }
+      { if ($4 in sha) print $1, $2, $3, vol, sha[$4], $4
+        else { print $1, $2, $3, vol, "-", $4
+               print vol, "scan", "detection not mapped to a scanned file (malformed or forged scanner output): " $4, "-" >> gaps } }' \
+      "${d}files.tsv" "${d}findings.tsv" >>"${REPORT_DIR}/findings.tsv"
+    # One gap per tool and file: an oversized file is reported both by the
+    # inventory and by ClamAV's own limit alert.
+    awk -F'\t' -v OFS='\t' -v vol="${tag}" '$3 == "-" || !seen[$1 FS $3]++ { print vol, $1, $2, $3 }' \
+      "${d}gaps.tsv" >>"${REPORT_DIR}/gaps.tsv"
+  done
+}
 
 # Sourced by tests: stop before doing anything.
 [[ ${SCAN_UNTRUSTED_MEDIA_LIB:-0} == 1 ]] && return 0
@@ -1036,12 +1188,28 @@ else
   [[ -z ${IMAGE_DIR} || -d ${IMAGE_DIR} ]] || die "--image-dir ${IMAGE_DIR} is not a directory"
 fi
 (( VT_ALL == 0 || USE_VT == 1 )) || die "--vt-all needs --vt"
+(( ! VT_RATE_SET || USE_VT == 1 )) || die "--vt-rate only applies with --vt"
+(( ! RESUME )) || [[ ${IMAGE_MODE} == image ]] || die "--resume continues an interrupted --image-dir image; it needs --image-dir"
+if [[ -n ${YARA_RULES} ]]; then
+  (( USE_YARA )) || die "--yara-rules and --no-yara contradict each other"
+  [[ ${YARA_SET} == extended ]] || die "--yara-rules replaces the YARA Forge rules; it cannot be combined with --yara-set"
+fi
 if [[ -n ${NZ_MODE} ]]; then
   [[ -z ${SESSION_ACTION} ]] || die "--${NZ_MODE} cannot be combined with --${SESSION_ACTION}-session"
   (( ${#TARGETS[@]} == 1 )) || die "--${NZ_MODE} takes exactly one TARGET"
   [[ -z ${IMAGE_DIR} && -z ${REPORT_DIR} ]] \
     || die "--image-dir and --report-dir do not apply to --${NZ_MODE}"
   (( ! KEEP_MOUNTED )) || die "--keep-mounted does not apply to --${NZ_MODE}"
+  # Scan-only settings have no meaning while neutralizing a finished report.
+  (( USE_VT )) && die "--vt does not apply to --${NZ_MODE} (it is a scan-time option)"
+  (( USE_YARA )) || die "--no-yara does not apply to --${NZ_MODE} (it is a scan-time option)"
+  (( UPDATE )) || die "--no-update does not apply to --${NZ_MODE} (it is a scan-time option)"
+  [[ -z ${YARA_RULES} ]] || die "--yara-rules does not apply to --${NZ_MODE} (it is a scan-time option)"
+  [[ ${YARA_SET} == extended ]] || die "--yara-set does not apply to --${NZ_MODE} (it is a scan-time option)"
+  [[ -z ${CLAM_DB} ]] || die "--clam-db does not apply to --${NZ_MODE} (it is a scan-time option)"
+fi
+if [[ ${SESSION_ACTION} == prepare ]]; then
+  (( HARDEN_SESSION )) || die "--prepare-session is the session hardening; --no-session-hardening contradicts it"
 fi
 (( ! KEEP_METADATA )) || [[ ${NZ_MODE} == export ]] || die "--keep-metadata needs --export"
 (( ! ASSUME_YES )) || [[ ${NZ_MODE} == quarantine ]] || die "--yes needs --quarantine"
@@ -1160,6 +1328,7 @@ cleanup() {
   fi
   # --quarantine interrupted mid-volume: never leave a node writable.
   for i in "${RW_NODES[@]}"; do sudo blockdev --setro "${i}" 2>/dev/null; done
+  remove_udev_hold
   # A paused freshclam daemon must not stay down just because the scan ended
   # on an error path (die/INT during prepare_clamav skips its restart).
   (( FRESHCLAM_WAS_ACTIVE )) && sudo systemctl start clamav-freshclam.service 2>/dev/null
@@ -1169,6 +1338,9 @@ cleanup() {
   fi
   [[ -n ${KEEPALIVE_PID} ]] && kill "${KEEPALIVE_PID}" 2>/dev/null
   # Last: close the console so the console.log writer flushes before exit.
+  # The poller dies first: its sleep must never inherit the console pipe, or
+  # waiting for the writer blocks up to 60 s on every exit.
+  [[ -n ${POLLER:-} ]] && { kill "${POLLER}" 2>/dev/null || true; wait "${POLLER}" 2>/dev/null || true; }
   if [[ -n ${CONSOLE_PID} ]]; then
     exec >&- 2>&-
     wait "${CONSOLE_PID}" 2>/dev/null
@@ -1178,7 +1350,10 @@ cleanup() {
 start_sudo() {
   sudo -v || die "sudo is required for imaging and mounting."
   # One failed refresh (ticket invalidated) must not end caching for good.
-  ( while kill -0 "$$" 2>/dev/null; do sudo -n -v 2>/dev/null || true; sleep 50; done ) &
+  # Detached from the console: its sleep child would otherwise hold the
+  # console pipe open and delay every exit by up to 50 s.
+  ( while kill -0 "$$" 2>/dev/null; do sudo -n -v >/dev/null 2>&1 || true; sleep 50 >/dev/null 2>&1; done ) \
+    >/dev/null 2>&1 &
   KEEPALIVE_PID=$!
 }
 
@@ -1187,6 +1362,43 @@ start_sudo() {
 # lets Tracker index removable devices: all parse untrusted files before any
 # scan runs. Turn them off for this user and leave them off; the report dir
 # gets a script that restores the previous values.
+UDEV_HOLD_RULE=/run/udev/rules.d/61-scan-untrusted-media.rules
+UDEV_HOLD_INSTALLED=0
+
+# install_udev_hold: a runtime udev rule that keeps udev's own processing of
+# untrusted block devices from touching them: md auto-assembly, the kernel
+# btrfs device scan and LVM auto-activation all stop on SYSTEMD_READY=0 (and
+# LVM on DM_UDEV_DISABLE_OTHER_RULES_FLAG), before this script ever opens the
+# device. Loop devices are covered too: --image-dir attaches hostile images
+# through losetup --partscan, which triggers the same udev rules. The rule
+# lives in /run (gone at reboot) and is removed by --restore-session, or by
+# the scan's cleanup when the scan installed it itself.
+install_udev_hold() {
+  command -v udevadm >/dev/null || return 0
+  if [[ -e ${UDEV_HOLD_RULE} ]]; then
+    note "udev hold rule already installed (${UDEV_HOLD_RULE})"
+    return 0
+  fi
+  sudo mkdir -p -- /run/udev/rules.d
+  sudo tee -- "${UDEV_HOLD_RULE}" >/dev/null <<'RULE'
+# scan-untrusted-media.sh: do not process untrusted block devices on plug or
+# revalidation (no md assembly, no btrfs device scan, no LVM auto-activation,
+# no desktop mounting). Removed by --restore-session or at scan exit.
+ACTION=="add|change", SUBSYSTEM=="block", ENV{ID_BUS}=="usb", ENV{SYSTEMD_READY}="0", ENV{UDISKS_IGNORE}="1", ENV{DM_UDEV_DISABLE_OTHER_RULES_FLAG}="1"
+ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="loop[0-9]*", ENV{SYSTEMD_READY}="0", ENV{DM_UDEV_DISABLE_OTHER_RULES_FLAG}="1"
+RULE
+  sudo udevadm control --reload 2>/dev/null || true
+  UDEV_HOLD_INSTALLED=1
+  note "Installed udev hold rule ${UDEV_HOLD_RULE} (untrusted drives and images are not auto-processed)"
+}
+
+remove_udev_hold() {
+  (( UDEV_HOLD_INSTALLED )) || return 0
+  sudo rm -f -- "${UDEV_HOLD_RULE}"
+  sudo udevadm control --reload 2>/dev/null || true
+  UDEV_HOLD_INSTALLED=0
+}
+
 # harden_session <restore-script>: turn off everything in the desktop session
 # that would open or parse untrusted media on its own, and write a script that
 # restores the previous values. Settings already hardened (for example by an
@@ -1353,10 +1565,11 @@ map_unrecovered_bytes() {
   printf '%s' "${total}"
 }
 
-# acquire_device <dev>: refuse mounted devices, set them read-only, and image
-# them only with --image-dir. Sets ACQUIRED to the image path or the device.
+# acquire_device <dev>: refuse mounted or in-use devices, set them read-only,
+# and image them only with --image-dir. Sets ACQUIRED to the image path or
+# the device.
 acquire_device() {
-  local dev=$1 node mp mounted=() dir size avail have serial model name img map bad sum
+  local dev=$1 node mp holder mounted=() dir size avail have serial model name img map bad sum
   while read -r node mp; do
     [[ -n ${mp} ]] && mounted+=("${node} on ${mp}")
   done < <(lsblk -nrpo NAME,MOUNTPOINT -- "${dev}")
@@ -1365,14 +1578,33 @@ acquire_device() {
     die "${dev} has mounted filesystems. Unmount them first (udisksctl unmount -b <partition>), then rerun."
   fi
   swapon --show=NAME --noheadings 2>/dev/null | grep -qxF "${dev}" && die "${dev} is in use as swap"
-  # lsblk lists the disk itself first, then its partitions.
-  RO_DEVS=()
+  # Anything holding a partition (an assembled md array, a device-mapper
+  # layer, LVM) means udev or the kernel already processed this media: refuse
+  # instead of scanning under and around whatever was auto-assembled.
   while read -r node; do
+    for holder in /sys/class/block/${node##*/}/holders/*; do
+      [[ -e ${holder} ]] || continue
+      die "${dev} is in use: ${node} is held by ${holder##*/} (md/LVM/dm; detach it first)"
+    done
+  done < <(lsblk -nrpo NAME -- "${dev}")
+  # lsblk lists the disk itself first, then its partitions. Accumulate across
+  # targets so the read-only restore advice at exit names every device.
+  while read -r node; do
+    [[ -n ${node} ]] || continue
+    local seen=0
+    for mp in "${RO_DEVS[@]}"; do [[ ${mp} == "${node}" ]] && seen=1; done
+    (( seen )) && continue
     sudo blockdev --setro "${node}" || die "blockdev --setro ${node} failed"
     RO_DEVS+=("${node}")
   done < <(lsblk -nrpo NAME -- "${dev}")
-  model=$(lsblk -dno MODEL -- "${dev}" | xargs)
-  serial=$(lsblk -dno SERIAL -- "${dev}" | xargs)
+  # Model and serial come from the device firmware: trim them without xargs
+  # (a quote in the string would abort the run) and strip control characters.
+  model=$(lsblk -dno MODEL -- "${dev}")
+  serial=$(lsblk -dno SERIAL -- "${dev}")
+  model=${model#"${model%%[![:space:]]*}"}; model=${model%"${model##*[![:space:]]}"}
+  serial=${serial#"${serial%%[![:space:]]*}"}; serial=${serial%"${serial##*[![:space:]]}"}
+  model=${model//[[:cntrl:]]/}; serial=${serial//[[:cntrl:]]/}
+  model=${model//$'\t'/ }; serial=${serial//$'\t'/ }
   size=$(sudo blockdev --getsize64 "${dev}")
   if [[ ${IMAGE_MODE} == direct ]]; then
     printf '%s\t%s\t%s\t%s\t(scanned in place)\t-\t-\n' "${dev}" "${model:--}" "${serial:--}" \
@@ -1448,10 +1680,27 @@ try_mount() {
 }
 
 mount_apfs() { # <node> <tag>
-  local node=$1 tag=$2 line v mp vols=() listing
+  local node=$1 tag=$2 line v mp vols=() listing fuseopts
   local -A enc=() vname=()
+  local -a list_cmd=(sudo) fuse_cmd=(sudo)
   command -v apfs-fuse >/dev/null || { gap "${tag}" mount "APFS container not mounted: apfs-fuse missing"; return 0; }
-  listing=$(sudo apfsutil "${node}" 2>&1) || true
+  # apfsutil and apfs-fuse are reverse-engineered parsers of hostile
+  # metadata: they must not run as root. Grant this user read access to the
+  # (already read-only) node and run them unprivileged; without setfacl or
+  # with an inaccessible /dev/fuse, fall back to sudo and say so once.
+  if sudo setfacl -m "u:${USER_NAME}:r" -- "${node}" 2>/dev/null; then
+    list_cmd=()
+    if [[ -w /dev/fuse ]]; then
+      fuse_cmd=()
+    elif [[ -z ${APFS_ROOT_WARNED:-} ]]; then
+      warn "/dev/fuse is not writable by this user; apfs-fuse falls back to running as root."
+      APFS_ROOT_WARNED=1
+    fi
+  elif [[ -z ${APFS_ROOT_WARNED:-} ]]; then
+    warn "setfacl failed on ${node}; APFS metadata is parsed as root (install the acl package to avoid it)."
+    APFS_ROOT_WARNED=1
+  fi
+  listing=$("${list_cmd[@]}" apfsutil "${node}" 2>&1) || true
   printf '%s\n' "${listing}" >"${REPORT_DIR}/apfs-${tag}.txt"
   while IFS= read -r line; do
     if [[ ${line} =~ ^[[:space:]]*Volume[[:space:]]+([0-9]+) ]]; then
@@ -1459,7 +1708,10 @@ mount_apfs() { # <node> <tag>
     elif [[ -n ${v:-} && ${line} =~ FileVault:[[:space:]]*Yes ]]; then
       enc[${v}]=1
     elif [[ -n ${v:-} && ${line} =~ Name:[[:space:]]*(.*)$ ]]; then
-      vname[${v}]=${BASH_REMATCH[1]}
+      # The name comes from the media; keep control characters and bidi
+      # overrides out of the terminal and the report.
+      tsv_esc "${BASH_REMATCH[1]}"
+      vname[${v}]=${REPLY}
     fi
   done <<<"${listing}"
   (( ${#vols[@]} )) || vols=(0)
@@ -1468,8 +1720,19 @@ mount_apfs() { # <node> <tag>
     if [[ -n ${enc[${v}]:-} ]]; then
       log "APFS volume ${v} '${vname[${v}]:-}' is encrypted: apfs-fuse will ask for its password or recovery key."
     fi
-    sudo mkdir -p -- "${mp}"
-    if sudo apfs-fuse -o "allow_other,nosuid,nodev,noexec,uid=${UID},gid=${USER_GID},vol=${v}" "${node}" "${mp}" </dev/tty; then
+    if (( ${#fuse_cmd[@]} )); then
+      # Root mount: the sandboxed worker runs as this user, so the mount
+      # must be visible to it (allow_other needs user_allow_other in
+      # /etc/fuse.conf, which root mounts bypass).
+      sudo mkdir -p -- "${mp}"
+      fuseopts="allow_other,nosuid,nodev,noexec,uid=${UID},gid=${USER_GID}"
+    else
+      # User mount: only the mounting user may access it, which is exactly
+      # the worker's uid; fusermount requires the mountpoint be ours.
+      sudo install -d -o "${USER_NAME}" -g "${USER_GID}" -m 0755 -- "${mp}"
+      fuseopts="nosuid,nodev,noexec,uid=${UID},gid=${USER_GID}"
+    fi
+    if "${fuse_cmd[@]}" apfs-fuse -o "${fuseopts},vol=${v}" "${node}" "${mp}" </dev/tty; then
       MOUNTS+=("${mp}")
       "${VOLUME_HANDLER}" "${mp}" apfs "${tag}-v${v}" "${node}" "${v}"
     else
@@ -1492,7 +1755,13 @@ open_crypt() {
     gap "${tag}" mount "${fstype} volume not opened (no terminal to ask for its passphrase)"
     return 0
   fi
-  read -r -p "==> ${node} is an encrypted ${fstype} volume. Unlock it read-only to scan its contents? [y/N] " answer </dev/tty || answer=
+  # The prompt goes to the terminal directly: stderr here is the line-buffered
+  # console logger, and a read -p prompt would stay invisible until after the
+  # answer (the scan would look hung).
+  printf '==> %s is an encrypted %s volume. Unlock it read-only to scan its contents? [y/N] ' \
+    "${node}" "${fstype}" >/dev/tty
+  local answer=
+  IFS= read -r answer </dev/tty || answer=
   if [[ ${answer} != [yY]* ]]; then
     gap "${tag}" mount "${fstype} volume not opened (declined)"
     return 0
@@ -1511,15 +1780,25 @@ open_crypt() {
 # with every logical volume read-only and scan each one. --devices confines
 # LVM to this node, so the host's own devices (and its devices file) are not
 # involved. A VG whose name the host already uses is refused: renaming it
-# (vgimportclone) would write to the untrusted media.
+# (vgimportclone) would write to the untrusted media. Only linear and striped
+# segment types are activated: thin/cache/raid/vdo/integrity LVs are parsed
+# by extra kernel code the filesystem allowlist never agreed to expose.
 open_lvm() {
-  local node=$1 tag=$2 vg lv lvs name
-  vg=$(sudo pvs --noheadings -o vg_name --devices "${node}" -- "${node}" 2>/dev/null | xargs) || vg=
+  local node=$1 tag=$2 vg lv name segtypes clash=0 n
+  local -a lv_names=() segs=()
+  local -A lv_segs=() lv_seen=()
+  vg=$(sudo pvs --noheadings -o vg_name --devices "${node}" -- "${node}" 2>/dev/null) || vg=
+  vg=${vg//[[:space:]]/}
   if [[ -z ${vg} ]]; then
     gap "${tag}" mount "LVM physical volume without a readable volume group"
     return 0
   fi
-  if sudo vgs --noheadings -o vg_name 2>/dev/null | xargs -n1 | grep -qxF -- "${vg}"; then
+  # A VG name the host already uses (in its own devices) means activating the
+  # untrusted one would clash; renaming it would write to the media.
+  while IFS= read -r n; do
+    [[ ${n} == "${vg}" ]] && clash=1
+  done < <(sudo vgs --noheadings -o vg_name 2>/dev/null || true)
+  if (( clash )); then
     gap "${tag}" mount "LVM volume group '${vg}' has the same name as one on this host; not activated"
     return 0
   fi
@@ -1529,11 +1808,31 @@ open_lvm() {
     return 0
   fi
   LVM_ACTIVE+=("${vg}|${node}")
-  lvs=$(sudo lvs --noheadings -o lv_path,lv_name --devices "${node}" -- "${vg}" 2>/dev/null) || lvs=
-  while read -r lv name; do
-    [[ -b ${lv} ]] || continue
+  # Segment types per LV, so each LV can be scanned or refused on its own.
+  # lvs columns are space-padded; read with the default IFS splits them.
+  while read -r name segtypes; do
+    [[ -n ${name} ]] || continue
+    if [[ -z ${lv_seen[${name}]+x} ]]; then lv_seen[${name}]=1; lv_names+=("${name}"); fi
+    lv_segs[${name}]+=" ${segtypes}"
+  done < <(sudo lvs --noheadings -o lv_name,segtype --devices "${node}" -- "${vg}" 2>/dev/null || true)
+  for name in "${lv_names[@]}"; do
+    local bad_seg=
+    # shellcheck disable=SC2206 # the segment types are a space-joined list
+    segs=(${lv_segs[${name}]})
+    for segtypes in "${segs[@]}"; do
+      case ${segtypes} in linear|striped) ;; *) bad_seg=${segtypes} ;; esac
+    done
+    lv=/dev/${vg}/${name}
+    if [[ -n ${bad_seg} ]]; then
+      gap "${tag}-${name}" lvm "logical volume uses segment type '${bad_seg}' (thin/cache/raid/vdo); not activated to avoid exposing its kernel parser"
+      continue
+    fi
+    if [[ ! -b ${lv} ]]; then
+      gap "${tag}-${name}" lvm "logical volume did not activate (activation skip or activation failure); not scanned"
+      continue
+    fi
     scan_block "${lv}" "${tag}-${name}"
-  done <<<"${lvs}"
+  done
 }
 
 # mount_and_scan <node> <fstype> <tag>
@@ -1562,15 +1861,20 @@ mount_and_scan() {
   esac
   case ${fstype} in
     vfat|exfat) try_mount "${node}" "${mp}" "${fstype}" "${base},${own},fmask=0333,dmask=0222" ;;
-    ntfs) try_mount "${node}" "${mp}" ntfs3 "${base},${own}" \
-            || try_mount "${node}" "${mp}" ntfs-3g "${base},${own}" ;;
+    # ntfs3 only: the ntfs-3g FUSE fallback is a userspace parser with a
+    # history of heap overflows on crafted filesystems, and try_mount's sudo
+    # would run it as root. A failed ntfs3 mount is a coverage gap instead.
+    ntfs) try_mount "${node}" "${mp}" ntfs3 "${base},${own}" ;;
     hfsplus)
       sudo modprobe "${fstype}" 2>/dev/null \
         || { gap "${tag}" mount "${fstype} kernel module unavailable (install kernel-modules-extra for $(uname -r), or reboot into the kernel it matches)"; return 0; }
       try_mount "${node}" "${mp}" "${fstype}" "${base},${own}" ;;
     ext2|ext3|ext4) try_mount "${node}" "${mp}" "${fstype}" "${base},noload" ;;
     xfs)   try_mount "${node}" "${mp}" xfs "${base},norecovery" ;;
-    btrfs) try_mount "${node}" "${mp}" btrfs "${base},rescue=nologreplay" ;;
+    # subvolid=5 is the volume's real top level: mounting the default
+    # subvolume would let the media choose which subvolume the scan sees
+    # (an empty one), hiding the rest below a different st_dev.
+    btrfs) try_mount "${node}" "${mp}" btrfs "${base},rescue=nologreplay,subvolid=5" ;;
     f2fs)  try_mount "${node}" "${mp}" f2fs "${base},norecovery" ;;
     iso9660|udf) try_mount "${node}" "${mp}" "${fstype}" "${base},${own}" ;;
     *) try_mount "${node}" "${mp}" "${fstype}" "${base}" ;;   # squashfs, erofs
@@ -1633,13 +1937,22 @@ volume_identity() {
 # in a transient systemd sandbox as the invoking user. CAP_DAC_READ_SEARCH lets
 # it read files owned by the Mac account (uid 501, mode 0700) without root;
 # no network, and the host is read-only except <read-write paths>
-# (space-separated). The worker must be "bash <script>", never the script
-# itself: under SELinux, systemd (init_t) may not execute a file labeled
-# user_home_t (a checkout in ~), which fails every run with 203/EXEC. bash is
-# bin_t and transitions to unconfined_service_t, which may read the script.
+# (space-separated), which must be the smallest set that works - the worker
+# parses hostile content, so it must never be able to write the report the
+# host reads back, reach a Unix socket (the session D-Bus would run anything
+# it asks for) or ptrace this script (same uid, same capabilities). The
+# worker must be "bash <script>", never the script itself: under SELinux,
+# systemd (init_t) may not execute a file labeled user_home_t (a checkout in
+# ~), which fails every run with 203/EXEC. bash is bin_t and transitions to
+# unconfined_service_t, which may read the script.
 run_sandboxed() {
   local unit=$1 umask=$2 rw=$3
+  local -a hide=(/root /etc/shadow /etc/shadow- /etc/ssh)
   shift 3
+  # ~/.ssh and ~/.gnupg are the crown jewels a CAP_DAC_READ_SEARCH worker
+  # could read straight through ProtectHome=read-only; hide them outright.
+  [[ -d ${HOME}/.ssh ]] && hide+=("${HOME}/.ssh")
+  [[ -d ${HOME}/.gnupg ]] && hide+=("${HOME}/.gnupg")
   sudo systemd-run --quiet --wait --pipe --collect --expand-environment=no \
     --unit="${unit}" \
     -p User="${USER_NAME}" -p WorkingDirectory=/ -p UMask="${umask}" \
@@ -1648,8 +1961,12 @@ run_sandboxed() {
     -p ProtectSystem=strict -p ProtectHome=read-only -p ReadWritePaths="${rw}" \
     -p ProtectKernelTunables=yes -p ProtectKernelModules=yes -p ProtectKernelLogs=yes \
     -p ProtectControlGroups=yes -p ProtectClock=yes -p ProtectHostname=yes \
-    -p RestrictAddressFamilies=AF_UNIX -p RestrictNamespaces=yes -p RestrictSUIDSGID=yes \
+    -p ProtectProc=invisible -p ProcSubset=pid \
+    -p 'RestrictAddressFamilies=~af_unix af_inet af_inet6 af_netlink af_packet af_key af_alg af_bluetooth af_vsock af_xdp af_rds af_tipc af_iucv af_can af_mctp af_ax25 af_ipx af_appletalk af_x25 af_atmpvc af_atmsvc af_irda af_pppox af_llc af_ib af_mpls af_phonet af_ieee802154 af_caif af_nfc af_kcm af_qipcrtr af_smc af_netrom af_bridge af_rose af_netbeui af_econet af_ash af_sna af_wanpipe' \
+    -p RestrictNamespaces=yes -p RestrictSUIDSGID=yes \
     -p RestrictRealtime=yes -p LockPersonality=yes -p SystemCallArchitectures=native \
+    -p SystemCallFilter=@system-service \
+    -p InaccessiblePaths="${hide[*]}" \
     -p Nice=5 -p IOSchedulingClass=best-effort -p IOSchedulingPriority=6 \
     -p Environment=LC_CTYPE=C.UTF-8 \
     -- "$@" </dev/null
@@ -1657,10 +1974,15 @@ run_sandboxed() {
 
 # start_poller <dir> <label>: print the worker's progress file (see
 # scan_progress) once a minute while a sandbox runs; stop_poller ends it.
+# The subshell exits when the main script dies (background subshells ignore
+# SIGINT, so a Ctrl-C otherwise leaves it looping forever), and its sleep is
+# detached from stdout so it cannot hold the console pipe.
 start_poller() {
   local dir=$1 label=$2
   ( last=
-    while sleep 60; do
+    while kill -0 "$$" 2>/dev/null; do
+      sleep 60 >/dev/null 2>&1 || exit
+      kill -0 "$$" 2>/dev/null || exit
       [[ -r ${dir}/progress ]] || continue
       cur=$(<"${dir}/progress")
       [[ ${cur} == "${last}" ]] || note "[${label} $(date +%H:%M)] ${cur}"
@@ -1677,16 +1999,26 @@ stop_poller() {
 # volume (with its identity, see volume_identity) and run the scan worker on
 # it in the sandbox (see run_sandboxed).
 scan_volume() {
-  local root=$1 fstype=$2 tag=$3 node=${4:--} apfs_vol=${5:--} out rc=0
+  local root=$1 fstype=$2 tag=$3 node=${4:--} apfs_vol=${5:--} out rc=0 walk
   out=${REPORT_DIR}/volumes/${tag}
   mkdir -p -- "${out}"
-  printf '%s\t%s\t%s\t%s\n' "${tag}" "${fstype}" "${root}" "$(volume_identity "${node}" "${apfs_vol}")" \
+  tsv_esc "${root}"
+  printf '%s\t%s\t%s\t%s\n' "${tag}" "${fstype}" "${REPLY}" "$(volume_identity "${node}" "${apfs_vol}")" \
     >>"${REPORT_DIR}/volumes.tsv"
+  # btrfs subvolumes of this tool's own mount are media content: cross them.
+  # A caller-supplied directory keeps foreign nested mounts out (gaps).
+  if [[ ${node} == - ]]; then walk=dir
+  elif [[ ${fstype} == btrfs ]]; then walk=cross
+  else walk=strict; fi
   UNIT_SEQ=$(( UNIT_SEQ + 1 ))
   log "Scanning ${tag} (${fstype}) at ${root}"
   start_poller "${out}" "${tag}"
-  run_sandboxed "scan-utm-${EPOCHSECONDS}-$$-${UNIT_SEQ}" 0077 "${REPORT_DIR}" \
-    "${BASH}" "${SCRIPT_PATH}" --internal-scan "${root}" "${out}" "${fstype}" "${COMPILED_YARA}" "${CLAM_DB:--}" \
+  # The worker's only writable path is its own volumes/<tag>/ directory: it
+  # parses hostile content, so it must not be able to replace report files
+  # the host reads (summary.txt, quarantine.tsv, findings.tsv, ...) with
+  # planted symlinks or rewritten rows.
+  run_sandboxed "scan-utm-${EPOCHSECONDS}-$$-${UNIT_SEQ}" 0077 "${out}" \
+    "${BASH}" "${SCRIPT_PATH}" --internal-scan "${root}" "${out}" "${fstype}" "${COMPILED_YARA}" "${CLAM_DB:--}" "${walk}" \
     || rc=$?
   stop_poller
   (( rc == 0 )) || gap "${tag}" scan "sandboxed scan exited ${rc}; results for this volume are incomplete"
@@ -1783,26 +2115,6 @@ vt_lookup_all() {
     "${REPORT_DIR}/virustotal.tsv" "${REPORT_DIR}"/volumes/*/files.tsv >>"${REPORT_DIR}/findings.tsv"
 }
 
-#--- Report -------------------------------------------------------------------
-# collect_results: merge per-volume findings and gaps (adding the volume tag
-# and each file's SHA-256) into findings.tsv and gaps.tsv at the top level.
-collect_results() {
-  local d tag
-  : >"${REPORT_DIR}/findings.tsv"
-  cp -- "${REPORT_DIR}/gaps-global.tsv" "${REPORT_DIR}/gaps.tsv"
-  for d in "${REPORT_DIR}"/volumes/*/; do
-    [[ -f ${d}files.tsv ]] || continue
-    tag=${d%/}; tag=${tag##*/}
-    awk -F'\t' -v OFS='\t' -v vol="${tag}" 'NR == FNR { sha[$6] = $1; next }
-      { print $1, $2, $3, vol, (($4 in sha) ? sha[$4] : "-"), $4 }' \
-      "${d}files.tsv" "${d}findings.tsv" >>"${REPORT_DIR}/findings.tsv"
-    # One gap per tool and file: an oversized file is reported both by the
-    # inventory and by ClamAV's own limit alert.
-    awk -F'\t' -v OFS='\t' -v vol="${tag}" '$3 == "-" || !seen[$1 FS $3]++ { print vol, $1, $2, $3 }' \
-      "${d}gaps.tsv" >>"${REPORT_DIR}/gaps.tsv"
-  done
-}
-
 count_class() { awk -F'\t' -v c="$1" '$1 == c { k[$4 "\t" $6] = 1 } END { print length(k) }' "${REPORT_DIR}/findings.tsv"; }
 
 write_report() {
@@ -1812,7 +2124,18 @@ write_report() {
   gaps=$(wc -l <"${REPORT_DIR}/gaps.tsv")
   for d in "${REPORT_DIR}"/volumes/*/counts; do
     [[ -f ${d} ]] || continue
+    # counts is written by the sandboxed worker. A compromised worker could
+    # put anything in it; only plain non-negative integers ever reach shell
+    # arithmetic ($(( files + v )) would otherwise run hostile code as this
+    # user, and the sudo keepalive would hand it root). Anything else counts
+    # as zero and is flagged.
     while IFS='=' read -r k v; do
+      if [[ ! ${v} =~ ^[0-9]+$ ]]; then
+        printf -- '%s\tsanitization\tworker %s wrote unparsable counts (ignored; treat its volume as unreliable)\t-\n' \
+          "${d%/}" "${k}" >>"${REPORT_DIR}/gaps.tsv"
+        gaps=$(( gaps + 1 ))
+        continue
+      fi
       case ${k} in
         files) files=$(( files + v )) ;; bytes) bytes=$(( bytes + v )) ;;
         suspects) suspects=$(( suspects + v )) ;; zero_len_hfsplus) zero=$(( zero + v )) ;;
@@ -1944,6 +2267,7 @@ nz_begin() {
   (( HARDEN_SESSION )) && harden_session "${REPORT_DIR}/restore-session-settings.sh"
   install_tools
   start_sudo
+  install_udev_hold
   trap cleanup EXIT
   trap 'exit 130' INT TERM
   sudo mkdir -p -m 0755 -- "${MNT_BASE}"
@@ -1970,12 +2294,18 @@ nz_volume_tag() {
 # export_volume <mountpoint> <fstype> <probe tag> <node|-> [APFS volume]: the
 # VOLUME_HANDLER in --export mode. Maps the mounted volume to its report tag
 # and runs export_tree on it in the sandbox (see run_sandboxed): the invoking
-# user with CAP_DAC_READ_SEARCH, no network, writing only DEST and the report.
+# user with CAP_DAC_READ_SEARCH, no network, writing only DEST and its own
+# per-volume work directory (never the report itself: the report is what the
+# host reads back). The worker's log lines are collected from the work dir
+# afterwards and appended to the run log.
 export_volume() {
-  local mp=$1 fstype=$2 probe=$3 node=${4:--} av=${5:--} tag files out work rc=0
+  local mp=$1 fstype=$2 probe=$3 node=${4:--} av=${5:--} tag files out work rc=0 walk
   NZ_WHY=
   if [[ ${node} == - ]]; then
-    tag=$(awk -F'\t' -v m="${mp}" 'NF >= 7 && $4 == "-" && $3 == m { print $1; exit }' "${NZ_REPORT}/volumes.tsv")
+    # volumes.tsv stores the directory path in its escaped form (see tsv_esc);
+    # compare the live path escaped the same way.
+    tsv_esc "${mp}"
+    tag=$(awk -F'\t' -v m="${REPLY}" 'NF >= 7 && $4 == "-" && $3 == m { print $1; exit }' "${NZ_REPORT}/volumes.tsv")
     [[ -n ${tag} ]] || NZ_WHY="no scanned directory ${mp} in volumes.tsv"
   else
     nz_volume_tag "${node}" "${fstype}" "${av}"
@@ -2001,13 +2331,20 @@ export_volume() {
   out=${NZ_DEST}/${tag} work=${REPORT_DIR}/${tag}
   mkdir -m 0755 -- "${out}"
   mkdir -m 0700 -- "${work}"
+  # Match the scan's walk: btrfs subvolumes of this tool's own mount are
+  # crossed; everything else stays within the filesystem.
+  if [[ ${node} != - && ${fstype} == btrfs ]]; then walk=cross; else walk=strict; fi
   UNIT_SEQ=$(( UNIT_SEQ + 1 ))
   log "Exporting ${tag} (${fstype}) from ${mp} -> ${out}"
   start_poller "${work}" "export ${tag}"
-  run_sandboxed "export-utm-${EPOCHSECONDS}-$$-${UNIT_SEQ}" 0022 "${NZ_DEST} ${NZ_REPORT}" \
+  : >"${work}/export.log"
+  run_sandboxed "export-utm-${EPOCHSECONDS}-$$-${UNIT_SEQ}" 0022 "${NZ_DEST} ${work}" \
     "${BASH}" "${SCRIPT_PATH}" --internal-export "${mp}" "${out}" "${files}" \
-    "${NZ_REPORT}/quarantine.tsv" "${tag}" "${NZ_LOG}" "${KEEP_METADATA}" "${work}" || rc=$?
+    "${NZ_REPORT}/quarantine.tsv" "${tag}" "${work}/export.log" "${KEEP_METADATA}" "${work}" "${walk}" || rc=$?
   stop_poller
+  # The worker could not append to the run log itself (no write access to the
+  # report); splice its lines in now, in order.
+  cat -- "${work}/export.log" >>"${NZ_LOG}" 2>/dev/null || true
   if (( rc )); then
     warn "${tag}: sandboxed export exited ${rc}; this volume is incomplete"
     nz_record error "sandboxed export exited ${rc}; this volume is incomplete" "${tag}" - -
@@ -2089,11 +2426,14 @@ nz_set_ro() {
 # node read-only again.
 quarantine_volume() {
   local node=$1 fstype=$2 tag=$3 mp=${MNT_BASE}/q-$3 t opts rw_ok=0 p rel
-  local -a types=() run=() hits=()
+  local -a types=() run=() hits=() xdev=(-xdev)
   read -r -a types <<<"$(quarantine_fs_types "${fstype}")"
   case ${fstype} in
     vfat|exfat) opts="rw,nosuid,nodev,noexec,uid=${UID},gid=${USER_GID},fmask=0133,dmask=0022" ;;
     ntfs) opts="rw,nosuid,nodev,noexec,uid=${UID},gid=${USER_GID}" ;;
+    # The scan mounted subvolid=5 (the volume's top level) and walked the
+    # subvolumes; quarantine must resolve the same paths.
+    btrfs) opts="rw,nosuid,nodev,noexec,subvolid=5"; xdev=() ;;
     *) opts=rw,nosuid,nodev,noexec; run=(sudo) ;;
   esac
   log "Quarantining on ${tag} (${fstype}, ${node})"
@@ -2111,13 +2451,14 @@ quarantine_volume() {
     return 0
   fi
   # Collect the matches first: the walk must not see the volume change.
+  # xdev matches the scan's walk mode (btrfs subvolumes are crossed).
   while IFS= read -r -d '' p; do
     rel=${p#"${mp}"/}
     tsv_esc "${rel}"
     [[ -n ${Q_REL[${tag}$'\t'${REPLY}]+x} ]] || continue
     Q_FOUND[${tag}$'\t'${REPLY}]=1
     hits+=("${p}")
-  done < <("${run[@]}" find "${mp}" -xdev -type f -print0 2>/dev/null)
+  done < <("${run[@]}" find "${mp}" "${xdev[@]}" -type f -print0 2>/dev/null)
   for p in "${hits[@]}"; do
     rel=${p#"${mp}"/}
     tsv_esc "${rel}"
@@ -2133,12 +2474,15 @@ quarantine_volume() {
   nz_set_ro
 }
 
-# nz_confirm: y/N from the terminal unless --yes.
+# nz_confirm: y/N from the terminal unless --yes. The prompt is written to
+# /dev/tty directly (stderr is the buffered console logger and would hide it
+# until after the answer).
 nz_confirm() {
   local ans=
   (( ASSUME_YES )) && return 0
   { : </dev/tty; } 2>/dev/null || die "No terminal to confirm on; rerun with --yes."
-  read -r -p 'Archive and remove these files from the drive? [y/N] ' ans </dev/tty || ans=
+  printf 'Archive and remove these files from the drive? [y/N] ' >/dev/tty
+  IFS= read -r ans </dev/tty || ans=
   [[ ${ans} == [yY] || ${ans} == [yY][eE][sS] ]] || die "Aborted; nothing was changed."
 }
 
@@ -2236,18 +2580,32 @@ unique_tag() {
 
 main() {
   local t img global_gaps ver_opts=()
-  # Session-only modes: no report dir, tools, sudo or scanning.
+  # Session-only modes: no report dir, tools or scanning.
   case ${SESSION_ACTION} in
     prepare)
       log "Hardening the desktop session before any untrusted drive is attached"
       harden_session "${SESSION_RESTORE}"
-      log "Ready. Plug the drives in now; nothing will mount or open them. Scan with: ${0##*/} /dev/sdX"
+      start_sudo
+      trap cleanup EXIT
+      trap 'exit 130' INT TERM
+      install_udev_hold
+      # The rule outlives this run; --restore-session removes it (cleanup only
+      # removes rules a scan installed itself).
+      UDEV_HOLD_INSTALLED=0
+      log "Ready. Plug the drives in now: the desktop will not mount or preview them, and"
+      log "udev will not auto-assemble, scan or activate anything on them (until --restore-session)."
+      log "Scan with: ${0##*/} /dev/sdX"
       return 0 ;;
     restore)
       [[ -f ${SESSION_RESTORE} ]] || die "Nothing to restore: ${SESSION_RESTORE} does not exist"
       sh -- "${SESSION_RESTORE}" || die "restoring the desktop settings failed; see ${SESSION_RESTORE}"
       rm -f -- "${SESSION_RESTORE}"
-      log "Desktop session settings restored"
+      if [[ -e ${UDEV_HOLD_RULE} ]]; then
+        sudo rm -f -- "${UDEV_HOLD_RULE}" 2>/dev/null \
+          && sudo udevadm control --reload 2>/dev/null \
+          || warn "Could not remove ${UDEV_HOLD_RULE}; remove it by hand."
+      fi
+      log "Desktop session settings restored; udev hold rule removed"
       return 0 ;;
   esac
   [[ -n ${CLAM_DB} ]] && ver_opts+=(--database="${CLAM_DB}")
@@ -2267,16 +2625,24 @@ main() {
   # Keep a copy of everything printed from here on as console.log, without
   # colour codes or other control characters (APFS volume names and mount
   # errors come from the untrusted media). Prompts use /dev/tty directly.
-  # One awk process prints and logs, so cleanup can wait for it to flush.
-  exec > >(LC_ALL=C awk -v logfile="${REPORT_DIR}/console.log" '{ print; fflush()
-    s = $0; gsub(/\033\[[0-9;]*m/, "", s); gsub(/[\001-\010\013-\037\177]/, "", s)
-    print s >> logfile; fflush(logfile) }') 2>&1
+  # What reaches the terminal keeps this run's own SGR colour codes but no
+  # other control characters: untrusted text cannot replay escapes there
+  # either. One awk process prints and logs, so cleanup can wait for it.
+  exec > >(LC_ALL=C awk -v logfile="${REPORT_DIR}/console.log" '
+    {
+      t = $0; n = split(t, a, /\033\[[0-9;]*m/, seps)
+      t = ""
+      for (i = 1; i <= n; i++) { gsub(/[\001-\010\013-\014\016-\037\177]/, "", a[i]); t = t a[i] (i < n ? seps[i] : "") }
+      print t; fflush()
+      s = $0; gsub(/\033\[[0-9;]*m/, "", s); gsub(/[\001-\010\013-\037\177]/, "", s)
+      print s >> logfile; fflush(logfile) }') 2>&1
   CONSOLE_PID=$!
   log "Report directory: ${REPORT_DIR}"
 
   (( HARDEN_SESSION )) && harden_session "${REPORT_DIR}/restore-session-settings.sh"
   install_tools
   start_sudo
+  install_udev_hold
   trap cleanup EXIT
   trap 'exit 130' INT TERM
   sudo mkdir -p -m 0755 -- "${MNT_BASE}"

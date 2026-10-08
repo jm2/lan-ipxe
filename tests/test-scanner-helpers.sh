@@ -59,6 +59,19 @@ test_tsv_esc() (
   [[ -z ${REPLY} ]] || fail 'tsv_esc changed an empty field'
   tsv_esc 'plain-name.txt'
   [[ ${REPLY} == 'plain-name.txt' ]] || fail 'tsv_esc changed a plain name'
+  # A raw C1 byte (invalid UTF-8) is a CSI for a terminal; the Unicode bidi
+  # overrides can visually reorder a path. Both must be escaped too.
+  raw=$'raw\x9bcsi'
+  tsv_esc "${raw}"
+  [[ ${REPLY} == 'raw\x9bcsi' ]] || fail "raw C1 byte not escaped: [${REPLY}]"
+  [[ $(printf '%b' "${REPLY}") == "${raw}" ]] || fail 'C1-escaped cell does not round-trip'
+  raw=$'bidi\xe2\x80\xaename'
+  tsv_esc "${raw}"
+  [[ ${REPLY} == 'bidi\u202ename' ]] || fail "bidi override not escaped: [${REPLY}]"
+  [[ $(printf '%b' "${REPLY}") == "${raw}" ]] || fail 'bidi-escaped cell does not round-trip'
+  # Valid printable UTF-8 stays visible as-is.
+  tsv_esc $'caf\xc3\xa9.jpg'
+  [[ ${REPLY} == $'caf\xc3\xa9.jpg' ]] || fail "valid UTF-8 mangled: [${REPLY}]"
 )
 
 test_human_bytes() (
@@ -116,7 +129,10 @@ test_parse_clam_log() (
   local dir=${TEST_ROOT}/clam-parse
   local root=${dir}/root
   mkdir -p "${root}/sub"
-  cat >"${dir}/clamscan.log" <<EOF
+  # A file name carrying its own forged FOUND line (control characters
+  # included) must never become a finding with hostile detail text.
+  printf 'x: \\e]8;;http://evil\\aEvil FOUND\ny: Eicar-Test-Signature FOUND\n' >"${dir}/clamscan.log"
+  cat >>"${dir}/clamscan.log" <<EOF
 ${root}/sub/trojan.exe: Win.Trojan.Agent-1234 FOUND
 ${root}/sub/weird: name: Eicar-Test-Signature FOUND
 ${root}/enc.zip: Heuristics.Encrypted.Zip FOUND
@@ -129,15 +145,21 @@ EOF
   : >"${dir}/findings.tsv"
   : >"${dir}/gaps.tsv"
   parse_clam_log "${dir}/clamscan.log" "${dir}/findings.tsv" "${dir}/gaps.tsv" "${root}"
+  # The second forged line parses as a detection at path "y"; only the
+  # inventory mapping (collect_results) can flag it, which parse_clam_log
+  # cannot know about here.
   assert_lines "${dir}/findings.tsv" \
+    $'DEFINITE\tclamav\tEicar-Test-Signature\ty' \
     $'DEFINITE\tclamav\tWin.Trojan.Agent-1234\tsub/trojan.exe' \
     $'DEFINITE\tclamav\tEicar-Test-Signature\tsub/weird: name' \
     $'REVIEW\tclamav\tPUA.Win.Packed.Upack\tpua.exe' \
     $'REVIEW\tclamav\tHeuristics.Safebrowsing.Suspected-phishing\tphish.html'
   assert_lines "${dir}/gaps.tsv" \
+    "$(printf 'clamav\tsuspicious clamscan line (signature not recognized):\tx: \\\\e]8;;http://evil\\\\aEvil')" \
     $'clamav\tHeuristics.Encrypted.Zip\tenc.zip' \
     $'clamav\tHeuristics.Limits.Exceeded\thuge.rar' \
-    $'clamav\tHeuristics.Broken.Media.mp3\tbroken.mp3'
+    $'clamav\tHeuristics.Broken.Media.mp3\tbroken.mp3' \
+    $'clamav\tunrecognized clamscan output line (treated as unscanned):\tLibClamAV debug: a line without the FOUND suffix'
 )
 
 test_parse_yara_output() (
@@ -145,24 +167,34 @@ test_parse_yara_output() (
   local dir=${TEST_ROOT}/yara-parse
   local root=${dir}/root
   mkdir -p "${root}/sub"
-  cat >"${dir}/yara.log" <<EOF
-Macho_Installer [author = "forge", score = 80] ${root}/sub/installer.dmg
-Rule_Seventy_Five [score = 75] ${root}/boundary-high
-Rule_Seventy_Four [score = 74] ${root}/boundary-low
-No_Score_Rule [author = "nobody"] ${root}/no-score
-rule [score =80] ${root}/f
-score_not_first [note = "x", score=58] ${root}/compact
-skipped: not a rule line
-EOF
+  {
+    printf 'Macho_Installer [author = "forge", score = 80] %s/sub/installer.dmg\n' "${root}"
+    printf 'Rule_Seventy_Five [score = 75] %s/boundary-high\n' "${root}"
+    printf 'Rule_Seventy_Four [score = 74] %s/boundary-low\n' "${root}"
+    printf 'No_Score_Rule [author = "nobody"] %s/no-score\n' "${root}"
+    printf 'rule [score =80] %s/f\n' "${root}"
+    printf 'score_not_first [note = "x", score=58] %s/compact\n' "${root}"
+    # An invalid-UTF-8 byte in the name: the old regex dropped such lines
+    # wholesale, hiding real detections.
+    printf 'Latin_Rule [score = 90] %s/caf\xe9.exe\n' "${root}"
+    # A rule name with hostile bytes must not become a finding detail.
+    printf 'bad;rule [score = 90] %s/x\n' "${root}"
+    printf 'skipped: not a rule line\n'
+  } >"${dir}/yara.log"
   : >"${dir}/findings.tsv"
-  parse_yara_output "${dir}/yara.log" "${dir}/findings.tsv" "${root}"
+  : >"${dir}/gaps.tsv"
+  parse_yara_output "${dir}/yara.log" "${dir}/findings.tsv" "${dir}/gaps.tsv" "${root}"
   assert_lines "${dir}/findings.tsv" \
     $'LIKELY\tyara\tMacho_Installer (score 80)\tsub/installer.dmg' \
     $'LIKELY\tyara\tRule_Seventy_Five (score 75)\tboundary-high' \
     $'REVIEW\tyara\tRule_Seventy_Four (score 74)\tboundary-low' \
     $'REVIEW\tyara\tNo_Score_Rule (score 0)\tno-score' \
     $'LIKELY\tyara\trule (score 80)\tf' \
-    $'REVIEW\tyara\tscore_not_first (score 58)\tcompact'
+    $'REVIEW\tyara\tscore_not_first (score 58)\tcompact' \
+    $'LIKELY\tyara\tLatin_Rule (score 90)\tcaf\xe9.exe'
+  assert_lines "${dir}/gaps.tsv" \
+    $'yara\tunrecognized yara output line (rule name not valid):\tbad;rule [score = 90] '"${root}"'/x' \
+    $'yara\tunrecognized yara output line (treated as unscanned):\tskipped: not a rule line'
 )
 
 # /proc/meminfo and nproc are stubbed so the min(cpu, mem)/cap/floor
@@ -266,18 +298,55 @@ test_clam_eta() (
   [[ ${out} == '6% of data, ETA 0h07m' ]] || fail "clam_eta gave [${out}]"
 )
 
+# collect_results: findings whose path is not in the volume's inventory (a
+# forged or malformed scanner line) keep their row but also become gaps, so
+# neither the report nor --export can treat the volume as fully triaged.
+test_collect_results() (
+  load_scanner
+  local dir=${TEST_ROOT}/collect
+  # shellcheck disable=SC2034 # read by collect_results
+  REPORT_DIR=${dir}
+  mkdir -p "${dir}/volumes/vol1"
+  printf 'a%.0s' {1..64} >"${dir}/shaA"
+  local shaA; shaA=$(<"${dir}/shaA")
+  {
+    printf '%s\t5\t0\t644\ttext/plain\tgood.txt\n' "${shaA}"
+    printf '%s\t6\t0\t644\ttext/plain\tdocs/evil.exe\n' "${shaA}"
+  } >"${dir}/volumes/vol1/files.tsv"
+  : >"${dir}/volumes/vol1/gaps.tsv"
+  printf 'DEFINITE\tclamav\tWin.Trojan.X\tdocs/evil.exe\n' >>"${dir}/volumes/vol1/findings.tsv"
+  printf 'DEFINITE\tclamav\tEicar-Test-Signature\ty\n' >>"${dir}/volumes/vol1/findings.tsv"
+  printf 'REVIEW\tyara\tOdd (score 10)\tgood.txt\n' >>"${dir}/volumes/vol1/findings.tsv"
+  : >"${dir}/gaps-global.tsv"
+  collect_results
+  assert_lines "${dir}/findings.tsv" \
+    "$(printf 'DEFINITE\tclamav\tWin.Trojan.X\tvol1\t%s\tdocs/evil.exe' "${shaA}")" \
+    $'DEFINITE\tclamav\tEicar-Test-Signature\tvol1\t-\ty' \
+    "$(printf 'REVIEW\tyara\tOdd (score 10)\tvol1\t%s\tgood.txt' "${shaA}")"
+  grep -q $'^vol1\tscan\tdetection not mapped to a scanned file (malformed or forged scanner output): y\t-$' "${dir}/gaps.tsv" \
+    || fail 'unmapped detection did not become a coverage gap'
+  (( $(grep -c 'not mapped to a scanned file' "${dir}/gaps.tsv") == 1 )) \
+    || fail 'mapped detection also flagged as unmapped'
+)
+
 test_clam_split_batches() (
   load_scanner
-  local dir f lines weights=() i
+  local dir f lines weights=() i long
   dir=$(mktemp -d -p "${TMPDIR:-/var/tmp}")
   trap 'rm -rf -- "${dir}"' EXIT
+  long=$(printf '/v/%.0s' {1..120}; printf 'x%.0s' {1..900})
   {
     for i in $(seq 1 100); do printf '50000 1700000000 644 /v/photo%s.jpg\0' "${i}"; done
     printf '%s\0' '200000000 1700000000 644 /v/big1.dmg' '200000000 1700000000 644 /v/big two.dmg'
     printf '10 1700000000 644 /v/new\nline.txt\0'
+    # A trailing CR is stripped from --file-list lines and the file is then
+    # "not found" silently; such names go to the argument batch.
+    printf '20 1700000000 644 /v/carriage\rreturn.txt\0'
+    # Paths at the 1023-byte list-line limit likewise.
+    printf '30 1700000000 644 %s\0' "${long}"
   } >"${dir}/meta"
   # 4 batches of the total weight (bytes + 256 KiB per file).
-  clam_split_batches "${dir}/meta" "${dir}" $(( (405000010 + 103 * 262144 + 3) / 4 ))
+  clam_split_batches "${dir}/meta" "${dir}" $(( (405000060 + 103 * 262144 + 3) / 4 ))
   for f in "${dir}"/clambatch.*.lst; do weights+=("$(<"${f%.lst}.w")"); done
   # Greedy packing: each 200 MB image alone exceeds a quarter of the weight.
   (( ${#weights[@]} >= 2 && ${#weights[@]} <= 4 )) || fail "clam_split_batches made ${#weights[@]} batches"
@@ -286,8 +355,9 @@ test_clam_split_batches() (
     || fail 'both large files ended up in one batch'
   lines=$(cat "${dir}"/clambatch.*.lst | wc -l)
   (( lines == 102 )) || fail "batches hold ${lines} paths, expected 102"
-  [[ $(tr -d '\0' <"${dir}/clambatch.nl") == $'/v/new\nline.txt' ]] || fail 'newline name not in the NUL batch'
-  [[ $(<"${dir}/clambatch.nl.w") == $(( 10 + 262144 )) ]] || fail 'newline batch weight wrong'
+  [[ $(tr -d '\0' <"${dir}/clambatch.nl") == $'/v/new\nline.txt/v/carriage\rreturn.txt'"${long}" ]] \
+    || fail 'newline/CR/long names not all in the NUL batch'
+  [[ $(<"${dir}/clambatch.nl.w") == $(( 10 + 20 + 30 + 3 * 262144 )) ]] || fail 'NUL batch weight wrong'
 )
 
 test_internal_scan_guard() {
@@ -311,7 +381,9 @@ printf 'PASS scanner ClamAV signature classification (GAP/REVIEW/DEFINITE)\n'
 test_parse_clam_log
 printf 'PASS scanner clamscan log parsing (last-colon split, relative paths, gaps)\n'
 test_parse_yara_output
-printf 'PASS scanner YARA output parsing (score thresholds, meta spellings)\n'
+printf 'PASS scanner YARA output parsing (score thresholds, invalid UTF-8 paths, gaps)\n'
+test_collect_results
+printf 'PASS scanner report merge (unmapped detections become coverage gaps)\n'
 test_clam_jobs_bounds
 printf 'PASS scanner clam_jobs memory/CPU bounds and 1..4 clamp\n'
 test_clam_jobs_host_value
