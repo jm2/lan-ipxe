@@ -370,8 +370,22 @@ definitions under `etc/firewalld/services/` (the source-bound
 Read-only triage of untrusted removable media from any platform (Windows,
 macOS, iOS/iPadOS/tvOS, Linux, Android) — USB drives, disk images, or
 already-mounted directories. Run as your normal
-user; privileged steps go through sudo. Fedora 41+ installs missing tools with
-dnf; on Arch they must already be present (apfs-fuse is AUR-only).
+user; privileged steps go through sudo. Missing tools are installed with dnf
+(Fedora 41+), pacman (Arch; apfs-fuse is AUR-only) or apt (Debian 13+ and
+Ubuntu; apfs-fuse is not packaged there, so APFS volumes become coverage
+gaps).
+
+**ChromeOS (Crostini):** ChromeOS keeps USB drives for itself, and the Linux
+container can neither see their block devices nor mount, loop-attach or lock
+anything read-only, so only directory targets work there: plug the drive in,
+choose "Share with Linux" for it in the Files app, and scan
+`/mnt/chromeos/removable/<label>` (block devices and images are refused with
+that hint). ChromeOS's own sandboxed drivers parse the filesystem, which is a
+reasonable place for hostile metadata, but the drive is mounted read-write and
+may be previewed by the Files app first (managed devices can enforce the
+external-storage read-only policy), the shared folder is slow for a scan that
+reads all data three times, and imaging, LVM/LUKS/BitLocker and the udev hold
+do not apply.
 
 ```bash
 scan-untrusted-media.sh --prepare-session          # first, before any drive is plugged in

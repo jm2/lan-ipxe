@@ -9,9 +9,12 @@
 # mounts anything writable or executable. Other filesystem types are reported
 # as coverage gaps instead of exposing rarely audited kernel drivers.
 #
-# Run as your normal user; privileged steps go through sudo. Fedora 41+ is the
-# primary target (missing tools are installed with dnf); Arch works when the
-# tools are already installed (apfs-fuse is AUR-only there).
+# Run as your normal user; privileged steps go through sudo. Missing tools
+# are installed with dnf (Fedora 41+, the primary target), pacman (Arch;
+# apfs-fuse is AUR-only) or apt (Debian 13+/Ubuntu; apfs-fuse is not
+# packaged, so APFS becomes a coverage gap there). In ChromeOS's Linux
+# environment (Crostini) only directories - drives shared from the Files app
+# - can be scanned.
 #
 #   scan-untrusted-media.sh /dev/sdb                       # scan the drive in place, read-only
 #   scan-untrusted-media.sh --image-dir /data/images /dev/sdb /dev/sdc   # image first
@@ -142,6 +145,9 @@ declare -gA EXPECTED_MIME=(
 
 PKGS_FEDORA=(apfs-fuse clamav clamav-update cryptsetup curl ddrescue file jq kernel-modules-extra lvm2 unzip yara)
 PKGS_ARCH=(clamav cryptsetup curl ddrescue file jq lvm2 unzip yara)
+# Debian 13+/Ubuntu: gddrescue provides ddrescue; acl provides setfacl (APFS
+# runs unprivileged through it). Debian does not package apfs-fuse.
+PKGS_DEBIAN=(acl clamav clamav-freshclam cryptsetup curl file gddrescue jq lvm2 unzip yara)
 
 log()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
@@ -1282,18 +1288,33 @@ done
 case " ${ID:-} ${ID_LIKE:-} " in
   *' fedora '*) DISTRO=fedora ;;
   *' arch '*)   DISTRO=arch ;;
+  *' debian '*|*' ubuntu '*) DISTRO=debian ;;
 esac
+
+# ChromeOS's Linux environment (Crostini) is an unprivileged container in a
+# VM: ChromeOS keeps USB drives for itself and the container can neither see
+# their block devices nor mount, loop-attach or lock anything read-only. The
+# only workable target there is a drive ChromeOS mounted and shared into
+# Linux, scanned as a directory.
+CROSTINI=0
+[[ -e /dev/.cros_milestone || -d /opt/google/cros-containers ]] && CROSTINI=1
+if (( CROSTINI )); then
+  for t in "${TARGETS[@]}"; do
+    [[ -d ${t} ]] || die "In ChromeOS's Linux environment only directories can be scanned (${t} is not one): share the drive with Linux in the Files app and scan /mnt/chromeos/removable/<label>."
+  done
+fi
 
 install_tools() {
   local p missing=() kver mac_fs=1
-  local -a pkgs_fedora=("${PKGS_FEDORA[@]}") pkgs_arch=("${PKGS_ARCH[@]}")
+  local -a pkgs_fedora=("${PKGS_FEDORA[@]}") pkgs_arch=("${PKGS_ARCH[@]}") pkgs_debian=("${PKGS_DEBIAN[@]}")
   local -a need=(clamscan yara yarac ddrescue file jq curl unzip sha256sum systemd-run losetup blkid lsblk)
   # --export only mounts and copies; --quarantine needs 7-Zip (both distros'
   # 7zip package provides /usr/bin/7z) and never mounts APFS or HFS+.
   case ${NZ_MODE} in
-    export) pkgs_fedora=(apfs-fuse kernel-modules-extra) pkgs_arch=()
+    export) pkgs_fedora=(apfs-fuse kernel-modules-extra) pkgs_arch=() pkgs_debian=(acl)
             need=(sha256sum systemd-run losetup blkid lsblk find) ;;
-    quarantine) pkgs_fedora=("${PKGS_7ZIP_FEDORA[@]}") pkgs_arch=("${PKGS_7ZIP_ARCH[@]}") mac_fs=0
+    quarantine) pkgs_fedora=("${PKGS_7ZIP_FEDORA[@]}") pkgs_arch=("${PKGS_7ZIP_ARCH[@]}")
+            pkgs_debian=("${PKGS_7ZIP_DEBIAN[@]}") mac_fs=0
             need=(7z sha256sum blkid lsblk blockdev dd find) ;;
   esac
   kver=$(uname -r)
@@ -1331,12 +1352,27 @@ install_tools() {
       fi
       (( ! mac_fs )) || command -v apfs-fuse >/dev/null || warn "apfs-fuse is missing (AUR: apfs-fuse-git); APFS volumes will be reported as coverage gaps."
       ;;
+    debian)
+      for p in "${pkgs_debian[@]}"; do
+        [[ $(dpkg-query -W -f='${Status}' -- "${p}" 2>/dev/null) == 'install ok installed' ]] || missing+=("${p}")
+      done
+      if (( ${#missing[@]} )); then
+        log "Installing scanner tools: ${missing[*]}"
+        sudo apt-get update -qq || warn "apt-get update failed; installing from the existing package lists"
+        sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -- "${missing[@]}" \
+          || die "apt-get install failed"
+      fi
+      # Debian's kernel ships hfsplus; apfs-fuse is not packaged.
+      (( ! mac_fs )) || command -v apfs-fuse >/dev/null \
+        || warn "apfs-fuse is not packaged for Debian/Ubuntu; APFS volumes will be reported as coverage gaps (build it from source to scan them)."
+      ;;
     *) warn "Unrecognised distribution; tools must already be installed." ;;
   esac
   for p in "${need[@]}"; do
     command -v "${p}" >/dev/null || die "Required tool missing: ${p}"
   done
-  (( ! mac_fs )) || { command -v apfs-fuse >/dev/null && command -v apfsutil >/dev/null; } \
+  # (Debian already said why above.)
+  (( ! mac_fs )) || [[ ${DISTRO} == debian ]] || { command -v apfs-fuse >/dev/null && command -v apfsutil >/dev/null; } \
     || warn "apfs-fuse/apfsutil missing: APFS volumes cannot be mounted."
 }
 
@@ -1514,7 +1550,7 @@ prepare_clamav() {
     sudo systemctl stop clamav-freshclam.service
   fi
   if ! sudo freshclam; then
-    clam_db_present || die "freshclam failed and no ClamAV database exists (check /etc/freshclam.conf and network)."
+    clam_db_present || die "freshclam failed and no ClamAV database exists (check freshclam.conf - /etc/freshclam.conf or /etc/clamav/freshclam.conf - and the network)."
     warn "freshclam failed; scanning with definitions ${age}h old."
   fi
   command -v restorecon >/dev/null && sudo restorecon -R "${CLAMAV_DB_DIR}" 2>/dev/null
@@ -2294,6 +2330,7 @@ write_report() {
 # --quarantine changes the media itself and is the riskier of the two.
 PKGS_7ZIP_FEDORA=(7zip)
 PKGS_7ZIP_ARCH=(7zip)
+PKGS_7ZIP_DEBIAN=(7zip)
 NZ_TAG=
 NZ_WHY=
 NZ_DEST_DEV=
