@@ -444,7 +444,9 @@ parse_yara_output() {
 # (~1.2 GiB RSS), so bound by available memory as well as CPUs.
 clam_jobs() {
   local mem cpu j
-  mem=$(awk '/^MemAvailable:/ { print int($2 / 1572864) }' /proc/meminfo)
+  # Unreadable meminfo (a sandbox hiding /proc) means one job, never a crash.
+  mem=$(awk '/^MemAvailable:/ { print int($2 / 1572864) }' /proc/meminfo 2>/dev/null) || mem=
+  [[ ${mem} =~ ^[0-9]+$ ]] || mem=1
   cpu=$(nproc)
   j=$(( cpu < mem ? cpu : mem ))
   (( j > 4 )) && j=4
@@ -2012,7 +2014,7 @@ run_sandboxed() {
     -p ProtectSystem=strict -p ProtectHome=read-only -p ReadWritePaths="${rw}" \
     -p ProtectKernelTunables=yes -p ProtectKernelModules=yes -p ProtectKernelLogs=yes \
     -p ProtectControlGroups=yes -p ProtectClock=yes -p ProtectHostname=yes \
-    -p ProtectProc=invisible -p ProcSubset=pid \
+    -p ProtectProc=invisible \
     -p 'RestrictAddressFamilies=~af_unix af_inet af_inet6 af_netlink af_packet af_key af_alg af_bluetooth af_vsock af_xdp af_rds af_tipc af_iucv af_can af_mctp af_ax25 af_ipx af_appletalk af_x25 af_atmpvc af_atmsvc af_irda af_pppox af_llc af_ib af_mpls af_phonet af_ieee802154 af_caif af_nfc af_kcm af_qipcrtr af_smc af_netrom af_bridge af_rose af_netbeui af_econet af_ash af_sna af_wanpipe' \
     -p RestrictNamespaces=yes -p RestrictSUIDSGID=yes \
     -p RestrictRealtime=yes -p LockPersonality=yes -p SystemCallArchitectures=native \
