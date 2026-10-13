@@ -243,6 +243,34 @@ def power_values(text):
     return sections
 
 
+COMMAND_LINE_TOOLS = Path('/Library/Developer/CommandLineTools')
+# CLT ships clang directly in usr/bin; Xcode.app keeps it in its default toolchain.
+CLANG_LAYOUTS = ('usr/bin/clang', 'Toolchains/XcodeDefault.xctoolchain/usr/bin/clang')
+
+
+def developer_clang(root):
+    """Return the clang binary inside a developer directory, or None. Never executes anything."""
+    if not root:
+        return None
+    for relative in CLANG_LAYOUTS:
+        candidate = Path(root) / relative
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def developer_tools_problem(selected, command_line_tools=COMMAND_LINE_TOOLS):
+    """Explain why the xcode-select'ed directory cannot compile, or return None when usable."""
+    selected = (selected or '').strip()
+    if developer_clang(selected):
+        return None
+    if developer_clang(command_line_tools):
+        what = 'is not set' if not selected else (
+            selected + (' has no clang' if Path(selected).is_dir() else ' no longer exists'))
+        return f'Developer directory {what}; run: sudo xcode-select --switch {command_line_tools}'
+    return 'Complete Apple Command Line Tools installation, then rerun'
+
+
 class Workstation:
     def __init__(self, args, home=None, prefix=None, applications=None):
         self.args = args
@@ -250,6 +278,7 @@ class Workstation:
         self.home = Path(home or Path.home())
         self.prefix = Path(prefix or '/opt/homebrew')
         self.applications = Path(applications or '/Applications')
+        self.command_line_tools = COMMAND_LINE_TOOLS
         self.state = self.home / 'Library/Application Support/lan-ipxe/workstation'
         self.manifest = read_json(PAYLOAD / 'manifest.json')
         self.events = []
@@ -1209,11 +1238,13 @@ class Workstation:
 
     def run(self):
         print('macOS workstation: ' + self.args.profile + (' (offline preview)' if self.preview else ' (apply)'))
-        selected = self.command(['/usr/bin/xcode-select', '-p'], check=False).stdout.strip()
-        if not selected or not (Path(selected) / 'usr/bin/clang').exists():
+        result = self.command(['/usr/bin/xcode-select', '-p'], check=False)
+        selected = result.stdout if result.returncode == 0 else ''
+        problem = developer_tools_problem(selected, self.command_line_tools)
+        if problem:
             if not self.preview:
-                raise Deferred('Complete Apple Command Line Tools installation, then rerun')
-            self.emit('DRIFT', 'Apple developer tools', 'Complete Command Line Tools installation, then rerun')
+                raise Deferred(problem)
+            self.emit('DRIFT', 'Apple developer tools', problem)
         if not self.preview:
             if os.stat('/dev/console').st_uid != os.getuid():
                 raise Deferred('Apply requires the active console user')

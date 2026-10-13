@@ -28,6 +28,7 @@ class ConfigurationTests(unittest.TestCase):
         self.home.mkdir()
         self.obj = w.Workstation(w.arguments(['--no-upgrade']), home=self.home,
                                  prefix=self.root / 'brew', applications=self.root / 'Applications')
+        self.obj.command_line_tools = self.root / 'CommandLineTools'
         self.output = contextlib.redirect_stdout(io.StringIO())
         self.output.__enter__()
 
@@ -314,6 +315,69 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(set(self.home.rglob('*')), before)
         self.assertFalse(self.obj.state.exists())
 
+    def make_clang(self, root, relative):
+        clang = root / relative
+        clang.parent.mkdir(parents=True, exist_ok=True)
+        clang.write_text('do not execute'); clang.chmod(0o755)
+        return clang
+
+    def test_developer_tools_accept_clt_and_xcode_layouts(self):
+        clt = self.root / 'CommandLineTools'
+        xcode = self.root / 'Applications/Xcode.app/Contents/Developer'
+        self.assertIsNone(w.developer_clang(''))
+        self.assertIsNone(w.developer_clang(xcode))
+        self.assertEqual(w.developer_clang(clt), None)
+        self.assertEqual(w.developer_tools_problem('', clt), 'Complete Apple Command Line Tools installation, then rerun')
+        # Xcode.app has no usr/bin/clang; only its default toolchain counts.
+        (xcode / 'usr/bin').mkdir(parents=True)
+        xcode_clang = self.make_clang(xcode, 'Toolchains/XcodeDefault.xctoolchain/usr/bin/clang')
+        self.assertEqual(w.developer_clang(xcode), xcode_clang)
+        self.assertIsNone(w.developer_tools_problem(str(xcode) + '\n', clt))
+        clt_clang = self.make_clang(clt, 'usr/bin/clang')
+        self.assertEqual(w.developer_clang(clt), clt_clang)
+        self.assertIsNone(w.developer_tools_problem(str(clt), clt))
+        # Non-executable or directory "clang" entries are not usable compilers.
+        xcode_clang.chmod(0o644)
+        self.assertIsNone(w.developer_clang(xcode))
+        xcode_clang.unlink(); xcode_clang.mkdir()
+        self.assertIsNone(w.developer_clang(xcode))
+
+    def test_developer_tools_diagnose_stale_or_missing_selection(self):
+        clt = self.root / 'CommandLineTools'
+        self.make_clang(clt, 'usr/bin/clang')
+        broken = self.root / 'Applications/Xcode.app/Contents/Developer'
+        broken.mkdir(parents=True)
+        fix = 'run: sudo xcode-select --switch ' + str(clt)
+        for selected, reason in (('', 'is not set'), (str(broken), str(broken) + ' has no clang'),
+                                 (str(self.root / 'gone'), str(self.root / 'gone') + ' no longer exists')):
+            problem = w.developer_tools_problem(selected, clt)
+            self.assertIn(reason, problem)
+            self.assertIn(fix, problem)
+
+    def test_run_uses_selected_xcode_and_ignores_failed_xcode_select(self):
+        xcode = self.root / 'Applications/Xcode.app/Contents/Developer'
+        self.make_clang(xcode, 'Toolchains/XcodeDefault.xctoolchain/usr/bin/clang')
+        self.obj.args = w.arguments(['--check'])
+        self.obj.preview = True
+        outputs = {'returncode': 0, 'stdout': str(xcode) + '\n'}
+        def command(argv, **kwargs):
+            if Path(argv[0]).name == 'xcode-select':
+                return subprocess.CompletedProcess(argv, outputs['returncode'], outputs['stdout'], '')
+            return subprocess.CompletedProcess(argv, 1, '', '')
+        self.obj.command = command
+        self.obj.fetch = lambda *a: self.fail('preview network')
+        self.obj.run()
+        self.assertFalse([e for e in self.obj.events if 'Apple developer tools' in str(e)])
+        # Error text from a failing xcode-select must never be treated as a path.
+        self.obj.events = []
+        outputs.update(returncode=2, stdout=str(xcode))
+        self.obj.run()
+        self.assertTrue([e for e in self.obj.events if 'Apple developer tools' in str(e)])
+        self.obj.preview = False
+        self.obj.args = w.arguments([])
+        with self.assertRaises(w.Deferred):
+            self.obj.run()
+
     def test_distro_rust_formula_is_purged_and_cache_pruned(self):
         calls = []
         def command(argv, **kwargs):
@@ -499,6 +563,11 @@ class BootstrapTests(unittest.TestCase):
             candidate.parent.mkdir(parents=True); candidate.write_text('do not execute'); candidate.chmod(0o755)
             script = 'source "$1"; find_python "$2" "$3"'
             result = subprocess.run(['/bin/bash', '-c', script, 'test', str(ROOT / 'setup-macos-workstation.sh'), str(missing), str(candidate.parents[2])], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stdout.strip(), str(candidate))
+            # A stale/empty xcode-select result falls through to the CLT directory.
+            script = 'source "$1"; find_python "$2" "" "$3/stale" "$3/Developer"'
+            result = subprocess.run(['/bin/bash', '-c', script, 'test', str(ROOT / 'setup-macos-workstation.sh'), str(missing), temporary], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0)
             self.assertEqual(result.stdout.strip(), str(candidate))
 

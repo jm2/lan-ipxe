@@ -17,10 +17,13 @@ EOF
 }
 
 find_python() {
-    local prefix=$1 developer_dir=$2 candidate
-    for candidate in "$prefix/bin/python3" "$developer_dir/usr/bin/python3"; do
-        [ -n "$developer_dir" ] || [ "$candidate" = "$prefix/bin/python3" ] || continue
-        if [ -x "$candidate" ]; then printf '%s\n' "$candidate"; return 0; fi
+    # Usage: find_python BREW_PREFIX [DEVELOPER_DIR...]; empty directories are skipped.
+    local prefix=$1 dir
+    shift
+    if [ -x "$prefix/bin/python3" ]; then printf '%s\n' "$prefix/bin/python3"; return 0; fi
+    for dir in "$@"; do
+        [ -n "$dir" ] && [ -x "$dir/usr/bin/python3" ] || continue
+        printf '%s\n' "$dir/usr/bin/python3"; return 0
     done
     return 1
 }
@@ -71,7 +74,9 @@ main() {
     root=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
     # Do not invoke /usr/bin/python3: on a clean Mac it is a CLT installer stub.
     developer_dir=$(/usr/bin/xcode-select -p 2>/dev/null) || developer_dir=''
-    python=$(find_python /opt/homebrew "$developer_dir") || python=''
+    # A stale or Python-less selection must not hide an installed CLT; the controller
+    # then reports the exact xcode-select fix instead of reopening the installer.
+    python=$(find_python /opt/homebrew "$developer_dir" /Library/Developer/CommandLineTools) || python=''
     if [ -z "$python" ]; then
         if [ "$mode" != apply ]; then
             preview_without_python "$root" "$profile" "$mode"
