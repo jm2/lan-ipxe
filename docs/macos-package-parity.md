@@ -63,7 +63,7 @@ Core parity is default. Full contains the additional heavy developer and optiona
 | `yt-dlp` (A) | core | Homebrew yt-dlp |
 | `zip` (F) | core | Homebrew zip |
 | `ookla-speedtest-bin` (A), `powershell` (F), `powershell-bin` (A) | core | Official native CLI; owner-aware reconciliation (Ookla presence-only) |
-| `crush` (F), `crush-bin` (A); native Goose CLI/desktop (A/F) | core | Goose CLI from goose's official `download_cli.sh` in `~/.local/bin`; Goose Desktop via the `block-goose` cask; Crush via Charm's `charmbracelet/tap/crush` formula. OpenCode's cask, formula and feed install are retired |
+| `crush` (F), `crush-bin` (A); native Goose CLI/desktop (A/F) | core | Goose CLI from goose's official `download_cli.sh` in `~/.local/bin`; Goose Desktop via the `block-goose` cask; Crush via Charm's `charmbracelet/tap/crush` formula. OpenCode's cask, formula, DMG app, native `~/.opencode/bin` install and installer PATH lines are removed |
 | `balun` (F), `balun-bin` (A), `tributary` (F), `tributary-bin` (A) | core | Verified jm2 release app; preserve local source checkouts |
 | `gnome-icon-theme` (A), `gnome-icon-theme-symbolic` (A) | core | adwaita-icon-theme; native desktop appearance managed separately |
 | `transmission` (F), `transmission-daemon` (F), `transmission-gtk` (F), `transmission-remote-gtk` (F) | core | transmission-cli; no daemon enablement or Linux GTK service UI |

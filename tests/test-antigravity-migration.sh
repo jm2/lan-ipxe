@@ -1047,6 +1047,58 @@ test_goose_desktop_checksum_rejection() {
     || fail "${script} (${arch}) accepted a corrupt goose Desktop download"
 }
 
+# What OpenCode's official installer and desktop AppImage leave in a home:
+# the PATH lines it appends to shell startup files (bash and fish forms, one
+# startup file reached through a dotfile-manager symlink), a ~/.local/bin link
+# into ~/.opencode, the AppImage and its launcher, plus look-alikes to keep.
+native_opencode_fixture() {
+  local home=$1
+  unset XDG_CONFIG_HOME ZDOTDIR
+  install -d "${home}/.local/bin" "${home}/.opencode/bin" "${home}/.config/fish" \
+    "${home}/Applications" "${home}/.local/share/applications" "${home}/dotfiles"
+  printf 'opencode\n' >"${home}/.opencode/bin/opencode2"
+  printf 'alias ll="ls -l"\n\n# opencode\nexport PATH=%s/.opencode/bin:$PATH\nexport EDITOR=vim\n' \
+    "${home}" >"${home}/.bashrc"
+  chmod 0600 "${home}/.bashrc"
+  printf 'set -x EDITOR vim\n\n# opencode\nfish_add_path %s/.opencode/bin\n' \
+    "${home}" >"${home}/.config/fish/config.fish"
+  printf '# opencode\nexport PATH=/opt/other/bin:$PATH\n\n# opencode\nexport PATH=%s/.opencode/bin:$PATH\n' \
+    "${home}" >"${home}/dotfiles/zshrc"
+  ln -s "${home}/dotfiles/zshrc" "${home}/.zshrc"
+  # The user's own copy of the same PATH line, without the installer's marker.
+  printf 'export PATH=$HOME/bin:$PATH\nexport PATH=%s/.opencode/bin:$PATH\n' \
+    "${home}" >"${home}/.profile"
+  ln -sfn "${home}/.opencode/bin/opencode2" "${home}/.local/bin/opencode"
+  printf 'appimage\n' >"${home}/Applications/OpenCode_1.2.3_amd64.AppImage"
+  printf 'appimage\n' >"${home}/Applications/Other.AppImage"
+  printf '[Desktop Entry]\n' >"${home}/.local/share/applications/appimagekit-OpenCode.desktop"
+  printf '[Desktop Entry]\n' >"${home}/.local/share/applications/zed.desktop"
+}
+
+assert_native_opencode_purged() {
+  local home=$1 label=$2 path
+  for path in "${home}/.opencode" "${home}/.local/bin/opencode" \
+      "${home}/Applications/OpenCode_1.2.3_amd64.AppImage" \
+      "${home}/.local/share/applications/appimagekit-OpenCode.desktop"; do
+    [[ ! -e ${path} && ! -L ${path} ]] || fail "${label} left native OpenCode behind: ${path}"
+  done
+  [[ $(cat -- "${home}/.bashrc") == $'alias ll="ls -l"\nexport EDITOR=vim' ]] \
+    || fail "${label} did not strip exactly the OpenCode lines from .bashrc"
+  [[ $(stat -c %a -- "${home}/.bashrc") == 600 ]] \
+    || fail "${label} changed the mode of a rewritten startup file"
+  [[ $(cat -- "${home}/.config/fish/config.fish") == 'set -x EDITOR vim' ]] \
+    || fail "${label} did not strip the fish_add_path entry"
+  [[ -L ${home}/.zshrc \
+     && $(cat -- "${home}/dotfiles/zshrc") == $'# opencode\nexport PATH=/opt/other/bin:$PATH' ]] \
+    || fail "${label} replaced a symlinked startup file or stripped an unrelated PATH line"
+  [[ $(cat -- "${home}/.profile") == "export PATH=\$HOME/bin:\$PATH"$'\n'"export PATH=${home}/.opencode/bin:\$PATH" ]] \
+    || fail "${label} stripped a PATH line the OpenCode installer did not write"
+  [[ -f ${home}/Applications/Other.AppImage && -f ${home}/.local/share/applications/zed.desktop ]] \
+    || fail "${label} removed an unrelated AppImage or launcher"
+  [[ -z $(native_opencode_leftovers "${home}") ]] \
+    || fail "${label} still reports native OpenCode leftovers"
+}
+
 test_fedora_opencode_purge() (
   load_helpers setup-fedora-workstation.sh
   local home=${TEST_ROOT}/opencode-fedora/home removals=0 installed=1
@@ -1056,6 +1108,7 @@ test_fedora_opencode_purge() (
     >"${home}/.local/bin/opencode.lan-ipxe-release"
   printf 'opencode\n' >"${home}/.opencode/bin/opencode"
   printf 'keep\n' >"${home}/.config/opencode/opencode.json"
+  native_opencode_fixture "${home}"
   rpm() {
     [[ $1 == -qa ]] || return 1
     printf 'bash\n'
@@ -1074,6 +1127,7 @@ test_fedora_opencode_purge() (
     || fail 'Fedora left an OpenCode CLI behind'
   [[ -f ${home}/.config/opencode/opencode.json ]] \
     || fail 'Fedora removed OpenCode user configuration'
+  assert_native_opencode_purged "${home}" Fedora
 )
 
 test_arch_opencode_purge() (
@@ -1082,6 +1136,7 @@ test_arch_opencode_purge() (
   local -A pkg_state=([opencode]=1 [opencode-desktop-bin]=1)
   install -d "${home}/.opencode/bin" "${home}/.local/share/opencode"
   printf 'opencode\n' >"${home}/.opencode/bin/opencode"
+  native_opencode_fixture "${home}"
   pacman() {
     [[ $1 == -Q ]] || return 97
     [[ -n ${pkg_state[$2]:-} ]]
@@ -1097,6 +1152,7 @@ test_arch_opencode_purge() (
   (( removals == 1 )) || fail 'Arch OpenCode packages were not removed exactly once'
   [[ ! -e ${home}/.opencode/bin && -d ${home}/.local/share/opencode ]] \
     || fail 'Arch did not remove only the OpenCode binaries'
+  assert_native_opencode_purged "${home}" Arch
 )
 
 test_fedora_converged_zed() (

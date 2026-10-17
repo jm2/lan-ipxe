@@ -624,10 +624,103 @@ purge_legacy_antigravity_arch() {
   fi
 }
 
+# OpenCode's official installer (opencode.ai/install) puts the CLI in
+# ~/.opencode/bin and appends a blank line, "# opencode" and a PATH line to the
+# user's shell startup files; the desktop AppImage usually lives in
+# ~/Applications (or ~/.local/bin) with a launcher in ~/.local/share/applications.
+# native_opencode_leftovers <home> prints "<action> <path>" for each one still
+# present: "strip" for a startup file to edit, "remove" for anything else.
+# OpenCode's config and session data are never listed.
+native_opencode_leftovers() {
+  local home=$1 rc dir path name
+  local opencode_bin=${home}/.opencode/bin
+  local rc_files=("${home}/.bashrc" "${home}/.bash_profile" "${home}/.profile"
+    "${home}/.zshrc" "${home}/.zshenv" "${home}/.config/fish/config.fish"
+    "${XDG_CONFIG_HOME:-${home}/.config}/bash/.bashrc"
+    "${XDG_CONFIG_HOME:-${home}/.config}/bash/.bash_profile"
+    "${XDG_CONFIG_HOME:-${home}/.config}/zsh/.zshrc"
+    "${XDG_CONFIG_HOME:-${home}/.config}/zsh/.zshenv")
+  if [[ -n ${ZDOTDIR:-} ]]; then
+    rc_files+=("${ZDOTDIR}/.zshrc" "${ZDOTDIR}/.zshenv")
+  fi
+  [[ ! -e ${opencode_bin} && ! -L ${opencode_bin} ]] || printf 'remove %s\n' "${opencode_bin}"
+  path=${home}/.local/bin/opencode
+  if [[ -L ${path} && $(readlink -- "${path}") == "${home}/.opencode/"* ]]; then
+    printf 'remove %s\n' "${path}"
+  fi
+  for rc in "${rc_files[@]}"; do
+    [[ -f ${rc} ]] || continue
+    opencode_path_block "${home}" check "${rc}" && printf 'strip %s\n' "${rc}"
+  done
+  for dir in "${home}/Applications" "${home}/.local/bin" "${home}/.local/share/applications"; do
+    for path in "${dir}"/*; do
+      [[ -f ${path} || -L ${path} ]] || continue
+      name=${path##*/}
+      name=${name,,}
+      case ${dir##*/}:${name} in
+        applications:*opencode*.desktop|Applications:*opencode*.appimage|bin:*opencode*.appimage)
+          printf 'remove %s\n' "${path}" ;;
+      esac
+    done
+  done
+}
+
+# opencode_path_block <home> check|strip <file>: the installer's block is its
+# PATH line with "# opencode" right above it (and the blank line it writes
+# above that). "check" succeeds when <file> holds one; "strip" prints <file>
+# without it. A PATH line without the marker is the user's own and stays.
+opencode_path_block() {
+  awk -v export_line="export PATH=$1/.opencode/bin:\$PATH" \
+      -v fish_line="fish_add_path $1/.opencode/bin" -v mode="$2" '
+    { line[NR] = $0 }
+    END {
+      for (i = 2; i <= NR; i++) {
+        if ((line[i] != export_line && line[i] != fish_line) || line[i - 1] != "# opencode") continue
+        drop[i] = drop[i - 1] = 1
+        if (i > 2 && line[i - 2] == "") drop[i - 2] = 1
+      }
+      if (mode == "check") exit !length(drop)
+      for (i = 1; i <= NR; i++) if (!(i in drop)) print line[i]
+    }' "$3"
+}
+
+# strip_opencode_path_lines <home> <file>: rewrites <file> in place without
+# the installer's block; every other line, and the file's mode, is kept.
+strip_opencode_path_lines() {
+  local home=$1 file=$2 stripped
+  stripped=$(mktemp "${WORK_DIR:-/tmp}/opencode-rc.XXXXXX") \
+    || die "could not create a temporary file for ${file}"
+  opencode_path_block "${home}" strip "${file}" >"${stripped}" \
+    || die "could not strip the OpenCode PATH entry from ${file}"
+  # Writing through the existing file keeps its mode, owner and any symlink.
+  cat -- "${stripped}" >"${file}" || die "could not rewrite ${file}"
+  rm -f -- "${stripped}"
+}
+
+# remove_native_opencode <home>: removes everything native_opencode_leftovers
+# lists, then ~/.opencode itself once nothing else is left in it. Sets
+# NATIVE_OPENCODE_REMOVED to what was removed or rewritten.
+NATIVE_OPENCODE_REMOVED=()
+remove_native_opencode() {
+  local home=$1 action path
+  NATIVE_OPENCODE_REMOVED=()
+  while read -r action path; do
+    case ${action} in
+      strip) strip_opencode_path_lines "${home}" "${path}" ;;
+      remove) rm -rf -- "${path}" || die "could not remove ${path}" ;;
+      *) continue ;;
+    esac
+    NATIVE_OPENCODE_REMOVED+=("${path}")
+  done < <(native_opencode_leftovers "${home}")
+  if [[ -d ${home}/.opencode ]] && rmdir -- "${home}/.opencode" 2>/dev/null; then
+    NATIVE_OPENCODE_REMOVED+=("${home}/.opencode")
+  fi
+}
+
 # OpenCode is retired in favor of goose and Crush: remove the official/AUR
-# CLI and desktop packages and the copy upstream's installer keeps in
-# ~/.opencode/bin. OpenCode's own config and session data are left in place.
-# The optional home is a test seam.
+# CLI and desktop packages and every native install (see
+# remove_native_opencode). OpenCode's own config and session data are left in
+# place. The optional home is a test seam.
 # shellcheck disable=SC2120
 purge_opencode_arch() {
   local home=${1:-${HOME}} package installed=()
@@ -644,10 +737,8 @@ purge_opencode_arch() {
         || die "${package} is still installed"
     done
   fi
-  if [[ -e ${home}/.opencode/bin || -L ${home}/.opencode/bin ]]; then
-    rm -rf -- "${home}/.opencode/bin" || die "could not remove ${home}/.opencode/bin"
-    installed+=("${home}/.opencode/bin")
-  fi
+  remove_native_opencode "${home}"
+  installed+=("${NATIVE_OPENCODE_REMOVED[@]}")
   if (( ${#installed[@]} )); then
     note "OpenCode: removed ${installed[*]} (replaced by goose and Crush)"
   else
@@ -1675,8 +1766,9 @@ run_check() {
     pacman -Q "${package}" &>/dev/null \
       && report DRIFT "${package}: installed (OpenCode is replaced by goose and Crush)"
   done
-  [[ -e ${HOME}/.opencode/bin ]] \
-    && report DRIFT "${HOME}/.opencode/bin: present (OpenCode is replaced by goose and Crush)"
+  while read -r _ entry; do
+    report DRIFT "${entry}: native OpenCode install (replaced by goose and Crush)"
+  done < <(native_opencode_leftovers "${HOME}")
   if flatpak info --system "${GOOSE_DESKTOP_FLATPAK}" >/dev/null 2>&1; then
     report CURRENT "goose Desktop: Flatpak ${GOOSE_DESKTOP_FLATPAK}"
   else
@@ -1749,7 +1841,7 @@ print_plan() {
   else
     printf 'PLAN: [multilib] not required by core; left as configured\n'
   fi
-  printf 'PLAN: remove legacy antigravity-ide / Antigravity < 2.0, vscodium-bin and OpenCode (%s, ~/.opencode/bin) if installed\n' \
+  printf 'PLAN: remove legacy antigravity-ide / Antigravity < 2.0, vscodium-bin and OpenCode (%s; native ~/.opencode/bin, its shell PATH lines, desktop AppImage/launcher) if installed\n' \
     "${OPENCODE_PKGS[*]}"
   if (( NO_UPGRADE )); then
     printf 'PLAN: --no-upgrade: skip pacman -Syu; refuse unless every repository sync DB exists\n'

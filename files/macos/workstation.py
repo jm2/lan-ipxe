@@ -38,6 +38,24 @@ NATIVE_CLIS = {
 }
 
 
+def strip_opencode_path(text, home):
+    """Text without the PATH block OpenCode's installer appends (a blank
+    line, "# opencode", then its export/fish_add_path line), or None when
+    there is none. No other line is touched."""
+    directory = str(home) + '/.opencode/bin'
+    targets = {'export PATH=' + directory + ':$PATH', 'fish_add_path ' + directory}
+    lines = text.splitlines(keepends=True)
+    drop = set()
+    for index, line in enumerate(lines):
+        if line.rstrip('\n') in targets and index and lines[index - 1].rstrip('\n') == '# opencode':
+            drop.update((index, index - 1))
+            if index > 1 and not lines[index - 2].strip():
+                drop.add(index - 2)
+    if not drop:
+        return None
+    return ''.join(line for index, line in enumerate(lines) if index not in drop)
+
+
 class Deferred(Exception):
     """A required user action or unsupported state, not an installer failure."""
 
@@ -910,41 +928,79 @@ class Workstation:
             raise RuntimeError('Homebrew rust formula is still installed')
         self.emit('CHANGED', 'formula rust', 'purged in favor of rustup')
 
+    def opencode_rc_files(self):
+        # Every startup file OpenCode's installer may append its PATH line to.
+        config = Path(self.env.get('XDG_CONFIG_HOME') or self.home / '.config')
+        names = ['.zshrc', '.zshenv', '.bashrc', '.bash_profile', '.profile', '.config/fish/config.fish']
+        files = [self.home / name for name in names]
+        if self.env.get('ZDOTDIR'):
+            files += [Path(self.env['ZDOTDIR']) / '.zshrc', Path(self.env['ZDOTDIR']) / '.zshenv']
+        files += [config / 'zsh/.zshrc', config / 'zsh/.zshenv', config / 'bash/.bashrc', config / 'bash/.bash_profile']
+        unique = []
+        for path in files:
+            if path.is_file() and path.resolve() not in unique:
+                unique.append(path.resolve())
+        return unique
+
     def retire_opencode(self):
-        # OpenCode is replaced by Goose and Crush. Remove the copies earlier runs
-        # installed: the cask, the formula, and the receipt-owned feed build with its
-        # link. Other owners and ~/.config/opencode / ~/.local/share/opencode stay.
-        packages = [(kind, name) for kind, name in (('cask', 'opencode-desktop'), ('formula', 'opencode'))
-                    if (self.formula_installed(name) if kind == 'formula' else
-                        (self.prefix / 'Caskroom' / name / '.metadata').is_dir())]
-        receipt = self.receipts.get('clis', {}).get('opencode', {})
-        binary = self.home / '.opencode/bin/opencode'
-        owned = receipt.get('path') == str(binary) and binary.is_file() and not binary.is_symlink()
+        # OpenCode is replaced by Goose and Crush, and every install of it is
+        # purged: the cask, the formula, the DMG-installed app, the official
+        # installer's ~/.opencode/bin with the PATH lines it appended to shell
+        # startup files, and a ~/.local/bin link into it. OpenCode's config,
+        # data and state (~/.config, ~/.local/share, ~/.local/state) stay.
+        reason = 'retired; replaced by Goose and Crush'
+        cask = (self.prefix / 'Caskroom/opencode-desktop/.metadata').is_dir()
+        packages = [(kind, name) for kind, name, present in (('cask', 'opencode-desktop', cask),
+                                                              ('formula', 'opencode', self.formula_installed('opencode')))
+                    if present]
+        apps = [] if cask else [path for path in (self.applications / 'OpenCode.app', self.home / 'Applications/OpenCode.app')
+                                if read_plist(path / 'Contents/Info.plist').get('CFBundleIdentifier', '').lower()
+                                == 'ai.opencode.desktop']
+        native = self.home / '.opencode/bin'
         public = self.home / '.local/bin/opencode'
-        linked = public.is_symlink() and os.readlink(public) == self.receipts.get('links', {}).get(str(public)) == str(binary)
+        # Any link into ~/.opencode counts, dangling or not.
+        linked = public.is_symlink() and os.path.normpath(os.path.join(public.parent, os.readlink(public))).startswith(
+            str(self.home / '.opencode') + '/')
+        rc_files = [(path, stripped) for path in self.opencode_rc_files()
+                    for stripped in [strip_opencode_path(path.read_text(), self.home)] if stripped is not None]
         if self.preview:
             for kind, name in packages:
-                self.emit('DRIFT', kind + ' ' + name, 'retired; replaced by Goose and Crush')
-            if owned or linked:
-                self.emit('DRIFT', 'OpenCode CLI', 'retired; replaced by Goose and Crush')
+                self.emit('DRIFT', kind + ' ' + name, reason)
+            for path in apps:
+                self.emit('DRIFT', 'OpenCode app ' + str(path), reason)
+            if native.exists() or native.is_symlink() or linked:
+                self.emit('DRIFT', 'OpenCode CLI', reason)
+            for path, _ in rc_files:
+                self.emit('DRIFT', 'OpenCode PATH entry in ' + str(path), reason)
             return
         for kind, name in packages:
             self.command([self.brew, 'uninstall', '--' + kind, name], mutate=True, capture=False)
             if self.formula_installed(name) if kind == 'formula' else (self.prefix / 'Caskroom' / name / '.metadata').is_dir():
                 raise RuntimeError('Homebrew ' + kind + ' ' + name + ' is still installed')
-            self.emit('CHANGED', kind + ' ' + name, 'retired; replaced by Goose and Crush')
+            self.emit('CHANGED', kind + ' ' + name, reason)
+        for path in apps:
+            try:
+                shutil.rmtree(path)
+            except OSError as exc:
+                raise RuntimeError('Could not remove ' + str(path) + ': ' + str(exc)) from exc
+            self.emit('CHANGED', 'OpenCode app ' + str(path), reason)
+        removed_cli = linked or native.exists() or native.is_symlink()
         if linked:
             public.unlink()
-            del self.receipts['links'][str(public)]
-        if owned:
-            binary.unlink()
-            for folder in (binary.parent, binary.parent.parent):
-                with contextlib.suppress(OSError):
-                    folder.rmdir()
-        if receipt and (owned or not binary.exists()):
-            del self.receipts['clis']['opencode']
-        if owned or linked:
-            self.emit('CHANGED', 'OpenCode CLI', 'retired; replaced by Goose and Crush')
+            self.receipts.get('links', {}).pop(str(public), None)
+        if native.is_symlink() or native.is_file():
+            native.unlink()
+        elif native.exists():
+            shutil.rmtree(native)
+        with contextlib.suppress(OSError):
+            native.parent.rmdir()
+        self.receipts.get('clis', {}).pop('opencode', None)
+        if removed_cli:
+            self.emit('CHANGED', 'OpenCode CLI', reason)
+        for path, stripped in rc_files:
+            # Written in place, so the file keeps its mode, owner and any link to it.
+            path.write_text(stripped)
+            self.emit('CHANGED', 'OpenCode PATH entry in ' + str(path), reason)
 
     def brew_cleanup(self):
         # Install-time cleanup is disabled for quiet, predictable package steps;

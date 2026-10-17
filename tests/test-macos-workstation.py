@@ -231,16 +231,109 @@ class ConfigurationTests(unittest.TestCase):
         self.assertNotIn(str(self.home / '.local/bin/opencode'), self.obj.receipts['links'])
         self.assertEqual(config.read_text(), '{}')
 
-    def test_foreign_opencode_cli_is_preserved(self):
-        binary = self.home / '.opencode/bin/opencode'
-        binary.parent.mkdir(parents=True); binary.write_text('mine')
+    def test_any_native_opencode_cli_is_purged(self):
+        # The official installer's copy is removed even without a receipt.
+        native = self.home / '.opencode/bin'
+        native.mkdir(parents=True)
+        for name in ('opencode', 'opencode2', 'opencode2.cmd'):
+            (native / name).write_text('mine')
         public = self.home / '.local/bin/opencode'
-        public.parent.mkdir(parents=True); public.symlink_to(binary)
+        public.parent.mkdir(parents=True); public.symlink_to('../../.opencode/bin/opencode')
+        self.obj.receipts.setdefault('links', {})[str(public)] = 'unrelated'
+        state = self.home / '.local/state/opencode'
+        state.mkdir(parents=True)
+        other = self.home / '.local/bin/other'
+        other.symlink_to(self.home / 'elsewhere')
+        self.obj.preview = True
+        self.obj.retire_opencode()
+        self.assertEqual([(e['status'], e['item']) for e in self.obj.events], [('DRIFT', 'OpenCode CLI')])
+        self.assertTrue(public.is_symlink() and (native / 'opencode').exists())
+        self.obj.preview = False
         with patch.object(self.obj, 'command', side_effect=AssertionError('brew ran')):
             self.obj.retire_opencode()
-        self.assertEqual(binary.read_text(), 'mine')
-        self.assertTrue(public.is_symlink())
+            self.obj.retire_opencode()
+        self.assertFalse(public.is_symlink() or (self.home / '.opencode').exists())
+        self.assertNotIn(str(public), self.obj.receipts['links'])
+        self.assertTrue(state.is_dir() and other.is_symlink())
+        self.assertEqual([e['status'] for e in self.obj.events].count('CHANGED'), 1)
+
+    def test_dangling_opencode_link_is_removed(self):
+        public = self.home / '.local/bin/opencode'
+        public.parent.mkdir(parents=True); public.symlink_to(self.home / '.opencode/bin/opencode')
+        self.obj.retire_opencode()
+        self.assertFalse(public.is_symlink())
+
+    def test_opencode_installer_path_lines_are_stripped(self):
+        home = str(self.home)
+        bashrc = self.home / '.bashrc'
+        original = 'alias ll="ls -l"\nexport PATH=$HOME/bin:$PATH\n'
+        bashrc.write_text(original + '\n# opencode\nexport PATH=' + home + '/.opencode/bin:$PATH\n# after\n')
+        bashrc.chmod(0o600)
+        fish = self.home / '.config/fish/config.fish'
+        fish.parent.mkdir(parents=True)
+        fish.write_text('set -x EDITOR vim\n\n# opencode\nfish_add_path ' + home + '/.opencode/bin\n')
+        # A user's own line naming the directory, without the installer's marker, stays.
+        profile = self.home / '.profile'
+        profile.write_text('export PATH=' + home + '/.opencode/bin:$PATH\n')
+        zdotdir = self.root / 'zdot'
+        zdotdir.mkdir()
+        zshrc = zdotdir / '.zshrc'
+        zshrc.write_text('\n# opencode\nexport PATH=' + home + '/.opencode/bin:$PATH\n')
+        (self.home / '.zshrc').symlink_to(zshrc)
+        self.obj.env = dict(self.obj.env, ZDOTDIR=str(zdotdir))
+        self.obj.preview = True
+        self.obj.retire_opencode()
+        self.assertEqual(sorted(e['item'] for e in self.obj.events),
+                         sorted('OpenCode PATH entry in ' + str(p.resolve()) for p in (bashrc, fish, zshrc)))
+        self.assertIn('# opencode', bashrc.read_text())
+        self.obj.preview = False
+        self.obj.events = []
+        self.obj.retire_opencode()
+        self.assertEqual(len(self.obj.events), 3)
+        self.assertEqual(bashrc.read_text(), original + '# after\n')
+        self.assertEqual(bashrc.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(fish.read_text(), 'set -x EDITOR vim\n')
+        self.assertEqual(zshrc.read_text(), '')
+        self.assertTrue((self.home / '.zshrc').is_symlink())
+        self.assertEqual(profile.read_text(), 'export PATH=' + home + '/.opencode/bin:$PATH\n')
+        self.obj.events = []
+        self.obj.retire_opencode()
+        self.assertEqual(self.obj.events, [], 'a cleaned workstation must be a no-op')
+
+    def write_app(self, path, bundle_id):
+        (path / 'Contents').mkdir(parents=True)
+        with (path / 'Contents/Info.plist').open('wb') as stream:
+            plistlib.dump({'CFBundleIdentifier': bundle_id}, stream)
+
+    def test_dmg_installed_opencode_app_is_removed(self):
+        system = self.obj.applications / 'OpenCode.app'
+        user = self.home / 'Applications/OpenCode.app'
+        self.write_app(system, 'AI.OpenCode.Desktop')
+        self.write_app(user, 'com.example.opencode')
+        self.obj.preview = True
+        self.obj.retire_opencode()
+        self.assertEqual([e['item'] for e in self.obj.events], ['OpenCode app ' + str(system)])
+        self.assertTrue(system.exists())
+        self.obj.preview = False
+        self.obj.retire_opencode()
+        self.assertFalse(system.exists())
+        self.assertTrue(user.exists(), 'an unrelated bundle named OpenCode.app must stay')
+        self.obj.events = []
+        self.obj.retire_opencode()
         self.assertEqual(self.obj.events, [])
+
+    def test_cask_owned_opencode_app_is_left_to_the_cask_uninstall(self):
+        app = self.obj.applications / 'OpenCode.app'
+        self.write_app(app, 'ai.opencode.desktop')
+        (self.obj.prefix / 'Caskroom/opencode-desktop/.metadata').mkdir(parents=True)
+        def command(argv, **kwargs):
+            w.shutil.rmtree(self.obj.prefix / 'Caskroom/opencode-desktop')
+            w.shutil.rmtree(app)
+            return subprocess.CompletedProcess(argv, 0, '', '')
+        with patch.object(self.obj, 'command', side_effect=command) as brew:
+            self.obj.retire_opencode()
+        self.assertEqual(brew.call_count, 1)
+        self.assertEqual([e['item'] for e in self.obj.events], ['cask opencode-desktop'])
 
     def test_goose_cli_uses_official_installer_and_defers_homebrew_copy(self):
         self.obj.args = w.arguments([])

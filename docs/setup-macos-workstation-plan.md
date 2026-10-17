@@ -49,7 +49,7 @@ Application/tool parity, with **W/F/A** denoting active Windows/Fedora/Arch inte
 | VS Code | W/F/A; old VSCodium retired | Installed; ten extensions; no `code` on login PATH | Core; expose CLI and merge observed editor settings. No migration needed for absent VSCodium. |
 | Antigravity desktop/CLI | W/F/A; legacy 1.x replaced | Desktop 2.12.2; two `agy` copies | Core; detect v2 identity and reconcile one public CLI. Do not install the legacy IDE. |
 | Claude Code / Codex CLI | W/F/A | Native standalone installs | Core; retain native CLI owners and desktop Claude. Preserve the existing Codex desktop identity. |
-| Goose / Crush / Zed | W/F/A | Absent | Core: Goose CLI from goose's official installer, Goose Desktop from the `block-goose` cask, Crush from Charm's tap, and the Zed cask. OpenCode is retired. |
+| Goose / Crush / Zed | W/F/A | Absent | Core: Goose CLI from goose's official installer, Goose Desktop from the `block-goose` cask, Crush from Charm's tap, and the Zed cask. OpenCode is purged (cask, formula, DMG app, native `~/.opencode/bin` and its PATH lines). |
 | Git / GitHub CLI | W/F/A; GitHub Desktop W; Git LFS F | Apple Git and Homebrew `gh`; Desktop/LFS absent | Core Homebrew Git, Git LFS and gh. GitHub Desktop is an optional full-profile GUI. No identity/auth provisioning. |
 | Python | Latest stable Python resolved on W; Python tooling/dependencies F/A | CLT and Brew Python coexist | Core explicitly requests current stable Homebrew Python and establishes deliberate interactive PATH precedence; preserve Apple tool paths. |
 | Rust | W rustup; F/A distro toolchain | Brew rustup, stable ARM64 compiler | Core rustup with stable native target and rustfmt/clippy/rust-analyzer. No duplicate Homebrew rust compiler owner. |

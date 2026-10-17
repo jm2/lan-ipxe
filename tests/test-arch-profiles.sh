@@ -212,7 +212,7 @@ test_check_exit_codes() (
   mkdir -p "${HOME}/.opencode/bin"
   rc=0; output=$(run_check) || rc=$?
   [[ ${rc} == 2 && ${output} == *'opencode: installed (OpenCode is replaced by goose and Crush)'* \
-     && ${output} == *'.opencode/bin: present'* ]] \
+     && ${output} == *'.opencode/bin: native OpenCode install'* ]] \
     || fail 'check did not flag the retired OpenCode package and native copy'
   installed=' '
   rm -rf -- "${HOME}/.opencode"
