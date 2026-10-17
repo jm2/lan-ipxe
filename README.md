@@ -215,14 +215,19 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   before removing mkinitcpio, then enables services and GDM settings. The AI tools then
   come from self-updating native installs, as on Fedora: the Antigravity 2.0+ AppImage
   (user-owned under `/opt/Antigravity`, mounted through `fuse2`) and its CLI from the
-  checksummed vendor manifests, and Claude Code and Codex CLI from their official
-  installers under `~/.local/bin`; reruns keep a copy that updated itself. The
-  `antigravity`, `antigravity-cli`, `claude-code`, and `openai-codex` packages they
-  replace are removed. AUR work is last: a self-bootstrapped `yay` interactively presents
+  checksummed vendor manifests, and Claude Code, Codex CLI, and the goose CLI from
+  their official installers under `~/.local/bin`; reruns keep a copy that updated
+  itself. The `antigravity`, `antigravity-cli`, `claude-code`, and `openai-codex`
+  packages they replace are removed. goose Desktop has no Arch package upstream, so it
+  is the system Flatpak bundle from the latest stable `aaif-goose/goose` release
+  (SHA-256-checked against the GitHub asset digest; its runtimes come from flathub),
+  reinstalled when a newer release appears. AUR work is last: a self-bootstrapped `yay` interactively presents
   PKGBUILD diffs, updates installed AUR packages (including VCS/devel packages), and
-  installs the requested set. Arch's signed repositories provide Code OSS, OpenCode,
-  and Zed. The script removes VSCodium, Antigravity IDE, and any installed Antigravity
-  1.x package before installing their replacements. The package selection intentionally includes Intel/AMD graphics
+  installs the requested set, including Charm's own `crush-bin` for Crush (a CLI;
+  Charm ships no desktop app). Arch's signed repositories provide Code OSS and Zed.
+  The script removes VSCodium, Antigravity IDE, any installed Antigravity 1.x
+  package, and OpenCode (the `opencode` CLI and desktop packages, plus upstream's
+  `~/.opencode/bin` copy; its config and data stay) before installing their replacements. The package selection intentionally includes Intel/AMD graphics
   support and NVIDIA open modules for both `linux` and `linux-lts`. Rust comes only
   from rustup: an installed distro `rust` (and its split packages) is replaced by
   `rustup`, and each user gets the stable toolchain with rustfmt, clippy, and
@@ -237,7 +242,7 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   Wazuh enablement) runs right after the interactive AUR phase.
 - `setup-fedora-workstation.sh` — run as your normal user; Fedora 41+ (dnf5). Adds the
   signed third-party repos (`files/etc/yum.repos.d/`, the Tributary/Balun coprs, RPM Fusion,
-  Microsoft VS Code, Chrome, sing-box; the PowerShell repo on x86_64, plus the Steam/Plex
+  Microsoft VS Code, Chrome, Charm (for Crush), sing-box; the PowerShell repo on x86_64, plus the Steam/Plex
   repos in the full profile), installs the dnf and flatpak sets,
   applies available DNF/Flatpak updates, and installs Zed plus native AI tools. Rust
   comes only from rustup (`rustup-init` per user, stable with rustfmt, clippy, and
@@ -257,9 +262,15 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   Installs `dnf5-plugin-automatic` and enables `dnf5-automatic.timer` immediately,
   with the controller setup's `apply_updates = yes` and `reboot = when-needed`
   policy in `/etc/dnf/automatic.conf`.
-  Antigravity 2.0+ and its CLI, OpenCode, and Zed resolve the latest stable native
-  artifacts and their published checksums on each run; Codex and Claude Code use
-  OpenAI's and Anthropic's checksum-verifying native installers under `~/.local/bin`.
+  Antigravity 2.0+ and its CLI, goose Desktop, and Zed resolve the latest stable native
+  artifacts and their published checksums on each run; Codex, Claude Code, and the
+  goose CLI use OpenAI's, Anthropic's, and goose's native installers under
+  `~/.local/bin` (goose non-interactively; `goose update` also refreshes it). goose
+  Desktop is upstream's Fedora RPM on x86_64; its arm64 RPM is not installable on
+  aarch64, so aarch64 gets the system Flatpak bundle from the same release. Crush (a
+  CLI; Charm ships no desktop app) comes from Charm's signed repository and updates
+  with DNF. OpenCode is purged: the script-managed `~/.local/bin/opencode`, upstream's
+  `~/.opencode/bin` copy, and any OpenCode CLI/desktop RPM (its config and data stay).
   Antigravity, its CLI, Claude Code, and Codex all update themselves in place. The
   Antigravity AppImage under `/opt/Antigravity` is owned by the desktop user (and
   needs the `fuse` package's `fusermount`); reruns keep a self-updated AppImage or
@@ -310,8 +321,17 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   updates itself. Claude Code, Codex CLI, and the Antigravity CLI come from each
   vendor's official per-user `install.ps1` so they update themselves; once a native
   command runs, the `Anthropic.ClaudeCode`, `OpenAI.Codex`, or `Google.AntigravityCLI`
-  WinGet package it replaces is uninstalled. The highest stable Python 3 minor-package channel is resolved from WinGet
-  rather than hard-coded. Antigravity IDE and VSCodium are removed, with
+  WinGet package it replaces is uninstalled. The goose CLI comes from goose's official
+  `download_cli.ps1` (non-interactive, `%USERPROFILE%\.local\bin`, put on the user PATH;
+  `goose update` refreshes it), and Goose Desktop from the latest stable
+  `aaif-goose/goose` release's `Goose-win32-x64.zip`, SHA-256-checked against the GitHub
+  asset digest and unpacked to `%LOCALAPPDATA%\Programs\Goose` with a Start menu
+  shortcut; that zip build does not update itself, so each run replaces it when a newer
+  release exists. Goose publishes x64 Windows builds only, so both are skipped on ARM64.
+  Crush (CLI only; there is no Crush desktop app) comes from Charm's
+  `charmbracelet.crush` WinGet package. The highest stable Python 3 minor-package channel is resolved from WinGet
+  rather than hard-coded. Antigravity IDE, VSCodium, and the OpenCode CLI and desktop app
+  (`SST.opencode`, `SST.OpenCodeDesktop`) are removed, with
   Microsoft VS Code kept as the supported Windows editor. One `winget export` snapshot
   decides the remaining state; `--include-unknown` keeps versionless registrations from
   silently freezing, so those vendor installers may run again. "Already installed" /

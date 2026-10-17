@@ -27,6 +27,15 @@ import uuid
 import zipfile
 
 PAYLOAD = Path(__file__).resolve().parent
+# Official vendor installers: (URL, shell, directory the installed command
+# resolves into when that installer owns it, Homebrew formula it supersedes).
+NATIVE_CLIS = {
+    'codex': ('https://chatgpt.com/codex/install.sh', '/bin/sh', '.codex/packages/standalone/releases', None),
+    'claude': ('https://claude.ai/install.sh', '/bin/bash', '.local/share/claude/versions', None),
+    # goose's installer replaces ~/.local/bin/goose itself; `goose update` uses the same channel.
+    'goose': ('https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh', '/bin/bash', '.local/bin',
+              'block-goose-cli'),
+}
 
 
 class Deferred(Exception):
@@ -313,7 +322,7 @@ class Workstation:
             self.emit('FAILED', label, str(exc) or type(exc).__name__)
         return None
 
-    def command(self, argv, *, mutate=False, capture=True, check=True, env=None, timeout=120):
+    def command(self, argv, *, mutate=False, capture=True, check=True, env=None, timeout=120, cwd=None):
         if mutate and self.preview:
             raise RuntimeError('Preview attempted a mutation: ' + str(argv[0]))
         args = [str(arg) for arg in argv]
@@ -322,7 +331,7 @@ class Workstation:
         process = subprocess.Popen(args, stdin=subprocess.DEVNULL if capture else None,
                                    stdout=subprocess.PIPE if capture else None,
                                    stderr=subprocess.PIPE if capture else None,
-                                   start_new_session=capture, env=env or self.env, text=True)
+                                   start_new_session=capture, env=env or self.env, cwd=cwd, text=True)
         started = time.monotonic()
         while True:
             elapsed = time.monotonic() - started
@@ -456,6 +465,8 @@ class Workstation:
         return matches[0] if matches else None
 
     def formula_installed(self, name):
+        # A tapped formula (user/tap/name) installs under its short name.
+        name = name.rsplit('/', 1)[-1]
         canonical = self.manifest['aliases'].get(name, name)
         # opt aliases also accommodate future current Python versions offline.
         roots = [self.prefix / 'Cellar' / canonical, self.prefix / 'opt' / name]
@@ -486,11 +497,15 @@ class Workstation:
         canonical = self.manifest['aliases'].get(name, name)
         if installed and (self.args.no_upgrade or not {name, canonical} & self.outdated):
             self.emit('CURRENT', kind + ' ' + name); return
+        if kind == 'formula' and '/' in name and not installed:
+            # Vendor taps are not tapped implicitly by every brew command.
+            self.command([self.brew, 'tap', name.rsplit('/', 1)[0]], mutate=True, capture=False)
         data = json.loads(self.command([self.brew, 'info', '--json=v2', '--' + kind, name]).stdout)
         info = data['formulae' if kind == 'formula' else 'casks'][0]
         if info.get('disabled') or info.get('deprecated'):
             raise Deferred('Homebrew has disabled/deprecated ' + name)
-        if kind == 'formula':
+        if kind == 'formula' and '/' not in name:
+            # Vendor tap formulae install the vendor's own checksummed release instead of a bottle.
             bottles = info.get('bottle', {}).get('stable', {}).get('files', {})
             if not any(key == 'all' or key.startswith('arm64_') and key != 'arm64_linux' for key in bottles):
                 raise Deferred('No validated Apple Silicon bottle for ' + name)
@@ -699,33 +714,40 @@ class Workstation:
             self.emit('CHANGED', app['name'], 'engine archive; original game assets omitted')
 
     def native_cli(self, name):
+        url, shell, releases, legacy = NATIVE_CLIS[name]
         path = self.home / '.local/bin' / name
+        superseded = legacy is not None and self.formula_installed(legacy)
         existing = path if path.exists() else None
-        if not existing:
+        if not existing and not superseded:
             for folder in (self.prefix / 'bin', Path('/usr/local/bin')):
                 if (folder / name).exists():
                     existing = folder / name; break
         if self.preview:
-            self.emit('CURRENT' if existing else 'DRIFT', name, 'native CLI; no execution in preview'); return
-        if existing:
-            if self.args.no_upgrade:
-                self.emit('CURRENT', name, 'existing owner retained'); return
-            target = existing.resolve()
-            owned = (name == 'codex' and str(target).startswith(str(self.home / '.codex/packages/standalone/releases') + '/')) or (
-                name == 'claude' and str(target).startswith(str(self.home / '.local/share/claude/versions') + '/'))
-            if not owned:
-                self.emit('CURRENT', name, 'other installer owner retained'); return
-        url ={'codex': 'https://chatgpt.com/codex/install.sh', 'claude': 'https://claude.ai/install.sh'}[name]
+            self.emit('CURRENT' if existing else 'DRIFT', name, 'native CLI; no execution in preview')
+        elif existing and self.args.no_upgrade:
+            self.emit('CURRENT', name, 'existing owner retained')
+        elif existing and not str(existing.resolve()).startswith(str(self.home / releases) + '/'):
+            self.emit('CURRENT', name, 'other installer owner retained')
+        else:
+            self.native_install(name, url, shell, path)
+        if superseded:
+            # Setup never removes packages; ~/.local/bin already shadows this copy.
+            raise Deferred(f'Superseded Homebrew copy remains; run: brew uninstall --formula {legacy}')
+
+    def native_install(self, name, url, shell, path):
         with tempfile.TemporaryDirectory(prefix='macos-cli-') as temporary:
             installer = Path(temporary) / 'install.sh'
             self.fetch(url, installer)
-            shell = '/bin/sh' if name == 'codex' else '/bin/bash'
             self.command([shell, '-n', installer])
             env = dict(self.env, PATH=str(self.home / '.local/bin') + ':' + self.env['PATH'])
             if name == 'codex':
                 env.update(CODEX_INSTALL_DIR=str(self.home / '.local/bin'), CODEX_NON_INTERACTIVE='true',
                            CODEX_INSTALLER_USE_RELEASES_OPENAI_COM='true')
-            self.command([shell, installer], mutate=True, capture=False, env=env)
+            if name == 'goose':
+                # ~/.local/bin is already on PATH above, so the installer leaves shell startup files alone.
+                env.update(GOOSE_BIN_DIR=str(self.home / '.local/bin'), CONFIGURE='false')
+            # goose downloads and unpacks its archive in the working directory.
+            self.command([shell, installer], mutate=True, capture=False, env=env, cwd=temporary)
         if not path.exists() or not os.access(path, os.X_OK):
             raise RuntimeError(name + ' native installation did not produce a command')
         self.emit('CHANGED', name, 'official native installer (upstream verifies release checksums)')
@@ -733,19 +755,9 @@ class Workstation:
     def feed_release(self, cli):
         data = json.loads(self.fetch(cli['feed']))
         # attempt() contains RuntimeError, not the TypeError a wrongly shaped feed would raise.
-        def mapping(value):
-            if not isinstance(value, dict):
-                raise RuntimeError('Malformed release feed for ' + cli['name'])
-            return value
-        mapping(data)
-        if cli.get('asset'):
-            # opencode.ai distribution feed: the channel the desktop app also follows.
-            if data.get('channel') != 'latest' or not data.get('active'):
-                raise Deferred('Inactive or unexpected release channel for ' + cli['name'])
-            entry = mapping(mapping(mapping(data.get('metadata')).get('files')).get(cli['asset']))
-            url, algorithm, digest = entry.get('url'), 'sha256', entry.get('sha256')
-        else:
-            url, algorithm, digest = data.get('url'), 'sha512', data.get('sha512')
+        if not isinstance(data, dict):
+            raise RuntimeError('Malformed release feed for ' + cli['name'])
+        url, algorithm, digest = data.get('url'), 'sha512', data.get('sha512')
         version = data.get('version')
         if not isinstance(version, str) or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version):
             raise RuntimeError('Invalid release version for ' + cli['name'])
@@ -897,6 +909,42 @@ class Workstation:
         if self.formula_installed('rust'):
             raise RuntimeError('Homebrew rust formula is still installed')
         self.emit('CHANGED', 'formula rust', 'purged in favor of rustup')
+
+    def retire_opencode(self):
+        # OpenCode is replaced by Goose and Crush. Remove the copies earlier runs
+        # installed: the cask, the formula, and the receipt-owned feed build with its
+        # link. Other owners and ~/.config/opencode / ~/.local/share/opencode stay.
+        packages = [(kind, name) for kind, name in (('cask', 'opencode-desktop'), ('formula', 'opencode'))
+                    if (self.formula_installed(name) if kind == 'formula' else
+                        (self.prefix / 'Caskroom' / name / '.metadata').is_dir())]
+        receipt = self.receipts.get('clis', {}).get('opencode', {})
+        binary = self.home / '.opencode/bin/opencode'
+        owned = receipt.get('path') == str(binary) and binary.is_file() and not binary.is_symlink()
+        public = self.home / '.local/bin/opencode'
+        linked = public.is_symlink() and os.readlink(public) == self.receipts.get('links', {}).get(str(public)) == str(binary)
+        if self.preview:
+            for kind, name in packages:
+                self.emit('DRIFT', kind + ' ' + name, 'retired; replaced by Goose and Crush')
+            if owned or linked:
+                self.emit('DRIFT', 'OpenCode CLI', 'retired; replaced by Goose and Crush')
+            return
+        for kind, name in packages:
+            self.command([self.brew, 'uninstall', '--' + kind, name], mutate=True, capture=False)
+            if self.formula_installed(name) if kind == 'formula' else (self.prefix / 'Caskroom' / name / '.metadata').is_dir():
+                raise RuntimeError('Homebrew ' + kind + ' ' + name + ' is still installed')
+            self.emit('CHANGED', kind + ' ' + name, 'retired; replaced by Goose and Crush')
+        if linked:
+            public.unlink()
+            del self.receipts['links'][str(public)]
+        if owned:
+            binary.unlink()
+            for folder in (binary.parent, binary.parent.parent):
+                with contextlib.suppress(OSError):
+                    folder.rmdir()
+        if receipt and (owned or not binary.exists()):
+            del self.receipts['clis']['opencode']
+        if owned or linked:
+            self.emit('CHANGED', 'OpenCode CLI', 'retired; replaced by Goose and Crush')
 
     def brew_cleanup(self):
         # Install-time cleanup is disabled for quiet, predictable package steps;
@@ -1267,8 +1315,9 @@ class Workstation:
         self.attempt('Rust', self.rust)
         for app in self.selected_apps():
             self.attempt(app['name'], self.application, app)
+        self.attempt('OpenCode retirement', self.retire_opencode)
         self.brew_cleanup()
-        for name in ('codex', 'claude'):
+        for name in NATIVE_CLIS:
             self.attempt(name, self.native_cli, name)
         for cli in self.manifest['feed_clis']:
             self.attempt(cli['name'], self.feed_cli, cli)

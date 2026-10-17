@@ -45,10 +45,13 @@
 #   7. installs the self-updating native AI tools: the Antigravity 2.0+
 #      AppImage (user-owned under /opt/Antigravity so it can update itself,
 #      run through FUSE 2) and its CLI from checksummed vendor manifests, plus
-#      Claude Code and Codex CLI from their official native installers under
-#      ~/.local. Reruns keep a copy that updated itself rather than downgrade
-#      it, and the AUR/pacman antigravity, antigravity-cli, claude-code and
-#      openai-codex packages they replace are removed
+#      Claude Code, Codex CLI and the goose CLI from their official native
+#      installers under ~/.local. Reruns keep a copy that updated itself rather
+#      than downgrade it, and the AUR/pacman antigravity, antigravity-cli,
+#      claude-code and openai-codex packages they replace are removed. goose
+#      Desktop is upstream's Flatpak bundle, verified against the release
+#      digest. OpenCode (CLI and desktop) is purged before the package steps;
+#      Crush comes from Charm's crush-bin AUR package (step 12)
 #   8. ClamAV: freshclam daemon + one-time DB bootstrap, clamav-daemon (socket
 #      path /run/clamav/clamd.ctl), notify-only on-access scanning of the
 #      invoking user's ~/Downloads, and a mount-table watcher that
@@ -107,6 +110,18 @@ CODEX_INSTALLER_URL=https://chatgpt.com/codex/install.sh
 CLAUDE_INSTALLER_URL=https://claude.ai/install.sh
 # Packages the native installs replace; none of them can update in place.
 RETIRED_AI_PKGS=(antigravity antigravity-cli claude-code openai-codex)
+# OpenCode (CLI and desktop) is retired in favor of goose and Crush.
+OPENCODE_PKGS=(opencode opencode-bin opencode-desktop opencode-desktop-bin)
+GOOSE_CLI_INSTALLER_URL=https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh
+# Upstream publishes no Arch package; its Flatpak bundle is the distro-neutral
+# desktop build, checked against the digest GitHub publishes for the asset.
+GOOSE_RELEASE_API=https://api.github.com/repos/aaif-goose/goose/releases/latest
+GOOSE_DESKTOP_ASSET=io.github.block.Goose_stable_x86_64.flatpak
+GOOSE_DESKTOP_FLATPAK=io.github.block.Goose
+GOOSE_DESKTOP_VERSION=
+GOOSE_DESKTOP_URL=
+GOOSE_DESKTOP_SHA256=
+GOOSE_DESKTOP_MARKER=${XDG_STATE_HOME:-${HOME}/.local/state}/lan-ipxe/goose-desktop.release
 RUST_TOOLCHAIN=stable-x86_64-unknown-linux-gnu
 # Arch's rust split packages all pin the rust package version, which rustup's
 # unversioned provides cannot satisfy, so they leave together; the standalone
@@ -149,6 +164,7 @@ PKGS_OFFICIAL_CORE=(
   efibootmgr
   erofs-utils
   firewalld
+  flatpak
   flex
   fuse2
   gcc
@@ -205,7 +221,6 @@ PKGS_OFFICIAL_CORE=(
   nvidia-open-lts
   nvidia-utils
   opencl-mesa
-  opencode
   openssh
   pacman-contrib
   pipewire
@@ -279,6 +294,8 @@ PKGS_AUR_CORE=(
   android-sdk-platform-tools
   android-studio
   balun-bin
+  # Charm's own AUR package (published by its release pipeline).
+  crush-bin
   downgrade
   gnome-icon-theme
   gnome-icon-theme-symbolic
@@ -607,6 +624,37 @@ purge_legacy_antigravity_arch() {
   fi
 }
 
+# OpenCode is retired in favor of goose and Crush: remove the official/AUR
+# CLI and desktop packages and the copy upstream's installer keeps in
+# ~/.opencode/bin. OpenCode's own config and session data are left in place.
+# The optional home is a test seam.
+# shellcheck disable=SC2120
+purge_opencode_arch() {
+  local home=${1:-${HOME}} package installed=()
+  for package in "${OPENCODE_PKGS[@]}"; do
+    if pacman -Q "${package}" &>/dev/null; then
+      installed+=("${package}")
+    fi
+  done
+  if (( ${#installed[@]} )); then
+    sudo pacman -Rns --noconfirm "${installed[@]}" \
+      || die "could not remove OpenCode package(s): ${installed[*]}"
+    for package in "${installed[@]}"; do
+      ! pacman -Q "${package}" &>/dev/null \
+        || die "${package} is still installed"
+    done
+  fi
+  if [[ -e ${home}/.opencode/bin || -L ${home}/.opencode/bin ]]; then
+    rm -rf -- "${home}/.opencode/bin" || die "could not remove ${home}/.opencode/bin"
+    installed+=("${home}/.opencode/bin")
+  fi
+  if (( ${#installed[@]} )); then
+    note "OpenCode: removed ${installed[*]} (replaced by goose and Crush)"
+  else
+    note "OpenCode: absent"
+  fi
+}
+
 purge_replaced_editor_arch() {
   if pacman -Q vscodium-bin &>/dev/null; then
     sudo pacman -Rns --noconfirm vscodium-bin \
@@ -667,6 +715,45 @@ fetch_release_document() {
       ;;
   esac
   curl "${curl_args[@]}" "${url}"
+}
+
+# Sets RESOLVED_VERSION/URL/SHA256 from one stable GitHub release asset. The
+# digest comes from GitHub's release metadata and is bound to the exact
+# browser_download_url selected here. An optional fourth argument replaces the
+# default vX.Y.Z tag pattern; its first capture group is the version. Release immutability is reported but is
+# advisory because GitHub does not apply it retroactively to existing releases.
+RESOLVED_VERSION=
+RESOLVED_URL=
+RESOLVED_SHA256=
+resolve_github_release_asset() {
+  local repo=$1 api=$2 asset=$3 tag_pattern=${4:-'^v([0-9]+\.[0-9]+\.[0-9]+)$'}
+  local metadata line tag digest expected_prefix release_immutable
+  metadata=$(fetch_release_document "${api}") \
+    || die "could not query the latest ${repo} release"
+  line=$(jq -er --arg asset "${asset}" '
+      select(.draft == false and .prerelease == false)
+      | . as $release
+      | ($asset | split("{version}") | join($release.tag_name | ltrimstr("v"))) as $asset
+      | [.assets[] | select(.name == $asset)] as $matches
+      | select(($matches | length) == 1)
+      | [$release.tag_name, $matches[0].browser_download_url,
+         $matches[0].digest, ($release.immutable == true)] | @tsv
+    ' <<<"${metadata}") \
+    || die "latest ${repo} metadata is not one stable release with asset ${asset}"
+  IFS=$'\t' read -r tag RESOLVED_URL digest release_immutable <<<"${line}"
+  [[ ${tag} =~ ${tag_pattern} ]] \
+    || die "latest ${repo} release has an unsupported tag '${tag}'"
+  RESOLVED_VERSION=${BASH_REMATCH[1]}
+  asset=${asset//\{version\}/${RESOLVED_VERSION}}
+  expected_prefix="https://github.com/${repo}/releases/download/${tag}/"
+  [[ ${RESOLVED_URL} == "${expected_prefix}${asset}" ]] \
+    || die "latest ${repo} asset URL is outside the expected GitHub release path"
+  [[ ${digest} =~ ^sha256:([[:xdigit:]]{64})$ ]] \
+    || die "latest ${repo} asset has no valid published SHA-256 digest"
+  RESOLVED_SHA256=${BASH_REMATCH[1],,}
+  if [[ ${release_immutable} != true ]]; then
+    warn "latest ${repo} release is not GitHub-immutable; continuing with its published asset digest"
+  fi
 }
 
 parse_antigravity_desktop_manifest() {
@@ -1013,6 +1100,64 @@ install_claude_cli() {
   note "Claude Code: current official native release installed (self-updating)"
 }
 
+# goose's official installer fetches the current stable CLI into ~/.local/bin.
+# It downloads into the working directory, so it runs from WORK_DIR; with
+# ~/.local/bin on PATH it leaves shell startup files alone, and CONFIGURE=false
+# skips the interactive provider setup. `goose update` refreshes it later.
+install_goose_cli() {
+  local installer=${WORK_DIR}/goose-install.sh
+  curl --proto '=https' --tlsv1.2 -fsSL "${GOOSE_CLI_INSTALLER_URL}" -o "${installer}" \
+    || die "could not download the official goose CLI installer"
+  bash -n "${installer}" || die "the downloaded goose CLI installer is not valid Bash"
+  ( cd "${WORK_DIR}" \
+      && PATH="${HOME}/.local/bin:${PATH}" \
+         GOOSE_BIN_DIR="${HOME}/.local/bin" \
+         CONFIGURE=false \
+         bash "${installer}" ) </dev/null \
+    || die "the official goose CLI installer failed"
+  [[ -x ${HOME}/.local/bin/goose ]] \
+    || die "the goose CLI installer did not create ~/.local/bin/goose"
+  "${HOME}/.local/bin/goose" --version >/dev/null \
+    || die "the installed goose CLI is not runnable"
+  note "goose CLI: current official stable release installed"
+}
+
+# goose Desktop's Flatpak bundle from the latest stable release, checked
+# against the digest GitHub publishes for the asset. The bundle pulls its
+# Electron/Freedesktop runtimes from flathub; a marker records the installed
+# release because bundle installs carry no update source of their own.
+install_goose_desktop() {
+  local package=${WORK_DIR}/${GOOSE_DESKTOP_ASSET}
+  local marker_source=${WORK_DIR}/goose-desktop-release-marker
+  if flatpak info --system "${GOOSE_DESKTOP_FLATPAK}" >/dev/null 2>&1 \
+     && [[ -f ${GOOSE_DESKTOP_MARKER} ]] \
+     && grep -Fxq "version=${GOOSE_DESKTOP_VERSION}" "${GOOSE_DESKTOP_MARKER}" \
+     && grep -Fxq "sha256=${GOOSE_DESKTOP_SHA256}" "${GOOSE_DESKTOP_MARKER}"; then
+    note "goose Desktop ${GOOSE_DESKTOP_VERSION}: installed (Flatpak bundle)"
+    return 0
+  fi
+  curl --proto '=https' --tlsv1.2 -fL --retry 3 \
+    -o "${package}" "${GOOSE_DESKTOP_URL}" \
+    || die "could not download goose Desktop ${GOOSE_DESKTOP_VERSION}"
+  printf '%s  %s\n' "${GOOSE_DESKTOP_SHA256}" "${package}" | sha256sum -c - >/dev/null \
+    || die "goose Desktop checksum mismatch for ${GOOSE_DESKTOP_ASSET}"
+  sudo flatpak remote-add --if-not-exists --system flathub \
+    https://flathub.org/repo/flathub.flatpakrepo \
+    || die "could not add the flathub remote for the goose Desktop runtimes"
+  sudo flatpak install -y --system --noninteractive --bundle "${package}" \
+    || die "could not install the goose Desktop Flatpak bundle"
+  flatpak info --system "${GOOSE_DESKTOP_FLATPAK}" >/dev/null 2>&1 \
+    || die "goose Desktop is not installed after the Flatpak bundle install"
+  printf '%s\n' \
+    'managed-by=lan-ipxe/setup-arch-workstation.sh' \
+    "version=${GOOSE_DESKTOP_VERSION}" \
+    "source-url=${GOOSE_DESKTOP_URL}" \
+    "sha256=${GOOSE_DESKTOP_SHA256}" \
+    >"${marker_source}"
+  put_file "${marker_source}" "${GOOSE_DESKTOP_MARKER}" 0644
+  note "goose Desktop ${GOOSE_DESKTOP_VERSION}: installed from verified official release"
+}
+
 # Removes the pacman/AUR builds the native installs replace. The AUR
 # antigravity package owns /opt/Antigravity, so it must go before the AppImage
 # install claims that path; the CLI packages go after their native successors
@@ -1047,13 +1192,15 @@ verify_native_ai_tools_arch() {
     || die "the Antigravity AppImage is not installed"
   command -v antigravity >/dev/null \
     || die "the antigravity command is unavailable"
-  for package in agy claude codex; do
+  for package in agy claude codex goose; do
     [[ -x ${HOME}/.local/bin/${package} ]] \
       || die "the native ${package} command is missing from ~/.local/bin"
   done
   "${HOME}/.local/bin/agy" --version >/dev/null 2>&1 \
     || die "the installed Antigravity CLI is not runnable"
-  note "Antigravity AppImage, agy, claude, codex: native and self-updating"
+  flatpak info --system "${GOOSE_DESKTOP_FLATPAK}" >/dev/null 2>&1 \
+    || die "goose Desktop is not installed"
+  note "Antigravity AppImage, agy, claude, codex, goose: native; goose Desktop: Flatpak bundle"
 }
 
 # Rust comes only from rustup. rustup conflicts with Arch's rust package, so
@@ -1524,7 +1671,18 @@ run_check() {
   else
     report DRIFT "Antigravity AppImage: not installed under ${ANTIGRAVITY_INSTALL_DIR}"
   fi
-  for package in agy claude codex; do
+  for package in "${OPENCODE_PKGS[@]}"; do
+    pacman -Q "${package}" &>/dev/null \
+      && report DRIFT "${package}: installed (OpenCode is replaced by goose and Crush)"
+  done
+  [[ -e ${HOME}/.opencode/bin ]] \
+    && report DRIFT "${HOME}/.opencode/bin: present (OpenCode is replaced by goose and Crush)"
+  if flatpak info --system "${GOOSE_DESKTOP_FLATPAK}" >/dev/null 2>&1; then
+    report CURRENT "goose Desktop: Flatpak ${GOOSE_DESKTOP_FLATPAK}"
+  else
+    report DRIFT "goose Desktop: Flatpak ${GOOSE_DESKTOP_FLATPAK} not installed"
+  fi
+  for package in agy claude codex goose; do
     if [[ -x ${HOME}/.local/bin/${package} ]]; then
       report CURRENT "native ${package}: ~/.local/bin/${package}"
     else
@@ -1591,7 +1749,8 @@ print_plan() {
   else
     printf 'PLAN: [multilib] not required by core; left as configured\n'
   fi
-  printf 'PLAN: remove legacy antigravity-ide / Antigravity < 2.0 and vscodium-bin if installed\n'
+  printf 'PLAN: remove legacy antigravity-ide / Antigravity < 2.0, vscodium-bin and OpenCode (%s, ~/.opencode/bin) if installed\n' \
+    "${OPENCODE_PKGS[*]}"
   if (( NO_UPGRADE )); then
     printf 'PLAN: --no-upgrade: skip pacman -Syu; refuse unless every repository sync DB exists\n'
   else
@@ -1638,7 +1797,9 @@ print_plan() {
     "$( (( NO_UPGRADE )) && echo 'missing only' || echo 'latest verified release')"
   printf '  %s\n' 'Antigravity AppImage -> /opt/Antigravity (user-owned)' \
     'agy -> ~/.local/bin' 'claude -> ~/.local/bin (official installer)' \
-    'codex -> ~/.local/bin (official installer)'
+    'codex -> ~/.local/bin (official installer)' \
+    'goose -> ~/.local/bin (official installer)' \
+    "goose Desktop -> system Flatpak ${GOOSE_DESKTOP_FLATPAK} (verified release bundle)"
   printf 'PLAN: remove pacman/AUR builds replaced by the native installs: %s\n' \
     "${RETIRED_AI_PKGS[*]}"
   printf 'PLAN: bootstrap yay-bin from the AUR if needed (interactive PKGBUILD review)\n'
@@ -1651,7 +1812,7 @@ print_plan() {
   for package in "${PKGS_AUR[@]}"; do
     printf '  %s\n' "${package}"
   done
-  printf 'PLAN: verify native Antigravity + CLI/Claude/Codex and the claude code codex opencode zed cargo rustc commands\n'
+  printf 'PLAN: verify native Antigravity + CLI/Claude/Codex/goose and the claude code codex crush goose zed cargo rustc commands\n'
 }
 
 #--- Preflight --------------------------------------------------------------
@@ -1696,6 +1857,7 @@ sudo -v || die "sudo authentication failed"
 log "Retired workstation packages"
 purge_legacy_antigravity_arch
 purge_replaced_editor_arch
+purge_opencode_arch
 
 #--- 1. [multilib] ----------------------------------------------------------
 # Must be enabled before any lib32-* / steam package can be installed. Only the
@@ -1943,6 +2105,25 @@ else
 fi
 remove_retired_ai_pkgs_arch antigravity-cli claude-code openai-codex
 
+# goose's installer tracks upstream's stable channel (`goose update` also
+# refreshes it); the desktop app is the Flatpak bundle from the latest release.
+log "goose CLI (official installer) + goose Desktop (verified Flatpak bundle)"
+if (( NO_UPGRADE )) && [[ -x ${HOME}/.local/bin/goose ]]; then
+  note "goose: installed; kept at its current version (--no-upgrade)"
+else
+  install_goose_cli
+fi
+if (( NO_UPGRADE )) && flatpak info --system "${GOOSE_DESKTOP_FLATPAK}" >/dev/null 2>&1; then
+  note "goose Desktop: installed; kept at its current version (--no-upgrade)"
+else
+  resolve_github_release_asset aaif-goose/goose "${GOOSE_RELEASE_API}" \
+    "${GOOSE_DESKTOP_ASSET}"
+  GOOSE_DESKTOP_VERSION=${RESOLVED_VERSION}
+  GOOSE_DESKTOP_URL=${RESOLVED_URL}
+  GOOSE_DESKTOP_SHA256=${RESOLVED_SHA256}
+  install_goose_desktop
+fi
+
 #--- 8. ClamAV ---------------------------------------------------------------
 # Light footprint by design: realtime coverage for ~/Downloads (where browser
 # downloads land) plus newly mounted removable media, not all of /home.
@@ -2183,7 +2364,7 @@ else
 fi
 
 verify_native_ai_tools_arch
-for command_name in claude code codex opencode zed; do
+for command_name in claude code codex crush goose zed; do
   PATH="${HOME}/.local/bin:${PATH}" command -v "${command_name}" >/dev/null \
     || die "expected workstation command is unavailable: ${command_name}"
 done

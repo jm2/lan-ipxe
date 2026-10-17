@@ -60,6 +60,7 @@
       "jq",
       "shellcheck",
       "ripgrep",
+      "charmbracelet/tap/crush",
       "autoconf",
       "automake",
       "libtool",
@@ -142,11 +143,11 @@
       "cask": "claude"
     },
     {
-      "name": "OpenCode",
-      "app": "OpenCode.app",
-      "id": "ai.opencode.desktop",
+      "name": "Goose",
+      "app": "Goose.app",
+      "id": "com.electron.goose",
       "profile": "core",
-      "cask": "opencode-desktop"
+      "cask": "block-goose"
     },
     {
       "name": "Zed",
@@ -469,18 +470,6 @@
     }
   ],
   "feed_clis": [
-    {
-      "name": "OpenCode CLI",
-      "command": "opencode",
-      "feed": "https://opencode.ai/update/api/latest/cli/opencode/",
-      "asset": "opencode-darwin-arm64.zip",
-      "url_prefix": "https://opencode.ai/files/bin/",
-      "url_suffix": "/opencode-darwin-arm64.zip",
-      "member": "opencode",
-      "path": ".opencode/bin/opencode",
-      "team": "5NZ4Q7NXJ4",
-      "homebrew": ["formula", "opencode"]
-    },
     {
       "name": "Antigravity CLI",
       "command": "agy",

@@ -28,7 +28,8 @@
 #
 # What it does, in order:
 #   1. signed third-party repos: VS Code, the jmsqrd/tributary and
-#      jmsqrd/balun coprs, RPM Fusion free+nonfree, Chrome, sing-box; on
+#      jmsqrd/balun coprs, RPM Fusion free+nonfree, Chrome, Charm (Crush),
+#      sing-box; on
 #      x86_64 also Microsoft (PowerShell), plus (full) the RPM Fusion steam
 #      repo and Plex Media Server. The abandoned Antigravity 1.x RPM
 #      repo/package, VSCodium and the Claude Code RPM repo/key are retired in
@@ -41,12 +42,14 @@
 #      checksummed from its GitHub release metadata, and OwnTone built into an
 #      RPM from its checksummed latest release tarball with
 #      files/rpm/owntone.spec
-#   4. Antigravity desktop 2.0+, Antigravity CLI, OpenCode, Claude Code,
-#      Codex CLI, and Zed using the latest native vendor artifacts/installers
-#      (checksummed from live upstream release metadata where upstream
-#      publishes digests). Antigravity, its CLI, Claude Code and Codex update
-#      themselves in place; reruns keep a self-updated copy rather than
-#      downgrading it, and the Claude Code RPM is removed
+#   4. Antigravity desktop 2.0+, Antigravity CLI, goose CLI + Desktop, Claude
+#      Code, Codex CLI, and Zed using the latest native vendor
+#      artifacts/installers (checksummed from live upstream release metadata
+#      where upstream publishes digests; goose Desktop is the x86_64 RPM, or
+#      the aarch64 Flatpak bundle). Antigravity, its CLI, Claude Code and
+#      Codex update themselves in place; reruns keep a self-updated copy
+#      rather than downgrading it, and the Claude Code RPM is removed. OpenCode
+#      (CLI and desktop) is purged; Crush comes from Charm's repository
 #   5. Rust via rustup only: a per-user stable toolchain with rustfmt, clippy
 #      and rust-analyzer (distro rust/cargo packages are purged)
 #   6. a checksum-pinned Ookla speedtest CLI into ~/.local/bin
@@ -137,10 +140,16 @@ ANTIGRAVITY_CLI_URL=
 ANTIGRAVITY_CLI_ARCHIVE_SHA512=
 ANTIGRAVITY_CLI_MANIFEST_BASE=https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests
 ANTIGRAVITY_DESKTOP_MANIFEST_BASE=https://antigravity-hub-auto-updater-974169037036.us-central1.run.app/manifest
-OPENCODE_VERSION=
-OPENCODE_URL=
-OPENCODE_ARCHIVE_SHA256=
-OPENCODE_RELEASE_API=https://api.github.com/repos/anomalyco/opencode/releases/latest
+GOOSE_CLI_INSTALLER_URL=https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh
+GOOSE_RELEASE_API=https://api.github.com/repos/aaif-goose/goose/releases/latest
+GOOSE_DESKTOP_RPM=Goose
+GOOSE_DESKTOP_FLATPAK=io.github.block.Goose
+GOOSE_DESKTOP_VERSION=
+GOOSE_DESKTOP_URL=
+GOOSE_DESKTOP_SHA256=
+GOOSE_DESKTOP_MARKER=${XDG_STATE_HOME:-${HOME}/.local/state}/lan-ipxe/goose-desktop.release
+# Charm publishes no key fingerprint; the repo file pins the key URL over TLS.
+CHARM_KEY_URL=https://repo.charm.sh/yum/gpg.key
 CODEX_INSTALLER_URL=https://chatgpt.com/codex/install.sh
 CLAUDE_INSTALLER_URL=https://claude.ai/install.sh
 ZED_VERSION=
@@ -175,6 +184,7 @@ PKGS=(
   bluez
   bluez-tools
   boost-devel
+  bzip2
   ccache
   chromium
   chrony
@@ -196,6 +206,7 @@ PKGS=(
   code
   colordiff
   cronie
+  crush
   cups
   cups-pk-helper
   curl
@@ -1149,11 +1160,11 @@ resolve_native_tool_releases() {
   resolve_antigravity_desktop_release
   resolve_antigravity_cli_release
 
-  resolve_github_release_asset anomalyco/opencode "${OPENCODE_RELEASE_API}" \
-    "${OPENCODE_ASSET}"
-  OPENCODE_VERSION=${RESOLVED_VERSION}
-  OPENCODE_URL=${RESOLVED_URL}
-  OPENCODE_ARCHIVE_SHA256=${RESOLVED_SHA256}
+  resolve_github_release_asset aaif-goose/goose "${GOOSE_RELEASE_API}" \
+    "${GOOSE_DESKTOP_ASSET}"
+  GOOSE_DESKTOP_VERSION=${RESOLVED_VERSION}
+  GOOSE_DESKTOP_URL=${RESOLVED_URL}
+  GOOSE_DESKTOP_SHA256=${RESOLVED_SHA256}
 
   resolve_github_release_asset zed-industries/zed "${ZED_RELEASE_API}" \
     "zed-linux-${ZED_ARCH}.tar.gz"
@@ -1161,7 +1172,7 @@ resolve_native_tool_releases() {
   ZED_URL=${RESOLVED_URL}
   ZED_ARCHIVE_SHA256=${RESOLVED_SHA256}
 
-  note "resolved Antigravity ${ANTIGRAVITY_VERSION}, Antigravity CLI ${ANTIGRAVITY_CLI_VERSION}, OpenCode ${OPENCODE_VERSION}, and Zed ${ZED_VERSION}"
+  note "resolved Antigravity ${ANTIGRAVITY_VERSION}, Antigravity CLI ${ANTIGRAVITY_CLI_VERSION}, goose Desktop ${GOOSE_DESKTOP_VERSION}, and Zed ${ZED_VERSION}"
 }
 
 # antigravity_appimage_extract <image> <member> <dir>: extracts one AppImage
@@ -1404,59 +1415,112 @@ install_antigravity_cli() {
   note "Antigravity CLI ${version}: installed as ~/.local/bin/agy"
 }
 
-# Optional bin directory keeps artifact/convergence tests isolated.
+# OpenCode is retired in favor of goose and Crush. Removes the CLI this script
+# installed (and its release marker), the copy upstream's installer keeps in
+# ~/.opencode/bin, and any OpenCode CLI/desktop RPM; OpenCode's own config and
+# session data are left in place. The optional home is a test seam.
 # shellcheck disable=SC2120
-install_opencode_cli() {
-  local bin_dir=${1:-${HOME}/.local/bin}
-  local dest=${bin_dir}/opencode archive=${WORK_DIR}/opencode.tar.gz
-  local marker=${dest}.lan-ipxe-release marker_source=${WORK_DIR}/opencode-release-marker
-  local extract_dir=${WORK_DIR}/opencode current_version='' archive_sha=''
-  local binary_sha='' expected_binary_sha=''
-  if [[ -x ${dest} && -f ${marker} ]] \
-     && grep -Fxq 'managed-by=lan-ipxe/setup-fedora-workstation.sh' "${marker}" \
-     && grep -Fxq "version=${OPENCODE_VERSION}" "${marker}" \
-     && grep -Fxq "asset=${OPENCODE_ASSET}" "${marker}" \
-     && grep -Fxq "archive-sha256=${OPENCODE_ARCHIVE_SHA256}" "${marker}"; then
-    current_version=$("${dest}" --version 2>/dev/null || true)
-    binary_sha=$(sha256sum -- "${dest}") || die "could not hash ${dest}"
-    binary_sha=${binary_sha%% *}
-    expected_binary_sha=$(sed -n 's/^binary-sha256=//p' "${marker}" | tail -1)
-    if [[ ${current_version} == "${OPENCODE_VERSION}" \
-          && ${binary_sha} == "${expected_binary_sha}" ]]; then
-      note "OpenCode ${OPENCODE_VERSION}: present and verified"
-      return 0
+remove_legacy_opencode_fedora() {
+  local home=${1:-${HOME}} path packages=() removed=()
+  for path in "${home}/.local/bin/opencode" "${home}/.local/bin/opencode.lan-ipxe-release" \
+              "${home}/.opencode/bin"; do
+    if [[ -e ${path} || -L ${path} ]]; then
+      rm -rf -- "${path}" || die "could not remove ${path}"
+      removed+=("${path}")
     fi
+  done
+  mapfile -t packages < <(rpm -qa --qf '%{NAME}\n' 2>/dev/null \
+    | grep -Ei '^opencode(-desktop)?$' || true)
+  if (( ${#packages[@]} )); then
+    sudo dnf -y remove "${packages[@]}" \
+      || die "could not remove OpenCode package(s): ${packages[*]}"
+    removed+=("${packages[@]}")
   fi
+  if (( ${#removed[@]} )); then
+    note "OpenCode: removed ${removed[*]} (replaced by goose and Crush)"
+  else
+    note "OpenCode: absent"
+  fi
+}
+
+# goose's official installer fetches the current stable CLI into ~/.local/bin.
+# It downloads into the working directory, so it runs from WORK_DIR; with
+# ~/.local/bin on PATH it leaves shell startup files alone, and CONFIGURE=false
+# skips the interactive provider setup. `goose update` refreshes it later.
+install_goose_cli() {
+  local installer=${WORK_DIR}/goose-install.sh
+  curl --proto '=https' --tlsv1.2 -fsSL "${GOOSE_CLI_INSTALLER_URL}" -o "${installer}" \
+    || die "could not download the official goose CLI installer"
+  bash -n "${installer}" || die "the downloaded goose CLI installer is not valid Bash"
+  ( cd "${WORK_DIR}" \
+      && PATH="${HOME}/.local/bin:${PATH}" \
+         GOOSE_BIN_DIR="${HOME}/.local/bin" \
+         CONFIGURE=false \
+         bash "${installer}" ) </dev/null \
+    || die "the official goose CLI installer failed"
+  [[ -x ${HOME}/.local/bin/goose ]] \
+    || die "the goose CLI installer did not create ~/.local/bin/goose"
+  "${HOME}/.local/bin/goose" --version >/dev/null \
+    || die "the installed goose CLI is not runnable"
+  note "goose CLI: current official stable release installed"
+}
+
+# goose Desktop from the latest stable release, checked against the digest
+# GitHub publishes for the asset. x86_64 installs upstream's Fedora RPM; the
+# arm64 RPM is built for an architecture name RPM does not accept on aarch64,
+# so aarch64 installs the Flatpak bundle from the same release instead.
+install_goose_desktop() {
+  local package=${WORK_DIR}/${GOOSE_DESKTOP_URL##*/}
+  local marker_source=${WORK_DIR}/goose-desktop-release-marker
+  case ${GOOSE_DESKTOP_ASSET} in
+    *.rpm)
+      if [[ $(installed_rpm_version "${GOOSE_DESKTOP_RPM}") == "${GOOSE_DESKTOP_VERSION}" ]]; then
+        note "goose Desktop ${GOOSE_DESKTOP_VERSION}: installed (RPM)"
+        return 0
+      fi
+      ;;
+    *.flatpak)
+      if flatpak info --system "${GOOSE_DESKTOP_FLATPAK}" >/dev/null 2>&1 \
+         && [[ -f ${GOOSE_DESKTOP_MARKER} ]] \
+         && grep -Fxq "version=${GOOSE_DESKTOP_VERSION}" "${GOOSE_DESKTOP_MARKER}" \
+         && grep -Fxq "sha256=${GOOSE_DESKTOP_SHA256}" "${GOOSE_DESKTOP_MARKER}"; then
+        note "goose Desktop ${GOOSE_DESKTOP_VERSION}: installed (Flatpak bundle)"
+        return 0
+      fi
+      ;;
+    *) die "unsupported goose Desktop asset: ${GOOSE_DESKTOP_ASSET}" ;;
+  esac
   curl --proto '=https' --tlsv1.2 -fL --retry 3 \
-    -o "${archive}" "${OPENCODE_URL}" \
-    || die "could not download OpenCode ${OPENCODE_VERSION}"
-  archive_sha=$(sha256sum -- "${archive}") || die "could not hash ${archive}"
-  archive_sha=${archive_sha%% *}
-  [[ ${archive_sha} == "${OPENCODE_ARCHIVE_SHA256}" ]] \
-    || die "OpenCode archive checksum mismatch for ${OPENCODE_ASSET}"
-  mkdir -p "${extract_dir}"
-  tar -xzf "${archive}" -C "${extract_dir}" opencode \
-    || die "OpenCode archive has an unexpected layout"
-  current_version=$("${extract_dir}/opencode" --version 2>/dev/null) \
-    || die "the verified OpenCode CLI is not runnable"
-  [[ ${current_version} == "${OPENCODE_VERSION}" ]] \
-    || die "OpenCode reported unexpected version ${current_version}"
-  binary_sha=$(sha256sum -- "${extract_dir}/opencode") \
-    || die "could not hash the extracted OpenCode binary"
-  binary_sha=${binary_sha%% *}
-  printf '%s\n' \
-    'managed-by=lan-ipxe/setup-fedora-workstation.sh' \
-    "version=${OPENCODE_VERSION}" \
-    "asset=${OPENCODE_ASSET}" \
-    "source-url=${OPENCODE_URL}" \
-    "archive-sha256=${OPENCODE_ARCHIVE_SHA256}" \
-    "binary-sha256=${binary_sha}" \
-    >"${marker_source}"
-  put_file "${extract_dir}/opencode" "${dest}" 0755
-  put_file "${marker_source}" "${marker}" 0644
-  "${dest}" --version >/dev/null 2>&1 \
-    || die "the installed OpenCode CLI is not runnable"
-  note "OpenCode ${current_version}: installed from verified native archive"
+    -o "${package}" "${GOOSE_DESKTOP_URL}" \
+    || die "could not download goose Desktop ${GOOSE_DESKTOP_VERSION}"
+  printf '%s  %s\n' "${GOOSE_DESKTOP_SHA256}" "${package}" | sha256sum -c - >/dev/null \
+    || die "goose Desktop checksum mismatch for ${package##*/}"
+  case ${GOOSE_DESKTOP_ASSET} in
+    *.rpm)
+      sudo dnf -y install "${package}" \
+        || die "could not install the goose Desktop RPM"
+      [[ $(installed_rpm_version "${GOOSE_DESKTOP_RPM}") == "${GOOSE_DESKTOP_VERSION}" ]] \
+        || die "goose Desktop ${GOOSE_DESKTOP_VERSION} is not the installed RPM version"
+      ;;
+    *.flatpak)
+      # The bundle pulls its Electron/Freedesktop runtimes from flathub.
+      sudo flatpak remote-add --if-not-exists --system flathub \
+        https://flathub.org/repo/flathub.flatpakrepo \
+        || die "could not add the flathub remote for the goose Desktop runtimes"
+      sudo flatpak install -y --system --noninteractive --bundle "${package}" \
+        || die "could not install the goose Desktop Flatpak bundle"
+      flatpak info --system "${GOOSE_DESKTOP_FLATPAK}" >/dev/null 2>&1 \
+        || die "goose Desktop is not installed after the Flatpak bundle install"
+      printf '%s\n' \
+        'managed-by=lan-ipxe/setup-fedora-workstation.sh' \
+        "version=${GOOSE_DESKTOP_VERSION}" \
+        "source-url=${GOOSE_DESKTOP_URL}" \
+        "sha256=${GOOSE_DESKTOP_SHA256}" \
+        >"${marker_source}"
+      put_file "${marker_source}" "${GOOSE_DESKTOP_MARKER}" 0644
+      ;;
+  esac
+  note "goose Desktop ${GOOSE_DESKTOP_VERSION}: installed from verified official release"
 }
 
 install_codex_cli() {
@@ -1719,6 +1783,9 @@ install_zed() {
 # installer) when the tool is already present; otherwise fail so it runs.
 tool_present() {
   case $1 in
+    goose-desktop)
+      rpm -q --quiet -- "${GOOSE_DESKTOP_RPM}" 2>/dev/null \
+        || flatpak info --system "${GOOSE_DESKTOP_FLATPAK}" >/dev/null 2>&1 ;;
     rpm:*) rpm -q --quiet -- "${1#rpm:}" 2>/dev/null ;;
     *) PATH="${HOME}/.local/bin:${PATH}" command -v "$1" >/dev/null ;;
   esac
@@ -1803,12 +1870,12 @@ select_profile() {
   SELECTED_PKGS=("${PKGS[@]}")
   SELECTED_FLATPAKS=("${FLATPAKS[@]}")
   SELECTED_SERVICES=("${SERVICES[@]}")
-  SELECTED_REPOS=(code google-chrome sing-box rpmfusion-free rpmfusion-nonfree)
+  SELECTED_REPOS=(code google-chrome charm sing-box rpmfusion-free rpmfusion-nonfree)
   local copr
   for copr in "${COPRS[@]}"; do
     SELECTED_REPOS+=("copr:copr.fedorainfracloud.org:${copr/\//:}")
   done
-  SELECTED_TOOLS=(antigravity agy opencode claude codex zed speedtest)
+  SELECTED_TOOLS=(antigravity agy goose goose-desktop claude codex zed speedtest)
   # LAN-reachable services for the source-bound workstation-lan zone. SSH is
   # listed too: firewalld puts each packet in exactly one zone, so LAN peers
   # never fall through to the default workstation zone (where SSH stays
@@ -1829,6 +1896,7 @@ select_profile() {
   MANAGED_FILES=(
     "etc/yum.repos.d/vscode.repo|/etc/yum.repos.d/vscode.repo"
     "etc/yum.repos.d/google-chrome.repo|/etc/yum.repos.d/google-chrome.repo"
+    "etc/yum.repos.d/charm.repo|/etc/yum.repos.d/charm.repo"
     "etc/yum.repos.d/wazuh.repo|/etc/yum.repos.d/wazuh.repo"
     "bashrc|${HOME}/.bashrc"
     "vimrc|${HOME}/.vimrc"
@@ -1895,7 +1963,7 @@ print_plan() {
   printf 'Profile: %s; mode: dry-run (offline; no sudo, network, or writes)\n' "${PROFILE}"
   printf 'Architecture: %s; upgrades: %s\n' "${ARCH}" \
     "$( (( NO_UPGRADE )) && echo 'skipped (--no-upgrade)' || echo 'dnf upgrade --refresh + flatpak update')"
-  printf 'PLAN: retire legacy Antigravity 1.x repo/package/settings, VSCodium, and the Claude Code RPM repo/key/package\n'
+  printf 'PLAN: retire legacy Antigravity 1.x repo/package/settings, VSCodium, the Claude Code RPM repo/key/package, and OpenCode (CLI + desktop)\n'
   printf 'PLAN: enable %d repositories:\n' "${#SELECTED_REPOS[@]}"
   printf '  %s\n' "${SELECTED_REPOS[@]}"
   printf 'PLAN: CA-bundle symlinks /etc/ssl/certs/ca-certificates.crt, /etc/pki/tls/certs/ca-bundle.crt\n'
@@ -2072,6 +2140,12 @@ check_state() {
     || check_report DRIFT "package claude-code: installed (replaced by the native install)"
   [[ ! -e ${LEGACY_CLAUDE_REPO} ]] \
     || check_report DRIFT "file ${LEGACY_CLAUDE_REPO}: present (retired)"
+  for dst in "${HOME}/.local/bin/opencode" "${HOME}/.opencode/bin"; do
+    [[ ! -e ${dst} && ! -L ${dst} ]] \
+      || check_report DRIFT "${dst}: present (OpenCode is replaced by goose and Crush)"
+  done
+  ! rpm -qa --qf '%{NAME}\n' 2>/dev/null | grep -Eiq '^opencode(-desktop)?$' \
+    || check_report DRIFT "OpenCode package: installed (replaced by goose and Crush)"
   ! rpm -q --quiet protobuf3-c 2>/dev/null \
     || check_report DRIFT "package protobuf3-c: installed (obsoletes protobuf-c; swapped back)"
   for id in "${SELECTED_FLATPAKS[@]}"; do
@@ -2154,11 +2228,7 @@ case ${ARCH} in
     ANTIGRAVITY_CLI_URL_SUFFIX=/linux-x64/cli_linux_x64.tar.gz
     ZED_ARCH=x86_64
     NAVIDROME_ARCH=amd64
-    if grep -qwi avx2 /proc/cpuinfo; then
-      OPENCODE_ASSET=opencode-linux-x64.tar.gz
-    else
-      OPENCODE_ASSET=opencode-linux-x64-baseline.tar.gz
-    fi
+    GOOSE_DESKTOP_ASSET='Goose-{version}-1.x86_64.rpm'
     ;;
   aarch64)
     SPEEDTEST_ARCHIVE_SHA256=${SPEEDTEST_ARCHIVE_SHA256_AARCH64}
@@ -2169,10 +2239,10 @@ case ${ARCH} in
     ANTIGRAVITY_CLI_URL_SUFFIX=/linux-arm/cli_linux_arm64.tar.gz
     ZED_ARCH=aarch64
     NAVIDROME_ARCH=arm64
-    OPENCODE_ASSET=opencode-linux-arm64.tar.gz
+    GOOSE_DESKTOP_ASSET=io.github.block.Goose_stable_aarch64.flatpak
     ;;
   *)
-    die "Antigravity, OpenCode, Codex, and Zed support only x86_64 and aarch64 (found ${ARCH})."
+    die "Antigravity, goose, Codex, and Zed support only x86_64 and aarch64 (found ${ARCH})."
     ;;
 esac
 log "Fedora ${FEDORA_VERSION} on ${ARCH} (profile: ${PROFILE}; x86_64-only extras: ${X86_64_EXTRAS}$( (( NO_UPGRADE )) && echo '; --no-upgrade'))"
@@ -2243,9 +2313,13 @@ ensure_symlink -s "${CA_BUNDLE}" /etc/pki/tls/certs/ca-bundle.crt
 
 #--- 1b. Repositories, continued (x86_64 repo files overwrite the disabled
 #        ones RPM Fusion ships, so they come after that install) ------------
-log "Repositories (Chrome, x86_64 extras, Microsoft, full-profile Steam/Plex, sing-box)"
+log "Repositories (Chrome, Charm, x86_64 extras, Microsoft, full-profile Steam/Plex, sing-box)"
 put_file -s "${FILES}/etc/yum.repos.d/google-chrome.repo" /etc/yum.repos.d/google-chrome.repo
 import_rpm_key "${GOOGLE_KEY_URL}" linux-packages-keymaster@google.com
+# Charm's signed repository is its documented Fedora channel for Crush.
+put_file -s "${FILES}/etc/yum.repos.d/charm.repo" /etc/yum.repos.d/charm.repo
+import_rpm_key "${CHARM_KEY_URL}" Charm
+dnf_repo_enabled charm || die "the Charm repository is not enabled"
 if (( IS_X86_64 )); then
   put_file -s "${FILES}/etc/yum.repos.d/microsoft-prod.repo" /etc/yum.repos.d/microsoft-prod.repo
 fi
@@ -2322,7 +2396,7 @@ if [[ ${ARCH} == aarch64 ]]; then
 fi
 # --no-upgrade resolves upstream releases only when a tool is still missing.
 if (( ! NO_UPGRADE )) || ! tool_present antigravity || ! tool_present agy \
-    || ! tool_present opencode || ! tool_present zed; then
+    || ! tool_present goose-desktop || ! tool_present zed; then
   log "Resolving latest verified native developer-tool releases"
   resolve_native_tool_releases
 fi
@@ -2331,8 +2405,15 @@ log "Antigravity 2.0+ desktop + CLI"
 keep_installed antigravity || install_antigravity_desktop
 keep_installed agy || install_antigravity_cli
 
-log "OpenCode CLI (verified native release)"
-keep_installed opencode || install_opencode_cli
+log "OpenCode retirement (replaced by goose and Crush)"
+remove_legacy_opencode_fedora
+
+# goose's installer tracks upstream's stable channel; the desktop app comes
+# from the same release line, verified against GitHub's published digest.
+# Crush is a package from Charm's signed repository (step 3).
+log "goose CLI (official installer) + goose Desktop (verified official release)"
+keep_installed goose || install_goose_cli
+keep_installed goose-desktop || install_goose_desktop
 
 # OpenAI's supported standalone installer resolves the current native release
 # and validates its published checksums before activating it under ~/.local.
@@ -2354,7 +2435,7 @@ remove_legacy_claude_rpm
 log "Zed (verified official native release)"
 keep_installed zed || install_zed
 
-for command_name in agy antigravity claude code codex opencode zed; do
+for command_name in agy antigravity claude code codex crush goose zed; do
   PATH="${HOME}/.local/bin:${PATH}" command -v "${command_name}" >/dev/null \
     || die "expected workstation command is unavailable: ${command_name}"
 done

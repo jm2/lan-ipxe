@@ -31,7 +31,7 @@ foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetLeg
 }
 foreach ($functionName in @('Write-Note', 'Invoke-WingetPackageSet', 'Get-RustupStableComponent',
                             'Test-RustupDefaultToolchain', 'Initialize-RustupToolchain',
-                            'Get-WindowsArchitectureName', 'Get-BalunRelease', 'Invoke-BalunStep')) {
+                            'Get-NativeProcessorArchitecture', 'Get-WindowsArchitectureName', 'Get-BalunRelease', 'Invoke-BalunStep')) {
     $functionAst = $ast.Find({
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $functionName
@@ -94,6 +94,10 @@ try {
         Assert-True ($text -match 'Rustlang\.Rustup') "$profileName dry run lists rustup"
         Assert-True ($text -match 'Balun: WinGet jm2\.Balun when it resolves') "$profileName dry run lists the Balun plan"
         Assert-True ($text -match 'Hyper-V: enable') "$profileName dry run lists the Hyper-V step"
+        Assert-True ($text -match 'goose CLI: https://raw\.githubusercontent\.com/aaif-goose/goose/main/download_cli\.ps1 .*AMD64 only') "$profileName dry run lists the x64-only goose CLI"
+        Assert-True ($text -match 'Goose Desktop \(AMD64 only; skipped elsewhere\)') "$profileName dry run lists the x64-only Goose Desktop"
+        Assert-True ($text -match 'charmbracelet\.crush') "$profileName dry run lists Crush"
+        Assert-True ($text.IndexOf('SST.opencode') -gt $text.IndexOf('Legacy packages removed') -and $text -match 'SST\.OpenCodeDesktop') "$profileName dry run purges, not installs, OpenCode"
         Assert-True (($text -match 'Valve\.Steam') -eq ($profileName -eq 'full')) "Steam listed only for full ($profileName)"
     }
 }

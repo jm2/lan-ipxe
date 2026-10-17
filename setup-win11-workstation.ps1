@@ -26,15 +26,25 @@ as presence-only or -NoUpgrade is given.
      presence-only Speedtest CLI and the Antigravity app, which updates
      itself. The legacy Antigravity IDE, VSCodium and
      standalone Rust MSI packages are removed in favor of Antigravity 2.0,
-     Microsoft VS Code and rustup. "Already installed" and "reboot required"
+     Microsoft VS Code and rustup; the OpenCode CLI and desktop app
+     (SST.opencode, SST.OpenCodeDesktop) are removed in favor of Goose and
+     Crush (charmbracelet.crush, Charm's own WinGet package; Crush has no
+     desktop app). "Already installed" and "reboot required"
      results count as success; any other failure is reported at the end
      (exit code 1) without stopping the run, so one broken installer never
      blocks the rest.
-  4. Claude Code, Codex CLI and the Antigravity CLI from each vendor's
-     official per-user installer, so they update themselves in place. The
-     WinGet packages they replace (Anthropic.ClaudeCode, OpenAI.Codex,
-     Google.AntigravityCLI) are uninstalled once the native command runs.
-  5. Rust through rustup only: a stable default toolchain (only when none is
+  4. Claude Code, Codex CLI, the Antigravity CLI and the goose CLI from each
+     vendor's official per-user installer, so they update themselves in
+     place. The WinGet packages they replace (Anthropic.ClaudeCode,
+     OpenAI.Codex, Google.AntigravityCLI) are uninstalled once the native
+     command runs. goose publishes x64 Windows builds only, so it is skipped
+     on ARM64.
+  5. Goose Desktop from the latest stable aaif-goose/goose release: the
+     official Goose-win32-x64.zip, SHA-256 checked against the GitHub asset
+     digest, unpacked per user under %LOCALAPPDATA%\Programs\Goose with a
+     Start menu shortcut. The zip build does not update itself, so each run
+     replaces it when a newer release exists. x64 only; skipped on ARM64.
+  6. Rust through rustup only: a stable default toolchain (only when none is
      configured) with rustfmt, clippy and rust-analyzer.
 
 Exit codes: 0 converged (or -DryRun), 1 error/failed install, 2 drift found by
@@ -45,16 +55,16 @@ core (default) or full; also accepted as -Profile. Full adds games/launchers and
 
 .PARAMETER Check
 Read-only state check: report CURRENT/DRIFT for OpenSSH, Hyper-V (with
--HyperV), every package in the profile, legacy packages, and the Rust
-toolchain. Exits 2 when anything drifted. Requires Windows and winget.
+-HyperV), every package in the profile, legacy packages, the native CLIs,
+Goose Desktop, and the Rust toolchain. Exits 2 when anything drifted. Requires Windows and winget.
 
 .PARAMETER DryRun
 Offline, read-only plan: print every step and WinGet ID the profile would
 apply without querying or changing anything. Runs on any PowerShell host.
 
 .PARAMETER NoUpgrade
-Install missing packages only; skip upgrade checks of installed packages and
-the rustup toolchain update.
+Install missing packages only; skip upgrade checks of installed packages,
+native CLI and Goose Desktop refreshes, and the rustup toolchain update.
 
 .PARAMETER HyperV
 Also enable the supported Hyper-V optional feature. Windows 11 Home is rejected;
@@ -99,6 +109,8 @@ $OpenSshDefaultShell = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.ex
 # core: every developer toolchain, editor, agent, browser and everyday utility.
 $WingetPackages = @(
     '7zip.7zip'
+    # Crush (CLI only; Charm ships no desktop app) from Charm's WinGet package.
+    'charmbracelet.crush'
     'GIMP.GIMP.3'
     'Git.Git'
     'GitHub.GitHubDesktop'
@@ -132,7 +144,6 @@ $WingetPackages = @(
     'Rufus.Rufus'
     # Rust comes only from rustup; the toolchain is initialized per user below.
     'Rustlang.Rustup'
-    'SST.opencode'
     'Tailscale.Tailscale'
     'Ventoy.Ventoy'
     'VideoLAN.VLC'
@@ -169,6 +180,9 @@ $WingetPresenceOnlyPackages = @(
 $WingetLegacyPackages = @(
     'Google.AntigravityIDE'
     'VSCodium.VSCodium'
+    # OpenCode CLI and desktop are replaced by Goose and Crush.
+    'SST.opencode'
+    'SST.OpenCodeDesktop'
     # Standalone Rust installers conflict with the rustup-managed toolchain.
     'Rustlang.Rust.GNU'
     'Rustlang.Rust.MSVC'
@@ -178,7 +192,11 @@ $RustComponents = @('rustfmt', 'clippy', 'rust-analyzer')
 # AI CLIs that update themselves come from each vendor's official per-user
 # installer: their WinGet portable/zip packages pin them to a WinGet-managed
 # copy that never self-updates. Each replaces the WinGet package named by
-# WingetId, which is uninstalled only after the native command is verified.
+# WingetId (when it has one), which is uninstalled only after the native
+# command is verified. Architectures, when present, lists the native
+# PROCESSOR_ARCHITECTURE values upstream builds for; others skip the tool.
+# AddToUserPath puts the command's directory on the user PATH for installers
+# that leave that to the user.
 $NativeCliTools = @(
     @{
         Name = 'Claude Code'
@@ -205,7 +223,27 @@ $NativeCliTools = @(
         WingetId = 'Google.AntigravityCLI'
         Environment = @{}
     }
+    @{
+        # The URL goose's install docs give; `goose update` refreshes it in place.
+        # Its default GOOSE_BIN_DIR is %USERPROFILE%\.local\bin. Upstream ships
+        # x64 Windows builds only and the installer rejects ARM64.
+        Name = 'goose CLI'
+        Installer = 'https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1'
+        Root = 'USERPROFILE'
+        RelativePath = '.local\bin\goose.exe'
+        Architectures = @('AMD64')
+        AddToUserPath = $true
+        Environment = @{ CONFIGURE = 'false' }
+    }
 )
+
+# Goose Desktop: Windows releases ship only the portable Goose-win32-x64.zip,
+# which does not update itself, so apply replaces it whenever the latest
+# stable release differs from the recorded one.
+$GooseRepo = 'aaif-goose/goose'
+$GooseDesktopAsset = 'Goose-win32-x64.zip'
+$GooseDesktopArchitectures = @('AMD64')
+$GooseDesktopMarkerName = '.lan-ipxe-release'
 
 # Balun (core, beside jm2.Tributary). Its WinGet manifest jm2.Balun is pending
 # review, so apply prefers WinGet as soon as the ID resolves and otherwise
@@ -457,6 +495,42 @@ function Invoke-WingetPackageSet {
     }
 }
 
+# The machine's architecture, even from a 32-bit or emulated host process.
+function Get-NativeProcessorArchitecture {
+    if ($env:PROCESSOR_ARCHITEW6432) { return $env:PROCESSOR_ARCHITEW6432 }
+    return $env:PROCESSOR_ARCHITECTURE
+}
+
+function Test-NativeCliSupported {
+    param([Parameter(Mandatory = $true)][hashtable]$Tool)
+    if (-not $Tool.ContainsKey('Architectures')) { return $true }
+    return @($Tool.Architectures) -contains (Get-NativeProcessorArchitecture)
+}
+
+# Appends a directory to the user PATH unless an entry already names it. The
+# registry value is edited directly so %VAR% entries stay unexpanded (the
+# .NET user-scope setter rewrites PATH as a plain string). Returns $true when
+# PATH changed; new sessions see it, this one is updated in place.
+function Add-UserPathEntry {
+    param([Parameter(Mandatory = $true)][string]$Directory)
+    $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+    try {
+        $raw = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $entries = @($raw -split ';' | Where-Object { $_ })
+        foreach ($entry in $entries) {
+            if ([Environment]::ExpandEnvironmentVariables($entry).TrimEnd('\') -ieq $Directory.TrimEnd('\')) {
+                return $false
+            }
+        }
+        $key.SetValue('Path', ((@($entries) + $Directory) -join ';'), [Microsoft.Win32.RegistryValueKind]::ExpandString)
+    }
+    finally {
+        $key.Close()
+    }
+    $env:Path = "$env:Path;$Directory"
+    return $true
+}
+
 function Get-NativeCliPath {
     param([Parameter(Mandatory = $true)][hashtable]$Tool)
     $base = [Environment]::GetEnvironmentVariable($Tool.Root)
@@ -485,9 +559,18 @@ function Invoke-NativeCliInstaller {
             [Environment]::SetEnvironmentVariable($name, $Tool.Environment[$name])
         }
         $hostPath = (Get-Process -Id $PID).Path
-        & $hostPath -NoProfile -ExecutionPolicy Bypass -File $installer | Out-Host
-        if ($LASTEXITCODE -ne 0) {
-            throw "the official $($Tool.Name) installer exited with $LASTEXITCODE"
+        # Some installers (goose) download their archive into the working
+        # directory; keep that inside the scratch directory.
+        Push-Location -LiteralPath $dir
+        try {
+            & $hostPath -NoProfile -ExecutionPolicy Bypass -File $installer | Out-Host
+            $code = $LASTEXITCODE
+        }
+        finally {
+            Pop-Location
+        }
+        if ($code -ne 0) {
+            throw "the official $($Tool.Name) installer exited with $code"
         }
     }
     finally {
@@ -513,9 +596,15 @@ function Invoke-NativeCliSet {
     )
     $current = @()
     $installedNow = @()
+    $skipped = @()
     $retired = @()
     $failed = @()
     foreach ($tool in $NativeCliTools) {
+        if (-not (Test-NativeCliSupported -Tool $tool)) {
+            Write-Note "$($tool.Name): skipped (upstream publishes no $(Get-NativeProcessorArchitecture) Windows build)"
+            $skipped += $tool.Name
+            continue
+        }
         $path = Get-NativeCliPath -Tool $tool
         try {
             if (-not $path) { throw "%$($tool.Root)% is not set" }
@@ -531,6 +620,9 @@ function Invoke-NativeCliSet {
                 }
             }
             if (-not (Test-NativeCliCommand -Path $path)) { throw "$path --version failed" }
+            if ($tool.AddToUserPath -and (Add-UserPathEntry -Directory (Split-Path -Parent $path))) {
+                Write-Note "$($tool.Name): added $(Split-Path -Parent $path) to the user PATH"
+            }
             if ($existing) { $current += $tool.Name } else { $installedNow += $tool.Name }
         }
         catch {
@@ -538,7 +630,7 @@ function Invoke-NativeCliSet {
             $failed += "install $($tool.Name)"
             continue
         }
-        if ($InstalledIds -notcontains $tool.WingetId) { continue }
+        if (-not $tool.WingetId -or $InstalledIds -notcontains $tool.WingetId) { continue }
         Write-Note "removing $($tool.WingetId) (replaced by the self-updating native install)"
         & winget uninstall --id $tool.WingetId --exact --source winget --silent --accept-source-agreements --disable-interactivity | Out-Host
         $code = $LASTEXITCODE
@@ -555,6 +647,7 @@ function Invoke-NativeCliSet {
     return [pscustomobject]@{
         Current = @($current)
         Installed = @($installedNow)
+        Skipped = @($skipped)
         RetiredWinget = @($retired)
         Failed = @($failed)
     }
@@ -651,7 +744,7 @@ function Test-WingetPackageAvailable {
 }
 
 function Get-WindowsArchitectureName {
-    $native = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+    $native = Get-NativeProcessorArchitecture
     switch ($native) {
         'AMD64' { return 'x86_64' }
         'ARM64' { return 'aarch64' }
@@ -784,6 +877,170 @@ function Invoke-BalunStep {
     }
 }
 
+#--- Goose Desktop (verified GitHub release zip) ----------------------------
+function Get-GooseDesktopRoot {
+    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { return $null }
+    return Join-Path (Join-Path $env:LOCALAPPDATA 'Programs') 'Goose'
+}
+
+# The release this script last unpacked, read from the marker beside Goose.exe;
+# $null when Goose Desktop is absent or was not installed by this script.
+function Get-GooseDesktopInstall {
+    $root = Get-GooseDesktopRoot
+    if (-not $root) { return $null }
+    $exe = Join-Path $root 'Goose.exe'
+    $marker = Join-Path $root $GooseDesktopMarkerName
+    if (-not (Test-Path -LiteralPath $exe) -or -not (Test-Path -LiteralPath $marker)) { return $null }
+    $fields = @{}
+    foreach ($line in @(Get-Content -LiteralPath $marker)) {
+        if ($line -match '^(?<Key>[a-z0-9-]+)=(?<Value>.*)$') { $fields[$Matches.Key] = $Matches.Value }
+    }
+    return [pscustomobject]@{ Version = [string]$fields['version']; Sha256 = [string]$fields['sha256']; Exe = $exe }
+}
+
+# Pure selection over GitHub's latest-release JSON: one stable vX.Y.Z release
+# with exactly one $GooseDesktopAsset under its own download path and a
+# published SHA-256 digest.
+function Select-GooseDesktopAsset {
+    param([Parameter(Mandatory = $true)]$Release)
+    if ($Release.prerelease -or $Release.draft) {
+        throw "latest $GooseRepo release is not a stable release"
+    }
+    $tag = [string]$Release.tag_name
+    if ($tag -notmatch '^v(?<Version>\d+\.\d+\.\d+)$') {
+        throw "latest $GooseRepo release has an unsupported tag '$tag'"
+    }
+    $version = $Matches.Version
+    $asset = @($Release.assets | Where-Object { $_.name -eq $GooseDesktopAsset })
+    if ($asset.Count -ne 1) {
+        throw "release $tag lacks exactly one $GooseDesktopAsset"
+    }
+    $url = [string]$asset[0].browser_download_url
+    if ($url -ne "https://github.com/$GooseRepo/releases/download/$tag/$GooseDesktopAsset") {
+        throw "$GooseDesktopAsset URL is outside the expected GitHub release path"
+    }
+    $digest = [string]$asset[0].digest
+    if ($digest -notmatch '^sha256:(?<Hash>[0-9a-fA-F]{64})$') {
+        throw "$GooseDesktopAsset has no published SHA-256 digest"
+    }
+    return [pscustomobject]@{
+        Version = $version
+        Name = $GooseDesktopAsset
+        Url = $url
+        Sha256 = $Matches.Hash.ToLowerInvariant()
+    }
+}
+
+function Get-GooseDesktopRelease {
+    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$GooseRepo/releases/latest" -Headers @{ 'User-Agent' = 'lan-ipxe-setup' }
+    return Select-GooseDesktopAsset -Release $release
+}
+
+# The unpacked app's root: the one directory holding Goose.exe beside the
+# Electron resources/ folder. The zip wraps it (dist-windows/) and also ships
+# the bundled CLI as resources\bin\goose.exe, which a case-insensitive name
+# match alone would pick up too.
+function Find-GooseDesktopAppDirectory {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $roots = @(Get-ChildItem -LiteralPath $Path -Recurse -File |
+        Where-Object { $_.Name -ieq 'Goose.exe' -and (Test-Path -LiteralPath (Join-Path $_.DirectoryName 'resources') -PathType Container) })
+    if ($roots.Count -ne 1) {
+        throw "the Goose Desktop archive does not contain exactly one Goose.exe app directory"
+    }
+    return $roots[0].DirectoryName
+}
+
+function Install-GooseDesktopShortcut {
+    param([Parameter(Mandatory = $true)][string]$Target)
+    $programs = [Environment]::GetFolderPath('Programs')
+    if ([string]::IsNullOrWhiteSpace($programs)) { throw 'the per-user Start menu Programs folder is unknown' }
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut((Join-Path $programs 'Goose.lnk'))
+    $shortcut.TargetPath = $Target
+    $shortcut.WorkingDirectory = Split-Path -Parent $Target
+    $shortcut.IconLocation = "$Target,0"
+    $shortcut.Save()
+}
+
+# Downloads and verifies the zip, unpacks it beside the install directory, and
+# swaps the new tree in only once it is complete; the previous copy is kept
+# until the swap succeeds (a running Goose blocks the rename).
+function Install-GooseDesktop {
+    param([Parameter(Mandatory = $true)]$Release)
+    $root = Get-GooseDesktopRoot
+    if (-not $root) { throw '%LOCALAPPDATA% is not set' }
+    $dir = Join-Path ([IO.Path]::GetTempPath()) ("goose-desktop-{0}" -f [Guid]::NewGuid().ToString('N'))
+    $staging = "$root.lan-ipxe-new"
+    $previous = "$root.lan-ipxe-old"
+    New-Item -ItemType Directory -Path $dir | Out-Null
+    try {
+        $archive = Join-Path $dir $Release.Name
+        Invoke-WebRequest -Uri $Release.Url -OutFile $archive -UseBasicParsing
+        $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+        if ($actual -ne $Release.Sha256) {
+            throw "Goose Desktop archive checksum mismatch: expected $($Release.Sha256), got $actual"
+        }
+        $extract = Join-Path $dir 'extract'
+        Expand-Archive -LiteralPath $archive -DestinationPath $extract
+        $appDirectory = Find-GooseDesktopAppDirectory -Path $extract
+        foreach ($path in @($staging, $previous)) {
+            if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
+        }
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $root) | Out-Null
+        Copy-Item -LiteralPath $appDirectory -Destination $staging -Recurse
+        Set-Content -LiteralPath (Join-Path $staging $GooseDesktopMarkerName) -Value @(
+            'managed-by=lan-ipxe/setup-win11-workstation.ps1'
+            "version=$($Release.Version)"
+            "source-url=$($Release.Url)"
+            "sha256=$($Release.Sha256)"
+        )
+        if (Test-Path -LiteralPath $root) {
+            try { Rename-Item -LiteralPath $root -NewName (Split-Path -Leaf $previous) }
+            catch { throw "could not replace $root (close Goose and re-run): $($_.Exception.Message)" }
+        }
+        try { Rename-Item -LiteralPath $staging -NewName (Split-Path -Leaf $root) }
+        catch {
+            if (Test-Path -LiteralPath $previous) { Rename-Item -LiteralPath $previous -NewName (Split-Path -Leaf $root) }
+            throw
+        }
+        if (Test-Path -LiteralPath $previous) { Remove-Item -LiteralPath $previous -Recurse -Force }
+    }
+    finally {
+        Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Install-GooseDesktopShortcut -Target (Join-Path $root 'Goose.exe')
+}
+
+# Returns 'current', 'installed', 'updated', 'skipped' or 'failed'.
+function Invoke-GooseDesktopStep {
+    param([switch]$NoUpgrade)
+    if ($GooseDesktopArchitectures -notcontains (Get-NativeProcessorArchitecture)) {
+        Write-Note "Goose Desktop: skipped (upstream publishes no $(Get-NativeProcessorArchitecture) Windows build)"
+        return 'skipped'
+    }
+    $existing = Get-GooseDesktopInstall
+    try {
+        if ($existing -and $NoUpgrade) {
+            Write-Note "Goose Desktop $($existing.Version): present (-NoUpgrade)"
+            return 'current'
+        }
+        $release = Get-GooseDesktopRelease
+        if ($existing -and $existing.Version -eq $release.Version -and $existing.Sha256 -eq $release.Sha256) {
+            Write-Note "Goose Desktop $($existing.Version): current"
+            return 'current'
+        }
+        Write-Note "Goose Desktop: installing verified release $($release.Version) ($($release.Name))"
+        Install-GooseDesktop -Release $release
+        if ($existing) { return 'updated' }
+        return 'installed'
+    }
+    catch {
+        Write-Warning "Goose Desktop: $($_.Exception.Message)"
+        return 'failed'
+    }
+}
+
 # -Check output: one CURRENT/DRIFT line per item, drift counted for the exit code.
 function Write-State {
     param(
@@ -829,8 +1086,15 @@ if ($DryRun) {
     foreach ($id in $WingetLegacyPackages) { Write-Note "    $id" }
     Write-Note 'Self-updating native CLIs (official per-user installers; the WinGet package each replaces is removed afterwards):'
     foreach ($tool in $NativeCliTools) {
-        Write-Note "    $($tool.Name): $($tool.Installer) -> %$($tool.Root)%\$($tool.RelativePath) (replaces $($tool.WingetId))"
+        $details = @()
+        if ($tool.WingetId) { $details += "replaces $($tool.WingetId)" }
+        if ($tool.ContainsKey('Architectures')) { $details += "$($tool.Architectures -join '/') only; skipped elsewhere" }
+        $suffix = if ($details.Count) { " ($($details -join '; '))" } else { '' }
+        Write-Note "    $($tool.Name): $($tool.Installer) -> %$($tool.Root)%\$($tool.RelativePath)$suffix"
     }
+    Write-Note "Goose Desktop ($($GooseDesktopArchitectures -join '/') only; skipped elsewhere): latest stable $GooseRepo release $GooseDesktopAsset,"
+    Write-Note '    SHA-256 checked against the GitHub asset digest, unpacked to %LOCALAPPDATA%\Programs\Goose + Start menu shortcut;'
+    Write-Note '    replaced when a newer release exists; skipped when present and -NoUpgrade'
     Write-Note "Rust: rustup stable default (when none set) + $($RustComponents -join ', ')"
     exit 0
 }
@@ -882,12 +1146,23 @@ if ($Check) {
         if ($installedIds -contains $id) { Write-State $false $id 'legacy package still installed' }
     }
     foreach ($tool in $NativeCliTools) {
+        if (-not (Test-NativeCliSupported -Tool $tool)) {
+            Write-Note "NOTE    $($tool.Name) (native): not available for $(Get-NativeProcessorArchitecture)"
+            continue
+        }
         $path = Get-NativeCliPath -Tool $tool
         $present = $path -and (Test-Path -LiteralPath $path)
         Write-State $present "$($tool.Name) (native)" $(if ($present) { $path } else { 'not installed' })
-        if ($installedIds -contains $tool.WingetId) {
+        if ($tool.WingetId -and $installedIds -contains $tool.WingetId) {
             Write-State $false $tool.WingetId 'replaced by the native install; removed on apply'
         }
+    }
+    if ($GooseDesktopArchitectures -contains (Get-NativeProcessorArchitecture)) {
+        $gooseDesktop = Get-GooseDesktopInstall
+        Write-State ($null -ne $gooseDesktop) 'Goose Desktop' $(if ($gooseDesktop) { "$($gooseDesktop.Version) (newer releases checked on apply)" } else { 'not installed' })
+    }
+    else {
+        Write-Note "NOTE    Goose Desktop: not available for $(Get-NativeProcessorArchitecture)"
     }
     $balun = Get-BalunInstall
     $balunOwner = if ($installedIds -contains $BalunWingetId) { "WinGet $BalunWingetId" } else { 'GitHub release' }
@@ -976,10 +1251,15 @@ $balunResult = Invoke-BalunStep -InstalledIds $installedIds -NoUpgrade:$NoUpgrad
 Write-Note "Balun: $balunResult"
 
 #--- 4. Self-updating native CLIs ------------------------------------------
-Write-Step 'Claude Code, Codex CLI and Antigravity CLI (official native installers)'
+Write-Step 'Claude Code, Codex CLI, Antigravity CLI and goose CLI (official native installers)'
 $nativeResult = Invoke-NativeCliSet -InstalledIds $installedIds -NoUpgrade:$NoUpgrade
 
-#--- 5. Rust toolchain (rustup only) ----------------------------------------
+#--- 5. Goose Desktop (verified release zip) --------------------------------
+Write-Step 'Goose Desktop (verified GitHub release)'
+$gooseDesktopResult = Invoke-GooseDesktopStep -NoUpgrade:$NoUpgrade
+Write-Note "Goose Desktop: $gooseDesktopResult"
+
+#--- 6. Rust toolchain (rustup only) ----------------------------------------
 Write-Step 'Rust (rustup stable + components)'
 $rustResult = Initialize-RustupToolchain -NoUpgrade:$NoUpgrade
 Write-Note "rustup: $rustResult"
@@ -992,7 +1272,7 @@ if ($wingetResult.Failed.Count)   { Write-Note "failed: $($wingetResult.Failed -
 if ($script:RebootNeeded) {
     Write-Warning 'A reboot is required to finish; re-run this script afterwards to pick up anything deferred.'
 }
-Write-Note "native CLIs: $($nativeResult.Installed.Count) installed now, $($nativeResult.Current.Count) current, $($nativeResult.RetiredWinget.Count) WinGet copies removed, $($nativeResult.Failed.Count) failed"
+Write-Note "native CLIs: $($nativeResult.Installed.Count) installed now, $($nativeResult.Current.Count) current, $($nativeResult.Skipped.Count) unsupported here, $($nativeResult.RetiredWinget.Count) WinGet copies removed, $($nativeResult.Failed.Count) failed"
 if ($nativeResult.Failed.Count) { Write-Note "failed: $($nativeResult.Failed -join ', ')" }
 if ($balunResult -eq 'deferred') { Write-Note 'deferred (re-run after a reboot): Balun' }
-if ($wingetResult.Failed.Count -or $nativeResult.Failed.Count -or $rustResult -eq 'failed' -or $balunResult -eq 'failed') { exit 1 }
+if ($wingetResult.Failed.Count -or $nativeResult.Failed.Count -or $rustResult -eq 'failed' -or $balunResult -eq 'failed' -or $gooseDesktopResult -eq 'failed') { exit 1 }

@@ -77,15 +77,25 @@ test_arch_catalog() (
 test_arch_developer_catalog() (
   load_helpers setup-arch-workstation.sh
   local package
-  for package in code opencode zed; do
+  for package in code zed; do
     array_contains "${package}" "${PKGS_OFFICIAL[@]}" \
       || fail "Arch official package set omits ${package}"
   done
+  for package in "${OPENCODE_PKGS[@]}"; do
+    ! array_contains "${package}" "${PKGS_OFFICIAL[@]}" "${PKGS_AUR[@]}" \
+      || fail "Arch still requests the retired OpenCode package ${package}"
+  done
+  array_contains crush-bin "${PKGS_AUR[@]}" \
+    || fail "Arch AUR set omits Charm's crush-bin package"
+  [[ ${GOOSE_CLI_INSTALLER_URL} == https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh \
+     && ${GOOSE_RELEASE_API} == https://api.github.com/repos/aaif-goose/goose/releases/latest \
+     && ${GOOSE_DESKTOP_ASSET} == io.github.block.Goose_stable_x86_64.flatpak ]] \
+    || fail 'Arch goose does not use the official installer and release bundle'
   ! array_contains vscodium-bin "${PKGS_OFFICIAL[@]}" \
     || fail 'Arch official package set still requests VSCodium'
   ! array_contains vscodium-bin "${PKGS_AUR[@]}" \
     || fail 'Arch AUR set still requests VSCodium'
-  grep -Fq 'for command_name in claude code codex opencode zed' \
+  grep -Fq 'for command_name in claude code codex crush goose zed' \
     "${REPO_ROOT}/setup-arch-workstation.sh" \
     || fail 'Arch does not enforce all requested developer-command postconditions'
 )
@@ -101,8 +111,11 @@ test_arch_native_flow_order() (
     $0 ~ /^ *install_claude_cli$/ { claude = NR }
     $0 ~ /^ *install_codex_cli$/ { codex = NR }
     $0 == "remove_retired_ai_pkgs_arch antigravity-cli claude-code openai-codex" { cli = NR }
+    $0 ~ /^ *install_goose_desktop$/ { goose = NR }
+    $0 == "purge_opencode_arch" { opencode = NR }
     $0 == "sudo -k" { aur = NR }
-    END { exit !(pkg && pkg < desktop && desktop < cli && claude < cli && codex < cli && cli < aur) }
+    END { exit !(opencode && opencode < pkg && pkg && pkg < desktop && desktop < cli \
+                 && claude < cli && codex < cli && cli < aur && goose && goose < aur) }
   ' "${script}" || fail 'Arch native-tool migration steps run in an unsafe order'
 )
 
@@ -260,7 +273,7 @@ setup_arch_native_fixture() {
   local tool
   printf '#!/bin/sh\nexit 0\n' >"${ANTIGRAVITY_INSTALL_DIR}/Antigravity.AppImage"
   chmod 0755 "${ANTIGRAVITY_INSTALL_DIR}/Antigravity.AppImage"
-  for tool in agy claude codex; do
+  for tool in agy claude codex goose; do
     printf '#!/bin/sh\nexit 0\n' >"${HOME}/.local/bin/${tool}"
     chmod 0755 "${HOME}/.local/bin/${tool}"
   done
@@ -271,6 +284,7 @@ test_arch_verify_good() (
   setup_arch_native_fixture good
   pacman() { [[ $1 == -Q ]] || return 97; return 1; }
   command() { [[ $1 == -v && $2 == antigravity ]]; }
+  flatpak() { [[ $* == "info --system ${GOOSE_DESKTOP_FLATPAK}" ]]; }
   verify_native_ai_tools_arch
 )
 
@@ -289,10 +303,12 @@ test_arch_verify_rejection() {
     command() {
       [[ $1 == -v && $2 == antigravity && ${scenario} != missing-desktop-command ]]
     }
+    flatpak() { [[ ${scenario} != missing-goose-desktop ]]; }
     case ${scenario} in
       missing-appimage) rm -f -- "${ANTIGRAVITY_INSTALL_DIR}/Antigravity.AppImage" ;;
       missing-cli) rm -f -- "${HOME}/.local/bin/agy" ;;
       missing-claude) rm -f -- "${HOME}/.local/bin/claude" ;;
+      missing-goose) rm -f -- "${HOME}/.local/bin/goose" ;;
       broken-cli) printf '#!/bin/sh\nexit 1\n' >"${HOME}/.local/bin/agy" ;;
     esac
     verify_native_ai_tools_arch
@@ -306,13 +322,14 @@ test_fedora_release_sources() (
      && -z ${ANTIGRAVITY_DESKTOP_SHA512} && -z ${ANTIGRAVITY_CLI_VERSION} \
      && -z ${ANTIGRAVITY_CLI_URL} && -z ${ANTIGRAVITY_CLI_ARCHIVE_SHA512} ]] \
     || fail 'Fedora still hard-codes an Antigravity desktop or CLI release'
-  [[ -z ${OPENCODE_VERSION} && -z ${OPENCODE_URL} \
-     && -z ${OPENCODE_ARCHIVE_SHA256} && -z ${ZED_VERSION} \
+  [[ -z ${GOOSE_DESKTOP_VERSION} && -z ${GOOSE_DESKTOP_URL} \
+     && -z ${GOOSE_DESKTOP_SHA256} && -z ${ZED_VERSION} \
      && -z ${ZED_URL} && -z ${ZED_ARCHIVE_SHA256} ]] \
-    || fail 'Fedora still hard-codes an OpenCode or Zed release'
+    || fail 'Fedora still hard-codes a goose Desktop or Zed release'
   [[ ${ANTIGRAVITY_DESKTOP_MANIFEST_BASE} == https://* \
      && ${ANTIGRAVITY_CLI_MANIFEST_BASE} == https://* \
-     && ${OPENCODE_RELEASE_API} == https://api.github.com/repos/anomalyco/opencode/releases/latest \
+     && ${GOOSE_RELEASE_API} == https://api.github.com/repos/aaif-goose/goose/releases/latest \
+     && ${GOOSE_CLI_INSTALLER_URL} == https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh \
      && ${ZED_RELEASE_API} == https://api.github.com/repos/zed-industries/zed/releases/latest ]] \
     || fail 'Fedora latest-release metadata sources are missing or non-HTTPS'
   [[ ${SPEEDTEST_VERSION} == 1.2.0 \
@@ -388,13 +405,22 @@ test_fedora_developer_catalog() (
     "${REPO_ROOT}/files/etc/yum.repos.d/microsoft-prod.repo" \
     || fail 'Microsoft production repo bypasses the fingerprint-verified local key'
 
+  array_contains crush "${PKGS[@]}" || fail 'Fedora package set omits Crush'
+  repo=${REPO_ROOT}/files/etc/yum.repos.d/charm.repo
+  grep -qx 'gpgcheck=1' "${repo}" && grep -qx 'sslverify=1' "${repo}" \
+    && grep -qx 'baseurl=https://repo.charm.sh/yum/' "${repo}" \
+    && grep -Fqx "gpgkey=${CHARM_KEY_URL}" "${repo}" \
+    || fail "Charm's repository is not the signed HTTPS repo Charm documents"
+  declare -f install_goose_cli | grep -Fq 'goose" --version' \
+    || fail 'Fedora goose installer lacks a runnable-command postcondition'
+
   [[ ${CODEX_INSTALLER_URL} == https://chatgpt.com/codex/install.sh ]] \
     || fail 'Fedora Codex CLI does not use the official native installer URL'
   declare -f install_codex_cli | grep -Fq 'codex" --version' \
     || fail 'Fedora Codex installer lacks a runnable-command postcondition'
   declare -f install_zed | grep -Fq 'zed" --version' \
     || fail 'Fedora Zed installer lacks a runnable-command postcondition'
-  grep -Fq 'for command_name in agy antigravity claude code codex opencode zed' \
+  grep -Fq 'for command_name in agy antigravity claude code codex crush goose zed' \
     "${REPO_ROOT}/setup-fedora-workstation.sh" \
     || fail 'Fedora does not enforce all requested developer-command postconditions'
 )
@@ -443,35 +469,18 @@ test_fedora_key_fingerprint_enforcement() (
   [[ ${rc} == 1 ]] || fail 'Fedora accepted a signing key with the wrong fingerprint'
 )
 
-test_fedora_opencode_artifacts() (
+test_fedora_goose_artifacts() (
   load_helpers setup-fedora-workstation.sh
-  local optimized_asset baseline_asset arm_asset
-  grep() { return 0; }
   select_fedora_artifacts x86_64
-  optimized_asset=${OPENCODE_ASSET}
-  unset -f grep
-  [[ ${optimized_asset} == opencode-linux-x64.tar.gz ]] \
-    || fail 'Fedora AVX2 OpenCode asset is not the optimized x64 build'
-
-  grep() { return 1; }
-  select_fedora_artifacts x86_64
-  baseline_asset=${OPENCODE_ASSET}
-  unset -f grep
-  [[ ${baseline_asset} == opencode-linux-x64-baseline.tar.gz ]] \
-    || fail 'Fedora non-AVX2 OpenCode asset is not the x64 baseline build'
-
+  [[ ${GOOSE_DESKTOP_ASSET} == 'Goose-{version}-1.x86_64.rpm' ]] \
+    || fail 'Fedora x86_64 goose Desktop is not the upstream RPM'
+  # Upstream's arm64 RPM is not installable on aarch64; its Flatpak bundle is.
   select_fedora_artifacts aarch64
-  arm_asset=${OPENCODE_ASSET}
-  [[ ${arm_asset} == opencode-linux-arm64.tar.gz ]] \
-    || fail 'Fedora aarch64 OpenCode asset is incorrect'
-
-  local asset
-  for asset in "${optimized_asset}" "${baseline_asset}" "${arm_asset}"; do
-    [[ ${asset} == opencode-linux-*.tar.gz ]] || fail "unexpected OpenCode asset: ${asset}"
-  done
-  [[ -z ${OPENCODE_VERSION} && -z ${OPENCODE_URL} \
-     && -z ${OPENCODE_ARCHIVE_SHA256} ]] \
-    || fail 'OpenCode architecture selection unexpectedly hard-codes a release'
+  [[ ${GOOSE_DESKTOP_ASSET} == io.github.block.Goose_stable_aarch64.flatpak ]] \
+    || fail 'Fedora aarch64 goose Desktop is not the upstream Flatpak bundle'
+  [[ -z ${GOOSE_DESKTOP_VERSION} && -z ${GOOSE_DESKTOP_URL} \
+     && -z ${GOOSE_DESKTOP_SHA256} ]] \
+    || fail 'goose Desktop architecture selection unexpectedly hard-codes a release'
 )
 
 test_fedora_zed_artifacts() (
@@ -492,9 +501,7 @@ test_fedora_dynamic_release_resolution() (
   local desktop_checksum_base64 desktop_checksum_hex
   desktop_checksum_base64=YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYQ==
   desktop_checksum_hex=$(printf '61%.0s' {1..64})
-  grep() { return 0; }
   select_fedora_artifacts x86_64
-  unset -f grep
   fetch_release_document() {
     case $1 in
       "${ANTIGRAVITY_DESKTOP_MANIFEST_URL}")
@@ -509,9 +516,9 @@ test_fedora_dynamic_release_resolution() (
         printf '%s\n' \
           '{"version":"3.4.5","url":"https://storage.googleapis.com/antigravity-public/antigravity-cli/3.4.5-456/linux-x64/cli_linux_x64.tar.gz","sha512":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","published":"additive fixture field"}'
         ;;
-      "${OPENCODE_RELEASE_API}")
+      "${GOOSE_RELEASE_API}")
         printf '%s\n' \
-          '{"draft":false,"prerelease":false,"immutable":false,"tag_name":"v9.8.7","assets":[{"name":"opencode-linux-x64.tar.gz","browser_download_url":"https://github.com/anomalyco/opencode/releases/download/v9.8.7/opencode-linux-x64.tar.gz","digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]}'
+          '{"draft":false,"prerelease":false,"immutable":false,"tag_name":"v9.8.7","assets":[{"name":"Goose-9.8.7-1.arm64.rpm","browser_download_url":"https://github.com/aaif-goose/goose/releases/download/v9.8.7/Goose-9.8.7-1.arm64.rpm","digest":"sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"},{"name":"Goose-9.8.7-1.x86_64.rpm","browser_download_url":"https://github.com/aaif-goose/goose/releases/download/v9.8.7/Goose-9.8.7-1.x86_64.rpm","digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]}'
         ;;
       "${ZED_RELEASE_API}")
         printf '%s\n' \
@@ -530,10 +537,10 @@ test_fedora_dynamic_release_resolution() (
   [[ ${ANTIGRAVITY_CLI_VERSION} == 3.4.5 \
      && ${ANTIGRAVITY_CLI_ARCHIVE_SHA512} == $(printf 'b%.0s' {1..128}) ]] \
     || fail 'Fedora did not resolve the Antigravity CLI manifest exactly'
-  [[ ${OPENCODE_VERSION} == 9.8.7 \
-     && ${OPENCODE_URL} == https://github.com/anomalyco/opencode/releases/download/v9.8.7/opencode-linux-x64.tar.gz \
-     && ${OPENCODE_ARCHIVE_SHA256} == $(printf 'c%.0s' {1..64}) ]] \
-    || fail 'Fedora did not bind OpenCode to one stable release asset and digest'
+  [[ ${GOOSE_DESKTOP_VERSION} == 9.8.7 \
+     && ${GOOSE_DESKTOP_URL} == https://github.com/aaif-goose/goose/releases/download/v9.8.7/Goose-9.8.7-1.x86_64.rpm \
+     && ${GOOSE_DESKTOP_SHA256} == $(printf 'c%.0s' {1..64}) ]] \
+    || fail 'Fedora did not bind goose Desktop to one stable release asset and digest'
   [[ ${ZED_VERSION} == 7.6.5 \
      && ${ZED_URL} == https://github.com/zed-industries/zed/releases/download/v7.6.5/zed-linux-x86_64.tar.gz \
      && ${ZED_ARCHIVE_SHA256} == $(printf 'd%.0s' {1..64}) ]] \
@@ -564,29 +571,27 @@ test_fedora_github_metadata_rejection() {
   local scenario=$1 rc=0
   (
     load_helpers setup-fedora-workstation.sh
-    grep() { return 0; }
     select_fedora_artifacts x86_64
-    unset -f grep
     fetch_release_document() {
       local draft=false prerelease=false digest url assets tag=v1.2.3
       digest=sha256:$(printf 'e%.0s' {1..64})
       [[ ${scenario} != unprefixed-tag ]] || tag=1.2.3
-      url=https://github.com/anomalyco/opencode/releases/download/${tag}/opencode-linux-x64.tar.gz
-      assets="{\"name\":\"opencode-linux-x64.tar.gz\",\"browser_download_url\":\"${url}\",\"digest\":\"${digest}\"}"
+      url=https://github.com/zed-industries/zed/releases/download/${tag}/zed-linux-x86_64.tar.gz
+      assets="{\"name\":\"zed-linux-x86_64.tar.gz\",\"browser_download_url\":\"${url}\",\"digest\":\"${digest}\"}"
       case ${scenario} in
         draft) draft=true ;;
         prerelease) prerelease=true ;;
         duplicate) assets="${assets},${assets}" ;;
-        bad-digest) digest=sha512:$(printf 'e%.0s' {1..128}); assets="{\"name\":\"opencode-linux-x64.tar.gz\",\"browser_download_url\":\"${url}\",\"digest\":\"${digest}\"}" ;;
-        off-origin) url=https://downloads.example.invalid/opencode-linux-x64.tar.gz; assets="{\"name\":\"opencode-linux-x64.tar.gz\",\"browser_download_url\":\"${url}\",\"digest\":\"${digest}\"}" ;;
+        bad-digest) digest=sha512:$(printf 'e%.0s' {1..128}); assets="{\"name\":\"zed-linux-x86_64.tar.gz\",\"browser_download_url\":\"${url}\",\"digest\":\"${digest}\"}" ;;
+        off-origin) url=https://downloads.example.invalid/zed-linux-x86_64.tar.gz; assets="{\"name\":\"zed-linux-x86_64.tar.gz\",\"browser_download_url\":\"${url}\",\"digest\":\"${digest}\"}" ;;
         unprefixed-tag) ;;
         *) fail "unknown GitHub metadata scenario: ${scenario}" ;;
       esac
       printf '{"draft":%s,"prerelease":%s,"immutable":true,"tag_name":"%s","assets":[%s]}\n' \
         "${draft}" "${prerelease}" "${tag}" "${assets}"
     }
-    resolve_github_release_asset anomalyco/opencode "${OPENCODE_RELEASE_API}" \
-      "${OPENCODE_ASSET}"
+    resolve_github_release_asset zed-industries/zed "${ZED_RELEASE_API}" \
+      "zed-linux-${ZED_ARCH}.tar.gz"
   ) >/dev/null 2>&1 || rc=$?
   [[ ${rc} == 1 ]] || fail "Fedora accepted unsafe GitHub release metadata: ${scenario}"
 }
@@ -889,32 +894,209 @@ EOF
     || fail 'the Antigravity launcher does not reference the bundled icon'
 )
 
-test_fedora_converged_opencode() (
+# A stand-in for goose's installer: records the environment the official one
+# would see, then installs a runnable goose into GOOSE_BIN_DIR.
+goose_installer_fixture() {
+  cat <<'EOF'
+#!/usr/bin/env bash
+set -eu
+printf 'cwd=%s\nconfigure=%s\nbin=%s\npath=%s\nstdin_tty=%s\n' "$PWD" "${CONFIGURE:-}" \
+  "${GOOSE_BIN_DIR:-}" "$PATH" "$([ -t 0 ] && echo yes || echo no)" >"${GOOSE_RECORD}"
+mkdir -p "${GOOSE_BIN_DIR}"
+printf '#!/bin/sh\necho "goose 9.8.7"\n' >"${GOOSE_BIN_DIR}/goose"
+chmod 0755 "${GOOSE_BIN_DIR}/goose"
+EOF
+}
+
+test_goose_cli_installer() (
+  local script=$1
+  load_helpers "${script}"
+  WORK_DIR=${TEST_ROOT}/goose-cli-${script%.sh}/work
+  HOME=${TEST_ROOT}/goose-cli-${script%.sh}/home
+  export GOOSE_RECORD=${TEST_ROOT}/goose-cli-${script%.sh}/record
+  install -d "${WORK_DIR}" "${HOME}"
+  curl() {
+    local output='' url=''
+    while (( $# )); do
+      case $1 in
+        -o) output=$2; shift 2 ;;
+        https://*) url=$1; shift ;;
+        *) shift ;;
+      esac
+    done
+    [[ ${url} == "${GOOSE_CLI_INSTALLER_URL}" ]] \
+      || fail "goose installer was fetched from ${url}"
+    goose_installer_fixture >"${output}"
+  }
+  install_goose_cli >/dev/null
+  [[ -x ${HOME}/.local/bin/goose ]] || fail "${script}: goose was not installed"
+  grep -Fxq "cwd=${WORK_DIR}" "${GOOSE_RECORD}" \
+    || fail "${script}: goose installer did not run from the scratch directory"
+  grep -Fxq 'configure=false' "${GOOSE_RECORD}" \
+    || fail "${script}: goose installer would start interactive configuration"
+  grep -Fxq "bin=${HOME}/.local/bin" "${GOOSE_RECORD}" \
+    || fail "${script}: goose installer targets the wrong bin directory"
+  grep -q "^path=${HOME}/.local/bin:" "${GOOSE_RECORD}" \
+    || fail "${script}: ~/.local/bin is not on PATH, so the installer would edit shell rc files"
+  grep -Fxq 'stdin_tty=no' "${GOOSE_RECORD}" \
+    || fail "${script}: goose installer kept the interactive terminal"
+)
+
+setup_goose_desktop_release() {
+  GOOSE_DESKTOP_VERSION=9.8.7
+  GOOSE_DESKTOP_URL=https://github.com/aaif-goose/goose/releases/download/v9.8.7/${GOOSE_DESKTOP_ASSET//\{version\}/9.8.7}
+  GOOSE_DESKTOP_SHA256=$(printf 'goose desktop fixture\n' | sha256sum)
+  GOOSE_DESKTOP_SHA256=${GOOSE_DESKTOP_SHA256%% *}
+}
+
+goose_desktop_curl() {
+  local output=''
+  while (( $# )); do
+    if [[ $1 == -o ]]; then output=$2; shift 2; else shift; fi
+  done
+  [[ -n ${output} ]] || fail 'goose Desktop download did not specify an output file'
+  printf 'goose desktop fixture\n' >"${output}"
+}
+
+test_fedora_goose_desktop_rpm() (
   load_helpers setup-fedora-workstation.sh
   select_fedora_artifacts x86_64
-  WORK_DIR=${TEST_ROOT}/converged-opencode/work
-  local bin_dir=${TEST_ROOT}/converged-opencode/bin
-  local binary_sha
-  OPENCODE_VERSION=9.8.7
-  OPENCODE_URL=https://github.com/anomalyco/opencode/releases/download/v9.8.7/${OPENCODE_ASSET}
-  OPENCODE_ARCHIVE_SHA256=$(printf 'c%.0s' {1..64})
-  install -d "${WORK_DIR}" "${bin_dir}"
-  printf '#!/usr/bin/env sh\nprintf "%%s\\n" "%s"\n' \
-    "${OPENCODE_VERSION}" >"${bin_dir}/opencode"
-  chmod 0755 "${bin_dir}/opencode"
-  binary_sha=$(sha256sum -- "${bin_dir}/opencode")
-  binary_sha=${binary_sha%% *}
-  printf '%s\n' \
-    'managed-by=lan-ipxe/setup-fedora-workstation.sh' \
-    "version=${OPENCODE_VERSION}" \
-    "asset=${OPENCODE_ASSET}" \
-    "source-url=${OPENCODE_URL}" \
-    "archive-sha256=${OPENCODE_ARCHIVE_SHA256}" \
-    "binary-sha256=${binary_sha}" \
-    >"${bin_dir}/opencode.lan-ipxe-release"
-  curl() { fail 'a converged OpenCode install attempted a download'; }
-  put_file() { fail 'a converged OpenCode install attempted a replacement'; }
-  install_opencode_cli "${bin_dir}"
+  setup_goose_desktop_release
+  WORK_DIR=${TEST_ROOT}/goose-rpm/work
+  install -d "${WORK_DIR}"
+  local installed_version=9.8.6 installs=0
+  installed_rpm_version() {
+    [[ $1 == Goose ]] || fail "unexpected RPM version query: $1"
+    printf '%s' "${installed_version}"
+  }
+  curl() { goose_desktop_curl "$@"; }
+  sudo() {
+    [[ $* == "dnf -y install ${WORK_DIR}/Goose-9.8.7-1.x86_64.rpm" && -f $4 ]] \
+      || fail "unexpected goose Desktop RPM install: $*"
+    (( installs += 1 ))
+    installed_version=9.8.7
+  }
+  install_goose_desktop >/dev/null
+  (( installs == 1 )) || fail 'an outdated goose Desktop RPM was not upgraded once'
+  curl() { fail 'a converged goose Desktop RPM attempted a download'; }
+  install_goose_desktop >/dev/null
+  (( installs == 1 )) || fail 'a converged goose Desktop RPM was reinstalled'
+)
+
+test_goose_desktop_flatpak() (
+  local script=$1
+  load_helpers "${script}"
+  if [[ ${script} == setup-fedora-workstation.sh ]]; then
+    select_fedora_artifacts aarch64
+  fi
+  setup_goose_desktop_release
+  WORK_DIR=${TEST_ROOT}/goose-flatpak-${script%.sh}/work
+  GOOSE_DESKTOP_MARKER=${TEST_ROOT}/goose-flatpak-${script%.sh}/state/goose-desktop.release
+  install -d "${WORK_DIR}"
+  local present=0 installs=0 remotes=0
+  flatpak() {
+    [[ $* == "info --system ${GOOSE_DESKTOP_FLATPAK}" ]] \
+      || fail "unexpected flatpak query: $*"
+    (( present ))
+  }
+  curl() { goose_desktop_curl "$@"; }
+  sudo() {
+    case $* in
+      'flatpak remote-add --if-not-exists --system flathub https://flathub.org/repo/flathub.flatpakrepo')
+        (( remotes += 1 )) ;;
+      "flatpak install -y --system --noninteractive --bundle ${WORK_DIR}/${GOOSE_DESKTOP_ASSET}")
+        [[ -f ${WORK_DIR}/${GOOSE_DESKTOP_ASSET} ]] || fail 'bundle was installed before download'
+        (( installs += 1 ))
+        present=1 ;;
+      *) fail "unexpected privileged goose Desktop step: $*" ;;
+    esac
+  }
+  install_goose_desktop >/dev/null
+  (( installs == 1 && remotes == 1 )) \
+    || fail "${script}: goose Desktop bundle was not installed once with flathub available"
+  grep -Fxq 'version=9.8.7' "${GOOSE_DESKTOP_MARKER}" \
+    && grep -Fxq "sha256=${GOOSE_DESKTOP_SHA256}" "${GOOSE_DESKTOP_MARKER}" \
+    || fail "${script}: goose Desktop release marker does not record the verified bundle"
+  curl() { fail "${script}: a converged goose Desktop bundle attempted a download"; }
+  install_goose_desktop >/dev/null
+  (( installs == 1 )) || fail "${script}: a converged goose Desktop bundle was reinstalled"
+)
+
+test_goose_desktop_checksum_rejection() {
+  local script=$1 arch=$2 rc=0
+  local mutated=${TEST_ROOT}/bad-goose-${script%.sh}-${arch}/mutated
+  (
+    load_helpers "${script}"
+    if [[ ${script} == setup-fedora-workstation.sh ]]; then
+      select_fedora_artifacts "${arch}"
+    fi
+    setup_goose_desktop_release
+    GOOSE_DESKTOP_SHA256=$(printf '0%.0s' {1..64})
+    WORK_DIR=${TEST_ROOT}/bad-goose-${script%.sh}-${arch}/work
+    GOOSE_DESKTOP_MARKER=${TEST_ROOT}/bad-goose-${script%.sh}-${arch}/marker
+    install -d "${WORK_DIR}"
+    installed_rpm_version() { :; }
+    flatpak() { return 1; }
+    curl() { goose_desktop_curl "$@"; }
+    # Record instead of failing, so only the checksum check can end the run.
+    sudo() { printf 'sudo %s\n' "$*" >>"${mutated}"; }
+    put_file() { printf 'put_file %s\n' "$*" >>"${mutated}"; }
+    install_goose_desktop
+  ) >/dev/null 2>&1 || rc=$?
+  [[ ${rc} == 1 && ! -e ${mutated} ]] \
+    || fail "${script} (${arch}) accepted a corrupt goose Desktop download"
+}
+
+test_fedora_opencode_purge() (
+  load_helpers setup-fedora-workstation.sh
+  local home=${TEST_ROOT}/opencode-fedora/home removals=0 installed=1
+  install -d "${home}/.local/bin" "${home}/.opencode/bin" "${home}/.config/opencode"
+  printf 'opencode\n' >"${home}/.local/bin/opencode"
+  printf 'managed-by=lan-ipxe/setup-fedora-workstation.sh\n' \
+    >"${home}/.local/bin/opencode.lan-ipxe-release"
+  printf 'opencode\n' >"${home}/.opencode/bin/opencode"
+  printf 'keep\n' >"${home}/.config/opencode/opencode.json"
+  rpm() {
+    [[ $1 == -qa ]] || return 1
+    printf 'bash\n'
+    if (( installed )); then printf 'OpenCode\nopencode-helper\n'; fi
+  }
+  sudo() {
+    [[ $* == 'dnf -y remove OpenCode' ]] || fail "unexpected OpenCode removal: $*"
+    (( removals += 1 ))
+    installed=0
+  }
+  remove_legacy_opencode_fedora "${home}" >/dev/null
+  remove_legacy_opencode_fedora "${home}" >/dev/null
+  (( removals == 1 )) || fail 'the OpenCode desktop RPM was not removed exactly once'
+  [[ ! -e ${home}/.local/bin/opencode && ! -e ${home}/.local/bin/opencode.lan-ipxe-release \
+     && ! -e ${home}/.opencode/bin ]] \
+    || fail 'Fedora left an OpenCode CLI behind'
+  [[ -f ${home}/.config/opencode/opencode.json ]] \
+    || fail 'Fedora removed OpenCode user configuration'
+)
+
+test_arch_opencode_purge() (
+  load_helpers setup-arch-workstation.sh
+  local home=${TEST_ROOT}/opencode-arch/home removals=0
+  local -A pkg_state=([opencode]=1 [opencode-desktop-bin]=1)
+  install -d "${home}/.opencode/bin" "${home}/.local/share/opencode"
+  printf 'opencode\n' >"${home}/.opencode/bin/opencode"
+  pacman() {
+    [[ $1 == -Q ]] || return 97
+    [[ -n ${pkg_state[$2]:-} ]]
+  }
+  sudo() {
+    [[ $* == 'pacman -Rns --noconfirm opencode opencode-desktop-bin' ]] \
+      || fail "unexpected OpenCode removal: $*"
+    (( removals += 1 ))
+    pkg_state=()
+  }
+  purge_opencode_arch "${home}" >/dev/null
+  purge_opencode_arch "${home}" >/dev/null
+  (( removals == 1 )) || fail 'Arch OpenCode packages were not removed exactly once'
+  [[ ! -e ${home}/.opencode/bin && -d ${home}/.local/share/opencode ]] \
+    || fail 'Arch did not remove only the OpenCode binaries'
 )
 
 test_fedora_converged_zed() (
@@ -1209,9 +1391,6 @@ test_fedora_checksum_rejection() {
     ANTIGRAVITY_CLI_VERSION=3.4.5
     ANTIGRAVITY_CLI_URL=https://storage.googleapis.com/antigravity-public/antigravity-cli/3.4.5-456/linux-x64/cli_linux_x64.tar.gz
     ANTIGRAVITY_CLI_ARCHIVE_SHA512=$(printf '0%.0s' {1..128})
-    OPENCODE_VERSION=9.8.7
-    OPENCODE_URL=https://github.com/anomalyco/opencode/releases/download/v9.8.7/${OPENCODE_ASSET}
-    OPENCODE_ARCHIVE_SHA256=$(printf '0%.0s' {1..64})
     install -d "${WORK_DIR}"
     curl() {
       local output=
@@ -1225,10 +1404,6 @@ test_fedora_checksum_rejection() {
     case ${product} in
       desktop) install_antigravity_desktop "${TEST_ROOT}/bad-${product}/install" ;;
       cli)     install_antigravity_cli "${TEST_ROOT}/bad-${product}/bin" ;;
-      opencode)
-        put_file() { fail 'OpenCode checksum mismatch reached a file mutation'; }
-        install_opencode_cli "${TEST_ROOT}/bad-${product}/bin"
-        ;;
       *)       fail "unknown checksum-rejection product: ${product}" ;;
     esac
   ) >/dev/null 2>&1 || rc=$?
@@ -1599,10 +1774,10 @@ main() {
   printf 'PASS Arch legacy Antigravity 1.x/IDE purge convergence\n'
   test_arch_verify_good
   for scenario in aur-package legacy-ide rpm-claude missing-appimage missing-cli \
-    missing-claude missing-desktop-command broken-cli; do
+    missing-claude missing-goose missing-goose-desktop missing-desktop-command broken-cli; do
     test_arch_verify_rejection "${scenario}"
   done
-  printf 'PASS Arch native Antigravity/CLI/Claude/Codex postconditions\n'
+  printf 'PASS Arch native Antigravity/CLI/Claude/Codex/goose postconditions\n'
   test_arch_native_flow_order
   test_arch_retired_package_removal
   printf 'PASS Arch pacman/AUR AI package retirement and ordering\n'
@@ -1612,8 +1787,8 @@ main() {
   printf 'PASS Fedora signed developer-package repositories and command postconditions\n'
   test_fedora_key_fingerprint_enforcement
   printf 'PASS Fedora signing-key fingerprint enforcement\n'
-  test_fedora_opencode_artifacts
-  printf 'PASS Fedora optimized/baseline/aarch64 OpenCode artifact selection\n'
+  test_fedora_goose_artifacts
+  printf 'PASS Fedora x86_64 RPM / aarch64 Flatpak goose Desktop artifact selection\n'
   test_fedora_zed_artifacts
   printf 'PASS Fedora x86_64/aarch64 Zed artifact selection\n'
   test_fedora_dynamic_release_resolution
@@ -1642,8 +1817,20 @@ main() {
   printf 'PASS Fedora self-updated Antigravity CLI preservation/replacement\n'
   test_fedora_appimage_icon_and_version
   printf 'PASS Fedora bundled launcher icon and embedded version extraction\n'
-  test_fedora_converged_opencode
-  printf 'PASS Fedora verified native OpenCode convergence\n'
+  test_goose_cli_installer setup-fedora-workstation.sh
+  test_goose_cli_installer setup-arch-workstation.sh
+  printf 'PASS Fedora/Arch official goose CLI installer invocation\n'
+  test_fedora_goose_desktop_rpm
+  test_goose_desktop_flatpak setup-fedora-workstation.sh
+  test_goose_desktop_flatpak setup-arch-workstation.sh
+  printf 'PASS Fedora RPM / Fedora+Arch Flatpak goose Desktop install and convergence\n'
+  test_goose_desktop_checksum_rejection setup-fedora-workstation.sh x86_64
+  test_goose_desktop_checksum_rejection setup-fedora-workstation.sh aarch64
+  test_goose_desktop_checksum_rejection setup-arch-workstation.sh x86_64
+  printf 'PASS Fedora/Arch corrupt goose Desktop rejection\n'
+  test_fedora_opencode_purge
+  test_arch_opencode_purge
+  printf 'PASS Fedora/Arch OpenCode CLI/desktop purge convergence\n'
   test_fedora_converged_zed
   printf 'PASS Fedora verified native Zed convergence\n'
   test_fedora_media_servers
@@ -1659,8 +1846,7 @@ main() {
   printf 'PASS Fedora corrupt-source and failed-build OwnTone rejection\n'
   test_fedora_checksum_rejection desktop
   test_fedora_checksum_rejection cli
-  test_fedora_checksum_rejection opencode
-  printf 'PASS Fedora desktop/CLI/OpenCode corrupt-archive rejection\n'
+  printf 'PASS Fedora desktop/CLI corrupt-archive rejection\n'
   test_fedora_desktop_size_rejection
   printf 'PASS Fedora Antigravity AppImage manifest-size rejection\n'
   test_fedora_zed_checksum_rejection

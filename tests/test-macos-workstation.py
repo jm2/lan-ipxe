@@ -157,19 +157,11 @@ class ConfigurationTests(unittest.TestCase):
     def feed_fixture(self, name, version='2.0.20', body=b'binary'):
         cli = next(c for c in self.obj.manifest['feed_clis'] if c['command'] == name)
         archive = self.root / ('artifact-' + name)
-        if cli.get('asset'):
-            with w.zipfile.ZipFile(archive, 'w') as bundle:
-                bundle.writestr(cli['member'], body)
-            url = cli['url_prefix'] + version + cli['url_suffix']
-            digest = w.hashlib.sha256(archive.read_bytes()).hexdigest()
-            feed = {'channel': 'latest', 'active': True, 'version': version,
-                    'metadata': {'files': {cli['asset']: {'url': url, 'sha256': digest}}}}
-        else:
-            with w.tarfile.open(archive, 'w:gz') as bundle:
-                info = w.tarfile.TarInfo(cli['member']); info.size = len(body)
-                bundle.addfile(info, io.BytesIO(body))
-            url = cli['url_prefix'] + version + '-123' + cli['url_suffix']
-            feed = {'version': version, 'url': url, 'sha512': w.hashlib.sha512(archive.read_bytes()).hexdigest()}
+        with w.tarfile.open(archive, 'w:gz') as bundle:
+            info = w.tarfile.TarInfo(cli['member']); info.size = len(body)
+            bundle.addfile(info, io.BytesIO(body))
+        url = cli['url_prefix'] + version + '-123' + cli['url_suffix']
+        feed = {'version': version, 'url': url, 'sha512': w.hashlib.sha512(archive.read_bytes()).hexdigest()}
         downloads = []
         def fetch(address, destination=None):
             if address == cli['feed']:
@@ -179,31 +171,125 @@ class ConfigurationTests(unittest.TestCase):
             Path(destination).write_bytes(archive.read_bytes())
         return cli, feed, fetch, downloads
 
-    def test_feed_clis_replace_homebrew_owners_with_verified_vendor_builds(self):
+    def test_feed_cli_replaces_homebrew_owner_with_verified_vendor_build(self):
         self.obj.args = w.arguments([])
-        self.assertNotIn('opencode', self.obj.manifest['formulae']['core'])
-        for name in ('opencode', 'agy'):
-            cli, _, fetch, downloads = self.feed_fixture(name)
-            self.obj.fetch = fetch
-            with patch.object(self.obj, 'verify_binary'):
-                self.obj.feed_cli(cli)
-                self.obj.feed_cli(cli)
-            path = self.home / cli['path']
-            self.assertEqual(path.read_bytes(), b'binary')
-            self.assertEqual(len(downloads), 1, 'a verified current install must not be downloaded again')
-            self.assertEqual((self.home / '.local/bin' / name).resolve(), path.resolve())
-            self.assertEqual(self.obj.receipts['clis'][name]['version'], '2.0.20')
-        cli, _, fetch, _ = self.feed_fixture('opencode', '2.0.21', b'newer')
+        cli, _, fetch, downloads = self.feed_fixture('agy')
         self.obj.fetch = fetch
         with patch.object(self.obj, 'verify_binary'):
             self.obj.feed_cli(cli)
-        self.assertEqual((self.home / cli['path']).read_bytes(), b'newer')
-        kind, legacy = cli['homebrew']
-        (self.obj.prefix / 'Cellar' / legacy / '1.18.30').mkdir(parents=True)
-        (self.obj.prefix / 'Cellar' / legacy / '1.18.30/INSTALL_RECEIPT.json').write_text('{}')
-        with patch.object(self.obj, 'verify_binary'), patch.object(self.obj, 'command', side_effect=AssertionError('brew ran')), \
-                self.assertRaisesRegex(w.Deferred, 'brew uninstall --formula opencode'):
             self.obj.feed_cli(cli)
+        path = self.home / cli['path']
+        self.assertEqual(path.read_bytes(), b'binary')
+        self.assertEqual(len(downloads), 1, 'a verified current install must not be downloaded again')
+        self.assertEqual((self.home / '.local/bin/agy').resolve(), path.resolve())
+        self.assertEqual(self.obj.receipts['clis']['agy']['version'], '2.0.20')
+        cli, _, fetch, _ = self.feed_fixture('agy', '2.0.21', b'newer')
+        self.obj.fetch = fetch
+        with patch.object(self.obj, 'verify_binary'):
+            self.obj.feed_cli(cli)
+        self.assertEqual(path.read_bytes(), b'newer')
+        kind, legacy = cli['homebrew']
+        (self.obj.prefix / 'Caskroom' / legacy / '.metadata').mkdir(parents=True)
+        with patch.object(self.obj, 'verify_binary'), patch.object(self.obj, 'command', side_effect=AssertionError('brew ran')), \
+                self.assertRaisesRegex(w.Deferred, 'brew uninstall --cask antigravity-cli'):
+            self.obj.feed_cli(cli)
+
+    def test_opencode_is_purged_for_goose_and_crush(self):
+        manifest = json.dumps(self.obj.manifest).lower()
+        self.assertNotIn('opencode', manifest)
+        goose = next(a for a in self.obj.manifest['apps'] if a['name'] == 'Goose')
+        self.assertEqual((goose['cask'], goose['id'], goose['profile']), ('block-goose', 'com.electron.goose', 'core'))
+        self.assertIn('charmbracelet/tap/crush', self.obj.manifest['formulae']['core'])
+        self.assertIn('goose', w.NATIVE_CLIS)
+        (self.obj.prefix / 'Caskroom/opencode-desktop/.metadata').mkdir(parents=True)
+        (self.obj.prefix / 'Cellar/opencode/1.18.30').mkdir(parents=True)
+        (self.obj.prefix / 'Cellar/opencode/1.18.30/INSTALL_RECEIPT.json').write_text('{}')
+        binary = self.home / '.opencode/bin/opencode'
+        binary.parent.mkdir(parents=True); binary.write_text('opencode')
+        self.obj.link(self.home / '.local/bin/opencode', binary)
+        self.obj.receipts.setdefault('clis', {})['opencode'] = {'path': str(binary)}
+        config = self.home / '.config/opencode/opencode.json'
+        config.parent.mkdir(parents=True); config.write_text('{}')
+        self.obj.preview = True
+        with patch.object(self.obj, 'command', side_effect=AssertionError('preview ran')):
+            self.obj.retire_opencode()
+        self.assertEqual([e['status'] for e in self.obj.events[-3:]], ['DRIFT'] * 3)
+        self.assertTrue(binary.exists())
+        self.obj.preview = False
+        calls = []
+        def command(argv, **kwargs):
+            calls.append([str(a) for a in argv[1:]])
+            w.shutil.rmtree(self.obj.prefix / ('Caskroom/opencode-desktop' if argv[2] == '--cask' else 'Cellar/opencode'))
+            return subprocess.CompletedProcess(argv, 0, '', '')
+        with patch.object(self.obj, 'command', side_effect=command):
+            self.obj.retire_opencode()
+            self.obj.retire_opencode()
+        self.assertEqual(calls, [['uninstall', '--cask', 'opencode-desktop'], ['uninstall', '--formula', 'opencode']])
+        self.assertFalse((self.home / '.local/bin/opencode').is_symlink())
+        self.assertFalse((self.home / '.opencode').exists())
+        self.assertNotIn('opencode', self.obj.receipts['clis'])
+        self.assertNotIn(str(self.home / '.local/bin/opencode'), self.obj.receipts['links'])
+        self.assertEqual(config.read_text(), '{}')
+
+    def test_foreign_opencode_cli_is_preserved(self):
+        binary = self.home / '.opencode/bin/opencode'
+        binary.parent.mkdir(parents=True); binary.write_text('mine')
+        public = self.home / '.local/bin/opencode'
+        public.parent.mkdir(parents=True); public.symlink_to(binary)
+        with patch.object(self.obj, 'command', side_effect=AssertionError('brew ran')):
+            self.obj.retire_opencode()
+        self.assertEqual(binary.read_text(), 'mine')
+        self.assertTrue(public.is_symlink())
+        self.assertEqual(self.obj.events, [])
+
+    def test_goose_cli_uses_official_installer_and_defers_homebrew_copy(self):
+        self.obj.args = w.arguments([])
+        runs = []
+        def fetch(url, destination):
+            self.assertEqual(url, 'https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh')
+            Path(destination).write_text('#!/bin/bash\n')
+        def command(argv, **kwargs):
+            if argv[1] == '-n':
+                return subprocess.CompletedProcess(argv, 0, '', '')
+            env = kwargs['env']
+            runs.append((env['GOOSE_BIN_DIR'], env['CONFIGURE'], env['PATH'].split(':')[0], kwargs['cwd']))
+            self.assertEqual(Path(kwargs['cwd']), Path(argv[1]).parent)
+            goose = self.home / '.local/bin/goose'
+            goose.parent.mkdir(parents=True, exist_ok=True); goose.write_text('goose'); goose.chmod(0o755)
+            return subprocess.CompletedProcess(argv, 0, '', '')
+        self.obj.fetch = fetch
+        with patch.object(self.obj, 'command', side_effect=command):
+            self.obj.native_cli('goose')
+            self.obj.native_cli('goose')
+        bindir = str(self.home / '.local/bin')
+        self.assertEqual([run[:3] for run in runs], [(bindir, 'false', bindir)] * 2, 'the owned copy is refreshed by its installer')
+        self.assertFalse(Path(runs[0][3]).exists(), 'the download directory is temporary')
+        (self.obj.prefix / 'Cellar/block-goose-cli/1.0/INSTALL_RECEIPT.json').parent.mkdir(parents=True)
+        (self.obj.prefix / 'Cellar/block-goose-cli/1.0/INSTALL_RECEIPT.json').write_text('{}')
+        self.obj.args = w.arguments(['--no-upgrade'])
+        with patch.object(self.obj, 'command', side_effect=AssertionError('ran')), \
+                self.assertRaisesRegex(w.Deferred, 'brew uninstall --formula block-goose-cli'):
+            self.obj.native_cli('goose')
+
+    def test_tapped_formula_is_tapped_and_installed_without_bottle(self):
+        self.obj.args = w.arguments([])
+        self.obj.updated = True
+        calls = []
+        def command(argv, **kwargs):
+            calls.append([str(a) for a in argv[1:]])
+            if argv[1] == 'info':
+                return subprocess.CompletedProcess(argv, 0, json.dumps({'formulae': [{'bottle': {}}]}), '')
+            if argv[1] == 'install':
+                receipt = self.obj.prefix / 'Cellar/crush/0.98.1/INSTALL_RECEIPT.json'
+                receipt.parent.mkdir(parents=True); receipt.write_text('{}')
+            return subprocess.CompletedProcess(argv, 0, '', '')
+        with patch.object(self.obj, 'command', side_effect=command):
+            self.obj.package('charmbracelet/tap/crush')
+            self.obj.package('charmbracelet/tap/crush')
+        self.assertEqual(calls, [['tap', 'charmbracelet/tap'],
+                                 ['info', '--json=v2', '--formula', 'charmbracelet/tap/crush'],
+                                 ['install', '--no-ask', '--formula', 'charmbracelet/tap/crush']])
+        self.assertEqual(self.obj.events[-1]['status'], 'CURRENT')
 
     def test_feed_cli_adopts_identical_copy_and_preserves_foreign_one(self):
         self.obj.args = w.arguments([])
@@ -243,26 +329,21 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), b'binary', 'an older modified copy must be replaced')
 
     def test_feed_release_rejects_off_origin_prefix_confusion_and_missing_digest(self):
-        for name in ('opencode', 'agy'):
-            cli, feed, fetch, _ = self.feed_fixture(name, '1.2.14')
-            self.obj.fetch = fetch
-            self.assertEqual(self.obj.feed_release(cli)[0], '1.2.14')
-            def check(change, error):
-                broken = json.loads(json.dumps(feed))
-                change(broken, broken['metadata']['files'][cli['asset']] if cli.get('asset') else broken)
-                self.obj.fetch = lambda *a: json.dumps(broken).encode()
-                with self.assertRaises(error):
-                    self.obj.feed_release(cli)
-            check(lambda top, entry: entry.update(url='https://downloads.example.invalid/1.2.14' + cli['url_suffix']), RuntimeError)
-            check(lambda top, entry: top.update(version='1.2.1'), RuntimeError)
-            check(lambda top, entry: entry.update({'sha256' if cli.get('asset') else 'sha512': ''}), w.Deferred)
-            malformed = [[]] + ([{'channel': 'latest', 'active': True, 'metadata': []},
-                                 {'channel': 'latest', 'active': True, 'metadata': {'files': {cli['asset']: 'x'}}}]
-                                if cli.get('asset') else [])
-            for body in malformed:
-                self.obj.fetch = lambda *a, b=body: json.dumps(b).encode()
-                with self.assertRaisesRegex(RuntimeError, 'Malformed release feed'):
-                    self.obj.feed_release(cli)
+        cli, feed, fetch, _ = self.feed_fixture('agy', '1.2.14')
+        self.obj.fetch = fetch
+        self.assertEqual(self.obj.feed_release(cli)[0], '1.2.14')
+        def check(change, error):
+            broken = dict(feed)
+            change(broken)
+            self.obj.fetch = lambda *a: json.dumps(broken).encode()
+            with self.assertRaises(error):
+                self.obj.feed_release(cli)
+        check(lambda top: top.update(url='https://downloads.example.invalid/1.2.14' + cli['url_suffix']), RuntimeError)
+        check(lambda top: top.update(version='1.2.1'), RuntimeError)
+        check(lambda top: top.update(sha512=''), w.Deferred)
+        self.obj.fetch = lambda *a: json.dumps([]).encode()
+        with self.assertRaisesRegex(RuntimeError, 'Malformed release feed'):
+            self.obj.feed_release(cli)
 
     def test_no_upgrade_feed_cli_does_not_query_or_run(self):
         cli = next(c for c in self.obj.manifest['feed_clis'] if c['command'] == 'agy')

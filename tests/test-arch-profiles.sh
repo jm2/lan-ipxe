@@ -60,9 +60,15 @@ test_profile_selection() (
     array_contains "${package}" "${PKGS_OFFICIAL[@]}" \
       || fail "core official set omits ${package}"
   done
-  for package in google-chrome balun-bin tributary-bin powershell-bin android-studio; do
+  for package in google-chrome balun-bin tributary-bin powershell-bin android-studio crush-bin; do
     array_contains "${package}" "${PKGS_AUR[@]}" \
       || fail "core AUR set omits ${package}"
+  done
+  array_contains flatpak "${PKGS_OFFICIAL[@]}" \
+    || fail 'core official set omits flatpak (goose Desktop bundle)'
+  for package in "${OPENCODE_PKGS[@]}"; do
+    ! array_contains "${package}" "${PKGS_OFFICIAL[@]}" "${PKGS_AUR[@]}" \
+      || fail "core set still requests ${package}"
   done
   select_profile full
   for package in "${games[@]}" "${media[@]}" rustup chromium; do
@@ -156,10 +162,17 @@ test_check_exit_codes() (
   mkdir -p "${HOME}/.local/bin" "${ANTIGRAVITY_INSTALL_DIR}"
   local tool
   for tool in "${ANTIGRAVITY_INSTALL_DIR}/Antigravity.AppImage" \
-      "${HOME}/.local/bin/agy" "${HOME}/.local/bin/claude" "${HOME}/.local/bin/codex"; do
+      "${HOME}/.local/bin/agy" "${HOME}/.local/bin/claude" "${HOME}/.local/bin/codex" \
+      "${HOME}/.local/bin/goose"; do
     printf '#!/bin/sh\n' >"${tool}"
     chmod 0755 "${tool}"
   done
+  goose_desktop=1
+  flatpak() {
+    [[ $1 == info && $2 == --system && $3 == "${GOOSE_DESKTOP_FLATPAK}" ]] \
+      || fail "unexpected flatpak query: $*"
+    (( goose_desktop ))
+  }
   installed=' '
   pacman() {
     case $1 in
@@ -193,6 +206,27 @@ test_check_exit_codes() (
     || fail 'check did not flag a missing native claude'
   printf '#!/bin/sh\n' >"${HOME}/.local/bin/claude"
   chmod 0755 "${HOME}/.local/bin/claude"
+  # OpenCode (package or upstream-installer copy) is drift; so is a missing
+  # goose CLI or desktop app.
+  installed=' opencode '
+  mkdir -p "${HOME}/.opencode/bin"
+  rc=0; output=$(run_check) || rc=$?
+  [[ ${rc} == 2 && ${output} == *'opencode: installed (OpenCode is replaced by goose and Crush)'* \
+     && ${output} == *'.opencode/bin: present'* ]] \
+    || fail 'check did not flag the retired OpenCode package and native copy'
+  installed=' '
+  rm -rf -- "${HOME}/.opencode"
+  rm -f -- "${HOME}/.local/bin/goose"
+  goose_desktop=0
+  rc=0; output=$(run_check) || rc=$?
+  [[ ${rc} == 2 && ${output} == *'native goose: missing'* \
+     && ${output} == *'goose Desktop: Flatpak io.github.block.Goose not installed'* ]] \
+    || fail 'check did not flag a missing goose CLI and desktop app'
+  printf '#!/bin/sh\n' >"${HOME}/.local/bin/goose"
+  chmod 0755 "${HOME}/.local/bin/goose"
+  goose_desktop=1
+  rc=0; output=$(run_check) || rc=$?
+  [[ ${rc} == 0 ]] || fail "restored goose check exited ${rc}: ${output}"
   PROFILE=full; select_profile full
   rc=0; output=$(run_check) || rc=$?
   [[ ${rc} == 2 && ${output} == *'official package steam: not installed'* ]] \

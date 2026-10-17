@@ -112,11 +112,15 @@ test_profile_selection() {
         || fail "${arch}/${profile}: core LAN services are wrong"
       ! grep -Fq 'wazuh-agent' <<<"${pkgs}" \
         || fail "${arch}/${profile}: wazuh-agent must install from its own (pinned) repo step"
+      ! has_line opencode "${tools}" || fail "${arch}/${profile}: still installs OpenCode"
+      has_line crush "${pkgs}" || fail "${arch}/${profile}: omits the Crush package"
+      grep -Fq 'files/etc/yum.repos.d/charm.repo -> /etc/yum.repos.d/charm.repo' <<<"${out}" \
+        || fail "${arch}/${profile}: plan omits Charm's repository file"
       for item in copr:copr.fedorainfracloud.org:jmsqrd:balun \
-          copr:copr.fedorainfracloud.org:jmsqrd:tributary; do
+          copr:copr.fedorainfracloud.org:jmsqrd:tributary charm; do
         has_line "${item}" "${repos}" || fail "${arch}/${profile}: omits core repo ${item}"
       done
-      for item in antigravity agy opencode claude codex zed speedtest; do
+      for item in antigravity agy goose goose-desktop claude codex zed speedtest; do
         has_line "${item}" "${tools}" || fail "${arch}/${profile}: omits tool ${item}"
       done
       # Claude Code self-updates natively; its RPM repo and the unused NVIDIA repo are retired.
