@@ -27,7 +27,10 @@ as presence-only or -NoUpgrade is given.
      itself. The legacy Antigravity IDE, VSCodium and
      standalone Rust MSI packages are removed in favor of Antigravity 2.0,
      Microsoft VS Code and rustup; the OpenCode CLI and desktop app
-     (SST.opencode, SST.OpenCodeDesktop) are removed in favor of Goose and
+     (SST.opencode, SST.OpenCodeDesktop) and any native OpenCode install
+     (%USERPROFILE%\.opencode\bin with its PATH entry and Git Bash rc lines,
+     or a desktop app installed directly from opencode.ai) are removed in
+     favor of Goose and
      Crush (charmbracelet.crush, Charm's own WinGet package; Crush has no
      desktop app). "Already installed" and "reboot required"
      results count as success; any other failure is reported at the end
@@ -244,6 +247,9 @@ $GooseRepo = 'aaif-goose/goose'
 $GooseDesktopAsset = 'Goose-win32-x64.zip'
 $GooseDesktopArchitectures = @('AMD64')
 $GooseDesktopMarkerName = '.lan-ipxe-release'
+
+# Git Bash rc files OpenCode's own install script appends its PATH line to.
+$OpenCodeRcFiles = @('.bashrc', '.bash_profile', '.profile')
 
 # Balun (core, beside jm2.Tributary). Its WinGet manifest jm2.Balun is pending
 # review, so apply prefers WinGet as soon as the ID resolves and otherwise
@@ -877,6 +883,226 @@ function Invoke-BalunStep {
     }
 }
 
+#--- OpenCode native-install purge ------------------------------------------
+# Native installs WinGet does not see: the CLI from OpenCode's own install
+# script (run under Git Bash) in %USERPROFILE%\.opencode\bin, the PATH lines
+# that script adds, and a desktop app installed straight from opencode.ai.
+# OpenCode's config and session data (~\.config\opencode,
+# ~\.local\share\opencode) are left in place.
+function Get-OpenCodeNativeBin {
+    if ([string]::IsNullOrWhiteSpace($env:USERPROFILE)) { return $null }
+    return Join-Path (Join-Path $env:USERPROFILE '.opencode') 'bin'
+}
+
+# Pure: the PATH entries that do not name $Directory (after expanding %VAR%).
+function Get-PathListWithout {
+    param(
+        [string[]]$Entries = @(),
+        [Parameter(Mandatory = $true)][string]$Directory
+    )
+    $wanted = $Directory.Replace('/', '\').TrimEnd('\')
+    return @($Entries | Where-Object {
+            $_ -and [Environment]::ExpandEnvironmentVariables($_).Replace('/', '\').TrimEnd('\') -ine $wanted
+        })
+}
+
+function Get-UserPathEntry {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment')
+    if (-not $key) { return @() }
+    try {
+        $raw = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    }
+    finally {
+        $key.Close()
+    }
+    return @($raw -split ';' | Where-Object { $_ })
+}
+
+# Mirrors Add-UserPathEntry: drops every user PATH entry naming $Directory,
+# keeping %VAR% entries unexpanded. Returns $true when PATH changed.
+function Remove-UserPathEntry {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([Parameter(Mandatory = $true)][string]$Directory)
+    if (-not $PSCmdlet.ShouldProcess('user PATH', "remove $Directory")) { return $false }
+    $env:Path = (Get-PathListWithout -Entries @($env:Path -split ';') -Directory $Directory) -join ';'
+    $entries = Get-UserPathEntry
+    $kept = Get-PathListWithout -Entries $entries -Directory $Directory
+    if ($kept.Count -eq $entries.Count) { return $false }
+    $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+    try {
+        $key.SetValue('Path', ($kept -join ';'), [Microsoft.Win32.RegistryValueKind]::ExpandString)
+    }
+    finally {
+        $key.Close()
+    }
+    return $true
+}
+
+# Pure: removes each block OpenCode's install script appends to a shell rc
+# file - a blank line, "# opencode", then `export PATH=<home>/.opencode/bin:$PATH`
+# - and nothing else. Line endings are kept as found.
+function Get-OpenCodeRcCleanText {
+    param([AllowEmptyString()][string]$Text = '')
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($line in ($Text -split "`n")) {
+        $bare = $line.TrimEnd("`r")
+        if ($bare -match '^export PATH=\S*/\.opencode/bin:\$PATH$' -and
+            $lines.Count -and $lines[$lines.Count - 1].TrimEnd("`r") -eq '# opencode') {
+            $lines.RemoveAt($lines.Count - 1)
+            if ($lines.Count -and $lines[$lines.Count - 1].TrimEnd("`r") -eq '') {
+                $lines.RemoveAt($lines.Count - 1)
+            }
+            continue
+        }
+        $lines.Add($line)
+    }
+    return ($lines -join "`n")
+}
+
+# Pure: splits an uninstall command line into the executable and its
+# arguments. Accepts a quoted path ("C:\x y\u.exe" /S) or an unquoted one
+# ending in .exe (C:\x\u.exe /S).
+function Split-UninstallCommand {
+    param([Parameter(Mandatory = $true)][string]$Command)
+    $text = $Command.Trim()
+    if ($text -match '^"(?<File>[^"]+)"\s*(?<Arguments>.*)$' -or
+        $text -match '^(?<File>.+?\.exe)(?:\s+(?<Arguments>.*))?$') {
+        return [pscustomobject]@{ FilePath = $Matches.File; Arguments = ([string]$Matches.Arguments).Trim() }
+    }
+    throw "unrecognized uninstall command: $Command"
+}
+
+$OpenCodeUninstallWaitSeconds = 120
+
+# Uninstall entries of a directly installed OpenCode desktop app (Tauri NSIS,
+# per-user or per-machine). Only these exact display names are touched.
+function Get-OpenCodeUninstallEntry {
+    $roots = @(
+        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+    foreach ($root in $roots) {
+        Get-ItemProperty -Path $root -ErrorAction SilentlyContinue |
+            Where-Object { $_.PSObject.Properties.Name -contains 'DisplayName' -and [string]$_.DisplayName -imatch '^OpenCode( Desktop)?$' } |
+            ForEach-Object {
+                $quiet = if ($_.PSObject.Properties.Name -contains 'QuietUninstallString') { [string]$_.QuietUninstallString } else { '' }
+                $plain = if ($_.PSObject.Properties.Name -contains 'UninstallString') { [string]$_.UninstallString } else { '' }
+                [pscustomobject]@{
+                    DisplayName = [string]$_.DisplayName
+                    Key = [string]$_.PSPath
+                    QuietUninstallString = $quiet
+                    UninstallString = $plain
+                }
+            }
+    }
+}
+
+function Invoke-UninstallCommand {
+    param([Parameter(Mandatory = $true)][string]$FilePath, [string]$Arguments = '')
+    $start = @{ FilePath = $FilePath; Wait = $true; PassThru = $true }
+    if ($Arguments) { $start.ArgumentList = $Arguments }
+    return (Start-Process @start).ExitCode
+}
+
+function Get-OpenCodeRcPath {
+    if ([string]::IsNullOrWhiteSpace($env:USERPROFILE)) { return @() }
+    return @($OpenCodeRcFiles | ForEach-Object { Join-Path $env:USERPROFILE $_ })
+}
+
+# Read-only: one description per OpenCode native leftover (for -Check).
+function Get-OpenCodeNativeLeftover {
+    $leftovers = @()
+    $bin = Get-OpenCodeNativeBin
+    if ($bin) {
+        if (Test-Path -LiteralPath $bin) { $leftovers += "$bin (native CLI)" }
+        $entries = Get-UserPathEntry
+        if ((Get-PathListWithout -Entries $entries -Directory $bin).Count -ne @($entries).Count) {
+            $leftovers += "user PATH entry $bin"
+        }
+    }
+    foreach ($rc in Get-OpenCodeRcPath) {
+        if (-not (Test-Path -LiteralPath $rc -PathType Leaf)) { continue }
+        $text = [IO.File]::ReadAllText($rc)
+        if ((Get-OpenCodeRcCleanText -Text $text) -cne $text) { $leftovers += "$rc (OpenCode PATH lines)" }
+    }
+    foreach ($entry in @(Get-OpenCodeUninstallEntry)) {
+        $leftovers += "$($entry.DisplayName) (directly installed desktop app)"
+    }
+    return @($leftovers)
+}
+
+# Removes every leftover Get-OpenCodeNativeLeftover reports. Runs after the
+# WinGet legacy removal, so WinGet-owned copies are already gone.
+function Invoke-OpenCodeNativePurge {
+    $removed = @()
+    $failed = @()
+    $bin = Get-OpenCodeNativeBin
+    if ($bin) {
+        try {
+            if (Test-Path -LiteralPath $bin) {
+                Remove-Item -LiteralPath $bin -Recurse -Force
+                $removed += $bin
+                $parent = Split-Path -Parent $bin
+                if (-not @(Get-ChildItem -LiteralPath $parent -Force).Count) {
+                    Remove-Item -LiteralPath $parent -Force
+                }
+            }
+        }
+        catch {
+            Write-Warning "OpenCode CLI: could not remove $bin`: $($_.Exception.Message)"
+            $failed += "remove $bin"
+        }
+        try {
+            if (Remove-UserPathEntry -Directory $bin) { $removed += "user PATH entry $bin" }
+        }
+        catch {
+            Write-Warning "OpenCode CLI: could not update the user PATH: $($_.Exception.Message)"
+            $failed += 'remove the OpenCode user PATH entry'
+        }
+    }
+    foreach ($rc in Get-OpenCodeRcPath) {
+        if (-not (Test-Path -LiteralPath $rc -PathType Leaf)) { continue }
+        try {
+            $text = [IO.File]::ReadAllText($rc)
+            $clean = Get-OpenCodeRcCleanText -Text $text
+            if ($clean -cne $text) {
+                [IO.File]::WriteAllText($rc, $clean, (New-Object System.Text.UTF8Encoding $false))
+                $removed += "OpenCode PATH lines in $rc"
+            }
+        }
+        catch {
+            Write-Warning "OpenCode CLI: could not clean $rc`: $($_.Exception.Message)"
+            $failed += "clean $rc"
+        }
+    }
+    foreach ($entry in @(Get-OpenCodeUninstallEntry)) {
+        try {
+            $commandLine = if ($entry.QuietUninstallString) { $entry.QuietUninstallString }
+            elseif ($entry.UninstallString) { "$($entry.UninstallString) /S" }
+            else { throw 'no uninstall command is registered' }
+            $parsed = Split-UninstallCommand -Command $commandLine
+            $code = Invoke-UninstallCommand -FilePath $parsed.FilePath -Arguments $parsed.Arguments
+            if ($code -ne 0) { throw "uninstaller exited with $code" }
+            # NSIS uninstallers relaunch themselves from %TEMP% and return at
+            # once, so give the real uninstall time to remove its entry.
+            $deadline = (Get-Date).AddSeconds($OpenCodeUninstallWaitSeconds)
+            while (@(Get-OpenCodeUninstallEntry | Where-Object { $_.Key -eq $entry.Key }).Count) {
+                if ((Get-Date) -ge $deadline) { throw 'uninstaller finished but its uninstall entry remains' }
+                Start-Sleep -Seconds 1
+            }
+            $removed += "$($entry.DisplayName) desktop app"
+        }
+        catch {
+            Write-Warning "$($entry.DisplayName): $($_.Exception.Message)"
+            $failed += "uninstall $($entry.DisplayName)"
+        }
+    }
+    foreach ($item in $removed) { Write-Note "OpenCode: removed $item" }
+    if (-not $removed.Count -and -not $failed.Count) { Write-Note 'OpenCode: no native installs found' }
+    return [pscustomobject]@{ Removed = @($removed); Failed = @($failed) }
+}
+
 #--- Goose Desktop (verified GitHub release zip) ----------------------------
 function Get-GooseDesktopRoot {
     if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { return $null }
@@ -1084,6 +1310,9 @@ if ($DryRun) {
     Write-Note "    run silently ($($BalunInstallerArgs -join ' ')); skipped when present and -NoUpgrade"
     Write-Note 'Legacy packages removed if installed:'
     foreach ($id in $WingetLegacyPackages) { Write-Note "    $id" }
+    Write-Note 'Native OpenCode installs removed after the WinGet legacy packages:'
+    Write-Note '    %USERPROFILE%\.opencode\bin and its user PATH entry; the "# opencode" PATH lines in'
+    Write-Note "    %USERPROFILE%\{$($OpenCodeRcFiles -join ',')}; a directly installed OpenCode desktop app (its uninstaller)"
     Write-Note 'Self-updating native CLIs (official per-user installers; the WinGet package each replaces is removed afterwards):'
     foreach ($tool in $NativeCliTools) {
         $details = @()
@@ -1163,6 +1392,9 @@ if ($Check) {
     }
     else {
         Write-Note "NOTE    Goose Desktop: not available for $(Get-NativeProcessorArchitecture)"
+    }
+    foreach ($leftover in Get-OpenCodeNativeLeftover) {
+        Write-State $false "OpenCode: $leftover" 'native install; removed on apply'
     }
     $balun = Get-BalunInstall
     $balunOwner = if ($installedIds -contains $BalunWingetId) { "WinGet $BalunWingetId" } else { 'GitHub release' }
@@ -1246,6 +1478,9 @@ $wingetResult = Invoke-WingetPackageSet `
     -LegacyIds $WingetLegacyPackages `
     -NoUpgrade:$NoUpgrade
 
+Write-Step 'OpenCode native installs (replaced by Goose and Crush)'
+$openCodeResult = Invoke-OpenCodeNativePurge
+
 Write-Step 'Balun (WinGet when published, otherwise verified GitHub release)'
 $balunResult = Invoke-BalunStep -InstalledIds $installedIds -NoUpgrade:$NoUpgrade
 Write-Note "Balun: $balunResult"
@@ -1274,5 +1509,7 @@ if ($script:RebootNeeded) {
 }
 Write-Note "native CLIs: $($nativeResult.Installed.Count) installed now, $($nativeResult.Current.Count) current, $($nativeResult.Skipped.Count) unsupported here, $($nativeResult.RetiredWinget.Count) WinGet copies removed, $($nativeResult.Failed.Count) failed"
 if ($nativeResult.Failed.Count) { Write-Note "failed: $($nativeResult.Failed -join ', ')" }
+Write-Note "OpenCode native installs: $($openCodeResult.Removed.Count) removed, $($openCodeResult.Failed.Count) failed"
+if ($openCodeResult.Failed.Count) { Write-Note "failed: $($openCodeResult.Failed -join ', ')" }
 if ($balunResult -eq 'deferred') { Write-Note 'deferred (re-run after a reboot): Balun' }
-if ($wingetResult.Failed.Count -or $nativeResult.Failed.Count -or $rustResult -eq 'failed' -or $balunResult -eq 'failed' -or $gooseDesktopResult -eq 'failed') { exit 1 }
+if ($wingetResult.Failed.Count -or $openCodeResult.Failed.Count -or $nativeResult.Failed.Count -or $rustResult -eq 'failed' -or $balunResult -eq 'failed' -or $gooseDesktopResult -eq 'failed') { exit 1 }

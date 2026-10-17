@@ -226,8 +226,12 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   installs the requested set, including Charm's own `crush-bin` for Crush (a CLI;
   Charm ships no desktop app). Arch's signed repositories provide Code OSS and Zed.
   The script removes VSCodium, Antigravity IDE, any installed Antigravity 1.x
-  package, and OpenCode (the `opencode` CLI and desktop packages, plus upstream's
-  `~/.opencode/bin` copy; its config and data stay) before installing their replacements. The package selection intentionally includes Intel/AMD graphics
+  package, and OpenCode before installing their replacements. The OpenCode purge covers
+  the `opencode` CLI and desktop packages and every native install: upstream's
+  `~/.opencode/bin` (and a `~/.local/bin/opencode` link into it), the
+  `# opencode` PATH lines its installer appends to bash/zsh/fish startup files, and a
+  desktop AppImage in `~/Applications` or `~/.local/bin` with its launcher; OpenCode's
+  config and data stay. The package selection intentionally includes Intel/AMD graphics
   support and NVIDIA open modules for both `linux` and `linux-lts`. Rust comes only
   from rustup: an installed distro `rust` (and its split packages) is replaced by
   `rustup`, and each user gets the stable toolchain with rustfmt, clippy, and
@@ -269,8 +273,10 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   Desktop is upstream's Fedora RPM on x86_64; its arm64 RPM is not installable on
   aarch64, so aarch64 gets the system Flatpak bundle from the same release. Crush (a
   CLI; Charm ships no desktop app) comes from Charm's signed repository and updates
-  with DNF. OpenCode is purged: the script-managed `~/.local/bin/opencode`, upstream's
-  `~/.opencode/bin` copy, and any OpenCode CLI/desktop RPM (its config and data stay).
+  with DNF. OpenCode is purged: the script-managed `~/.local/bin/opencode`, any OpenCode
+  CLI/desktop RPM, and every native install (as on Arch: `~/.opencode/bin`, the
+  installer's shell PATH lines, a desktop AppImage and its launcher); its config and
+  data stay.
   Antigravity, its CLI, Claude Code, and Codex all update themselves in place. The
   Antigravity AppImage under `/opt/Antigravity` is owned by the desktop user (and
   needs the `fuse` package's `fusermount`); reruns keep a self-updated AppImage or
@@ -331,7 +337,11 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   Crush (CLI only; there is no Crush desktop app) comes from Charm's
   `charmbracelet.crush` WinGet package. The highest stable Python 3 minor-package channel is resolved from WinGet
   rather than hard-coded. Antigravity IDE, VSCodium, and the OpenCode CLI and desktop app
-  (`SST.opencode`, `SST.OpenCodeDesktop`) are removed, with
+  (`SST.opencode`, `SST.OpenCodeDesktop`) are removed, as are native OpenCode installs
+  WinGet does not track: `%USERPROFILE%\.opencode\bin` with its user PATH entry and the
+  `# opencode` PATH lines its install script adds to Git Bash rc files, and a desktop app
+  installed directly from opencode.ai (through its own uninstaller; config and data
+  stay), with
   Microsoft VS Code kept as the supported Windows editor. One `winget export` snapshot
   decides the remaining state; `--include-unknown` keeps versionless registrations from
   silently freezing, so those vendor installers may run again. "Already installed" /

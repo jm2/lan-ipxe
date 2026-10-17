@@ -453,3 +453,6 @@ finally {
 }
 
 Write-Output 'ALL WINGET MIGRATION ASSERTIONS PASSED'
+
+# The OpenCode native-purge tests ride along with this CI-listed test.
+& (Join-Path $PSScriptRoot 'Test-OpenCodePurge.ps1')
