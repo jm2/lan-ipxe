@@ -120,3 +120,6 @@ if ($setupSource -notmatch '\$hyperVResult\[0\]\.RestartNeeded') {
     throw 'ASSERT: workstation setup does not consume the helper restart signal'
 }
 Write-Output 'CALLER CONTRACT ASSERTIONS PASSED'
+
+# The OpenSSH helper tests ride along with this CI-listed Windows helper test.
+& (Join-Path $PSScriptRoot 'Test-OpenSsh.ps1')

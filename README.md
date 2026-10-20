@@ -366,7 +366,11 @@ the workstation's policy requires it.
 Windows helpers (called by `setup-win11-workstation.ps1`, also usable standalone):
 
 - `enable-openssh-win11.ps1` — installs the OpenSSH Server capability, starts/enables
-  `sshd`, ensures the firewall rule, sets PowerShell as the default SSH shell.
+  `sshd`, ensures the firewall rule, sets PowerShell as the default SSH shell. The slow
+  DISM capability query runs only when `sshd` is not already registered on the inbox
+  binary (falling back to native Windows PowerShell when the DISM cmdlets report "Class
+  not registered", as under PowerShell 7); `-Test` is a read-only, DISM-free probe the
+  workstation setup uses to skip the whole step on a converged machine.
 - `enable-hyperv-win11.ps1` — enables Hyper-V through the supported optional-feature
   API on eligible Windows editions and refuses the unsupported Windows 11 Home hack.
 

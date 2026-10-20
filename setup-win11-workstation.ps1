@@ -1267,6 +1267,16 @@ function Invoke-GooseDesktopStep {
     }
 }
 
+# Mirrors enable-openssh-win11.ps1 (which -Check cannot run unelevated):
+# installing the OpenSSH.Server capability registers sshd on the inbox binary.
+function Test-InboxSshdService {
+    $imagePath = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\sshd' -Name ImagePath -ErrorAction SilentlyContinue).ImagePath
+    if (-not $imagePath) { return $false }
+    $inbox = Join-Path $env:SystemRoot 'System32\OpenSSH\sshd.exe'
+    $registered = [Environment]::ExpandEnvironmentVariables(([string]$imagePath).Trim().Trim('"'))
+    return (($registered -replace '/', '\') -ieq ($inbox -replace '/', '\')) -and (Test-Path -LiteralPath $inbox -PathType Leaf)
+}
+
 # -Check output: one CURRENT/DRIFT line per item, drift counted for the exit code.
 function Write-State {
     param(
@@ -1337,14 +1347,21 @@ if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
 #--- Check: read-only state report ------------------------------------------
 if ($Check) {
     Write-Step 'OpenSSH Server'
-    # The DISM-backed queries need elevation; unelevated, the service state
-    # below still shows whether the capability is in place.
-    try {
-        $capability = Get-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
-        Write-State ($capability.State -eq 'Installed') 'OpenSSH.Server capability' ([string]$capability.State)
+    # The capability is what registers sshd on the inbox binary, so that
+    # registration answers without the slow DISM query. Otherwise ask DISM,
+    # which needs elevation (and the native Windows PowerShell host); when it
+    # cannot answer, the service state below still shows what is missing.
+    if (Test-InboxSshdService) {
+        Write-State $true 'OpenSSH.Server capability' 'inbox sshd service registered'
     }
-    catch {
-        Write-Note "NOTE    OpenSSH.Server capability: not queried ($($_.Exception.Message))"
+    else {
+        try {
+            $capability = Get-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+            Write-State ($capability.State -eq 'Installed') 'OpenSSH.Server capability' ([string]$capability.State)
+        }
+        catch {
+            Write-Note "NOTE    OpenSSH.Server capability: not queried ($($_.Exception.Message))"
+        }
     }
     $service = Get-Service sshd -ErrorAction SilentlyContinue
     Write-State ($null -ne $service -and $service.Status -eq 'Running' -and [string]$service.StartType -eq 'Automatic') 'sshd service' $(if ($service) { "$($service.Status), $($service.StartType)" } else { 'missing' })
@@ -1426,12 +1443,20 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 
 #--- 1. OpenSSH Server ------------------------------------------------------
 Write-Step 'OpenSSH Server'
-& (Join-Path $PSScriptRoot 'enable-openssh-win11.ps1')
-$defaultShell = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell -ErrorAction Stop).DefaultShell
-if ($defaultShell -ne $OpenSshDefaultShell) {
-    throw 'OpenSSH helper returned without converging DefaultShell'
+$openSshHelper = Join-Path $PSScriptRoot 'enable-openssh-win11.ps1'
+# The read-only probe never queries DISM, so a converged machine skips the
+# slow capability check entirely.
+if (& $openSshHelper -Test) {
+    Write-Note 'capability, sshd, firewall, and DefaultShell already in place'
 }
-Write-Note 'capability, sshd, firewall, and DefaultShell reconciled'
+else {
+    & $openSshHelper
+    $defaultShell = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell -ErrorAction Stop).DefaultShell
+    if ($defaultShell -ne $OpenSshDefaultShell) {
+        throw 'OpenSSH helper returned without converging DefaultShell'
+    }
+    Write-Note 'capability, sshd, firewall, and DefaultShell reconciled'
+}
 
 #--- 2. Hyper-V (opt-in) ----------------------------------------------------
 if ($HyperV) {
