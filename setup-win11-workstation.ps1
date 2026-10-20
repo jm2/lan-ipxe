@@ -32,7 +32,12 @@ as presence-only or -NoUpgrade is given.
      or a desktop app installed directly from opencode.ai) are removed in
      favor of Goose and
      Crush (charmbracelet.crush, Charm's own WinGet package; Crush has no
-     desktop app). "Already installed" and "reboot required"
+     desktop app). An update whose installer technology changed (LLVM 23
+     moved from NSIS to MSI) is applied as an uninstall plus a fresh
+     install, as winget requires. Run from the WinGet-installed PowerShell
+     7, the Microsoft.PowerShell update is skipped (its MSI closes every
+     pwsh, ending the run); run from powershell.exe to update it.
+     "Already installed" and "reboot required"
      results count as success; any other failure is reported at the end
      (exit code 1) without stopping the run, so one broken installer never
      blocks the rest.
@@ -207,6 +212,8 @@ $NativeCliTools = @(
         Root = 'USERPROFILE'
         RelativePath = '.local\bin\claude.exe'
         WingetId = 'Anthropic.ClaudeCode'
+        # Its installer only warns when %USERPROFILE%\.local\bin is not on PATH.
+        AddToUserPath = $true
         Environment = @{}
     }
     @{
@@ -283,10 +290,37 @@ $WingetRemoveOkCodes = @{
     0x8A15010B = 'removed - the uninstaller initiated a reboot' # INSTALL_REBOOT_INITIATED
 }
 $WingetExportOkCodes = @(0, 0x8A150035) # success, or NOT_ALL_PACKAGES_FOUND
+# The newer version uses a different installer technology (LLVM 23 moved from
+# NSIS to MSI); winget asks for an uninstall followed by a fresh install.
+$WingetInstallTechMismatchCode = 0x8A15008E # INSTALL_TECHNOLOGY_MISMATCH
+# NSIS uninstallers relaunch themselves from %TEMP% and return at once, so the
+# reinstall waits until winget no longer lists the package.
+$WingetUninstallWaitSeconds = 600
+$WingetUninstallPollSeconds = 5
 
 #--- Helpers ----------------------------------------------------------------
 function Write-Step { param([string]$Message) Write-Host "==> $Message" -ForegroundColor Green }
 function Write-Note { param([string]$Message) Write-Host "    $Message" }
+
+# winget is an App Installer execution alias. When the Store updates or
+# re-registers App Installer mid-run, the alias briefly cannot be launched
+# ("Access is denied" or not found). Only a launch failure is retried - winget
+# never started, so nothing runs twice. Output and $LASTEXITCODE pass through.
+$WingetLaunchAttempts = 6
+$WingetLaunchRetrySeconds = 10
+function Invoke-Winget {
+    for ($attempt = 1; ; $attempt++) {
+        try {
+            & winget @args
+            return
+        }
+        catch [System.Management.Automation.ApplicationFailedException], [System.Management.Automation.CommandNotFoundException] {
+            if ($attempt -ge $WingetLaunchAttempts) { throw }
+            Write-Warning "winget could not be launched ($($_.Exception.Message.Split([Environment]::NewLine)[0])); retrying in $WingetLaunchRetrySeconds s"
+            Start-Sleep -Seconds $WingetLaunchRetrySeconds
+        }
+    }
+}
 
 # Ids of every installed package winget can match to a source. One
 # `winget export` is far cheaper than a `winget list` per package, and its
@@ -296,7 +330,7 @@ function Get-WingetInventory {
     try {
         # 0x8A150035 means some unrelated installed applications could not be
         # matched to this source; the matched winget inventory is still valid.
-        & winget export -o $tmp --source winget --accept-source-agreements --disable-interactivity | Out-Null
+        Invoke-Winget export -o $tmp --source winget --accept-source-agreements --disable-interactivity | Out-Null
         $code = $LASTEXITCODE
         if ($WingetExportOkCodes -notcontains $code) {
             throw ("winget export failed with 0x{0:X8} ({0})" -f $code)
@@ -338,13 +372,77 @@ function Get-WingetInventory {
     }
 }
 
+# The uninstall registry entry winget correlates with an installed package,
+# from the "Local Identifier: ARP\<Machine|User>\<arch>\<key>" detail; $null
+# when winget reports none (or prints it in another UI language).
+function Get-WingetArpEntry {
+    param([Parameter(Mandatory = $true)][string]$Id)
+    $output = @(Invoke-Winget list --id $Id --exact --details --source winget --accept-source-agreements --disable-interactivity 2>&1)
+    if ($LASTEXITCODE -ne 0) { return $null }
+    $match = [regex]::Match((([string[]]$output) -join "`n"), '(?m)^\s*Local Identifier:\s*ARP\\(?<Scope>Machine|User)\\(?<Arch>[^\\]+)\\(?<Key>[^\r\n]+?)\s*$')
+    if (-not $match.Success) { return $null }
+    $uninstall = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'
+    $path = if ($match.Groups['Scope'].Value -eq 'User') { "HKCU:\$uninstall" }
+    elseif ($match.Groups['Arch'].Value -eq 'X86' -and [Environment]::Is64BitOperatingSystem) { "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall" }
+    else { "HKLM:\$uninstall" }
+    return Get-ItemProperty -LiteralPath (Join-Path $path $match.Groups['Key'].Value) -ErrorAction SilentlyContinue
+}
+
+# NSIS-built executables (installers and uninstallers) carry this signature in
+# their first header.
+function Test-NsisExecutable {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    if ((Get-Item -LiteralPath $Path).Length -gt 64MB) { return $false }
+    return [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($Path)).Contains('NullsoftInst')
+}
+
+# Uninstalls a package ahead of a reinstall; returns $true when the uninstall
+# was accepted. winget only knows an NSIS package registered without a quiet
+# command as a plain "exe" and runs its uninstaller without /S, which then
+# waits on a confirmation dialog, so NSIS uninstallers are run with /S here.
+function Remove-WingetPackageForReinstall {
+    param([Parameter(Mandatory = $true)][string]$Id)
+    $entry = Get-WingetArpEntry -Id $Id
+    if ($entry -and $entry.PSObject.Properties.Name -contains 'UninstallString' -and $entry.UninstallString -and
+        -not ($entry.PSObject.Properties.Name -contains 'QuietUninstallString' -and $entry.QuietUninstallString)) {
+        $parsed = Split-UninstallCommand -Command ([string]$entry.UninstallString)
+        if (Test-NsisExecutable -Path $parsed.FilePath) {
+            Write-Note "$Id`: running its NSIS uninstaller silently"
+            $code = Invoke-UninstallCommand -FilePath $parsed.FilePath -Arguments ("$($parsed.Arguments) /S".Trim())
+            if ($code -ne 0) { Write-Warning "$Id`: NSIS uninstaller exited with $code" }
+            return ($code -eq 0)
+        }
+    }
+    Invoke-Winget uninstall --id $Id --exact --source winget --silent --accept-source-agreements --disable-interactivity | Out-Host
+    $code = $LASTEXITCODE
+    if ($WingetRebootCodes -contains $code) { $script:RebootNeeded = $true }
+    if (-not $WingetRemoveOkCodes.ContainsKey($code)) {
+        Write-Warning ("{0}: winget uninstall before reinstall exited with 0x{1:X8} ({1})" -f $Id, $code)
+        return $false
+    }
+    return $true
+}
+
+# $true once winget no longer lists $Id as installed; $false on timeout.
+function Wait-WingetPackageRemoved {
+    param([Parameter(Mandatory = $true)][string]$Id)
+    $deadline = (Get-Date).AddSeconds($WingetUninstallWaitSeconds)
+    while ($true) {
+        Invoke-Winget list --id $Id --exact --source winget --accept-source-agreements --disable-interactivity | Out-Null
+        if ($LASTEXITCODE -ne 0) { return $true }
+        if ((Get-Date) -ge $deadline) { return $false }
+        Start-Sleep -Seconds $WingetUninstallPollSeconds
+    }
+}
+
 # Python publishes a separate WinGet package ID for each 3.x minor release, so
 # upgrading one exact ID can never migrate to the next minor. Resolve the
 # highest numeric Python.Python.3.N ID exposed by the native WinGet source.
 function Resolve-LatestPythonWingetPackageId {
     $prefix = 'Python.Python.3.'
     $output = @(
-        & winget search --id $prefix --source winget --count 1000 `
+        Invoke-Winget search --id $prefix --source winget --count 1000 `
             --accept-source-agreements --disable-interactivity 2>&1
     )
     $code = $LASTEXITCODE
@@ -394,6 +492,10 @@ function Invoke-WingetPackageSet {
 
         [string[]]$LegacyIds = @(),
 
+        # Installed packages whose update would close the process running this
+        # script (the PowerShell 7 MSI shuts down every pwsh). Never upgraded here.
+        [string[]]$HostIds = @(),
+
         # Install missing packages only; leave installed ones at their version.
         [switch]$NoUpgrade
     )
@@ -407,10 +509,15 @@ function Invoke-WingetPackageSet {
     $present = @()
     $missing = @()
     $upgrade = @()
+    $hostSkipped = @()
     foreach ($id in $DesiredIds) {
         if ($InstalledIds -contains $id) {
             if ($NoUpgrade -or $PresenceOnlyIds -contains $id) {
                 $present += $id
+            }
+            elseif ($HostIds -contains $id) {
+                $present += $id
+                $hostSkipped += $id
             }
             else {
                 $upgrade += $id
@@ -422,6 +529,9 @@ function Invoke-WingetPackageSet {
     }
 
     Write-Note "$($present.Count) presence-only, $($missing.Count) missing, $($upgrade.Count) checking for updates"
+    foreach ($id in $hostSkipped) {
+        Write-Note "$id`: update skipped - it hosts this run; run the script from Windows PowerShell (powershell.exe) to update it"
+    }
 
     $removedLegacy = @()
     $installedNow = @()
@@ -433,7 +543,7 @@ function Invoke-WingetPackageSet {
         if ($InstalledIds -notcontains $id) { continue }
 
         Write-Note "removing legacy $id"
-        & winget uninstall --id $id --exact --source winget --silent --accept-source-agreements --disable-interactivity | Out-Host
+        Invoke-Winget uninstall --id $id --exact --source winget --silent --accept-source-agreements --disable-interactivity | Out-Host
         $code = $LASTEXITCODE
         if ($WingetRebootCodes -contains $code) { $script:RebootNeeded = $true }
         if ($WingetRemoveOkCodes.ContainsKey($code)) {
@@ -452,7 +562,7 @@ function Invoke-WingetPackageSet {
 
     foreach ($id in $missing) {
         Write-Note "installing $id"
-        & winget install --id $id --exact --source winget --no-upgrade --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Host
+        Invoke-Winget install --id $id --exact --source winget --no-upgrade --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Host
         $code = $LASTEXITCODE
         if ($WingetRebootCodes -contains $code) { $script:RebootNeeded = $true }
         if ($WingetOkCodes.ContainsKey($code)) {
@@ -474,8 +584,23 @@ function Invoke-WingetPackageSet {
         # include-unknown prevents packages whose installed version is not
         # registered from silently freezing forever. Such a vendor installer
         # may be invoked again on a later setup run; Speedtest is exempt above.
-        & winget upgrade --id $id --exact --source winget --include-unknown --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Host
+        Invoke-Winget upgrade --id $id --exact --source winget --include-unknown --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Host
         $code = $LASTEXITCODE
+        if ($code -eq $WingetInstallTechMismatchCode) {
+            Write-Note "$id`: the update uses a different installer technology; reinstalling"
+            if (-not (Remove-WingetPackageForReinstall -Id $id)) {
+                $failed += "upgrade $id"
+                continue
+            }
+            if (-not (Wait-WingetPackageRemoved -Id $id)) {
+                $failed += "upgrade $id"
+                Write-Warning "$id`: still installed $WingetUninstallWaitSeconds s after its uninstaller returned; re-run to reinstall"
+                continue
+            }
+            # A failed install leaves the package missing; the next run installs it.
+            Invoke-Winget install --id $id --exact --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Host
+            $code = $LASTEXITCODE
+        }
         if ($WingetRebootCodes -contains $code) { $script:RebootNeeded = $true }
         if ($WingetOkCodes.ContainsKey($code)) {
             $updatedOrCurrent += $id
@@ -493,6 +618,7 @@ function Invoke-WingetPackageSet {
 
     return [pscustomobject]@{
         Present = @($present)
+        HostSkipped = @($hostSkipped)
         Installed = @($installedNow)
         UpdatedOrCurrent = @($updatedOrCurrent)
         RemovedLegacy = @($removedLegacy)
@@ -565,6 +691,10 @@ function Invoke-NativeCliInstaller {
             [Environment]::SetEnvironmentVariable($name, $Tool.Environment[$name])
         }
         $hostPath = (Get-Process -Id $PID).Path
+        # Installers call tar.exe; launched from Git Bash, /usr/bin's GNU tar
+        # would shadow Windows' bsdtar and read "C:\..." as a remote host.
+        $savedPath = $env:Path
+        $env:Path = (Join-Path $env:SystemRoot 'System32') + ";$env:Path"
         # Some installers (goose) download their archive into the working
         # directory; keep that inside the scratch directory.
         Push-Location -LiteralPath $dir
@@ -574,6 +704,7 @@ function Invoke-NativeCliInstaller {
         }
         finally {
             Pop-Location
+            $env:Path = $savedPath
         }
         if ($code -ne 0) {
             throw "the official $($Tool.Name) installer exited with $code"
@@ -638,7 +769,7 @@ function Invoke-NativeCliSet {
         }
         if (-not $tool.WingetId -or $InstalledIds -notcontains $tool.WingetId) { continue }
         Write-Note "removing $($tool.WingetId) (replaced by the self-updating native install)"
-        & winget uninstall --id $tool.WingetId --exact --source winget --silent --accept-source-agreements --disable-interactivity | Out-Host
+        Invoke-Winget uninstall --id $tool.WingetId --exact --source winget --silent --accept-source-agreements --disable-interactivity | Out-Host
         $code = $LASTEXITCODE
         if ($WingetRebootCodes -contains $code) { $script:RebootNeeded = $true }
         if ($WingetRemoveOkCodes.ContainsKey($code)) {
@@ -745,7 +876,7 @@ function Get-BalunInstall {
 
 function Test-WingetPackageAvailable {
     param([Parameter(Mandatory = $true)][string]$Id)
-    & winget show --id $Id --exact --source winget --accept-source-agreements --disable-interactivity | Out-Null
+    Invoke-Winget show --id $Id --exact --source winget --accept-source-agreements --disable-interactivity | Out-Null
     return ($LASTEXITCODE -eq 0)
 }
 
@@ -842,11 +973,11 @@ function Invoke-BalunStep {
             $verb = if ($InstalledIds -contains $BalunWingetId) { 'upgrade' } else { 'install' }
             Write-Note "Balun: winget $verb $BalunWingetId"
             if ($verb -eq 'upgrade') {
-                & winget upgrade --id $BalunWingetId --exact --source winget --include-unknown --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Host
+                Invoke-Winget upgrade --id $BalunWingetId --exact --source winget --include-unknown --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Host
             }
             else {
                 # No --no-upgrade: an existing release install is adopted in place.
-                & winget install --id $BalunWingetId --exact --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Host
+                Invoke-Winget install --id $BalunWingetId --exact --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Host
             }
             $code = $LASTEXITCODE
             if ($WingetRebootCodes -contains $code) { $script:RebootNeeded = $true }
@@ -1496,11 +1627,19 @@ Write-Note "Python 3: selected current WinGet channel $latestPythonPackageId"
 
 Write-Step "winget package set ($($WingetPackages.Count) entries)"
 $installedIds = Get-WingetInventory
+# Under the WinGet-installed PowerShell 7, its MSI update would close this run
+# mid-way (and roll back), so that one update is left to a powershell.exe run.
+$hostIds = @()
+if ($PSVersionTable.PSEdition -eq 'Core' -and $env:ProgramFiles -and
+    (Get-Process -Id $PID).Path -like (Join-Path $env:ProgramFiles 'PowerShell\*')) {
+    $hostIds += 'Microsoft.PowerShell'
+}
 $wingetResult = Invoke-WingetPackageSet `
     -InstalledIds $installedIds `
     -DesiredIds $WingetPackages `
     -PresenceOnlyIds $WingetPresenceOnlyPackages `
     -LegacyIds $WingetLegacyPackages `
+    -HostIds $hostIds `
     -NoUpgrade:$NoUpgrade
 
 Write-Step 'OpenCode native installs (replaced by Goose and Crush)'
@@ -1529,6 +1668,7 @@ Write-Step 'Summary'
 Write-Note "winget: $($wingetResult.Installed.Count) installed now, $($wingetResult.UpdatedOrCurrent.Count) updated/current, $($wingetResult.Present.Count) presence-only, $($wingetResult.RemovedLegacy.Count) legacy removed, $($wingetResult.Deferred.Count) deferred, $($wingetResult.Failed.Count) failed"
 if ($wingetResult.Deferred.Count) { Write-Note "deferred (re-run after a reboot): $($wingetResult.Deferred -join ', ')" }
 if ($wingetResult.Failed.Count)   { Write-Note "failed: $($wingetResult.Failed -join ', ')" }
+if ($wingetResult.HostSkipped.Count) { Write-Note "not updated (hosts this run; re-run from powershell.exe): $($wingetResult.HostSkipped -join ', ')" }
 if ($script:RebootNeeded) {
     Write-Warning 'A reboot is required to finish; re-run this script afterwards to pick up anything deferred.'
 }

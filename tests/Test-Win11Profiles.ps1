@@ -19,7 +19,7 @@ if ($parseErrors.Count) {
 $tokens.Count | Out-Null
 
 foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetLegacyPackages', 'WingetPresenceOnlyPackages',
-                              'RustComponents', 'BalunWingetId', 'BalunRepo', 'BalunDisplayName', 'BalunInstallerArgs', 'WingetOkCodes', 'WingetRebootCodes', 'WingetDeferredCodes', 'WingetRemoveOkCodes')) {
+                              'RustComponents', 'BalunWingetId', 'BalunRepo', 'BalunDisplayName', 'BalunInstallerArgs', 'WingetOkCodes', 'WingetRebootCodes', 'WingetDeferredCodes', 'WingetRemoveOkCodes', 'WingetLaunchAttempts', 'WingetLaunchRetrySeconds', 'WingetInstallTechMismatchCode', 'WingetUninstallWaitSeconds', 'WingetUninstallPollSeconds', 'NativeCliTools')) {
     $assignmentAst = $ast.Find({
         param($node)
         $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
@@ -29,7 +29,7 @@ foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetLeg
     if (-not $assignmentAst) { throw "$assignmentName declaration not found" }
     . ([scriptblock]::Create($assignmentAst.Extent.Text))
 }
-foreach ($functionName in @('Write-Note', 'Invoke-WingetPackageSet', 'Get-RustupStableComponent',
+foreach ($functionName in @('Write-Note', 'Invoke-Winget', 'Get-WingetArpEntry', 'Test-NsisExecutable', 'Remove-WingetPackageForReinstall', 'Wait-WingetPackageRemoved', 'Split-UninstallCommand', 'Invoke-UninstallCommand', 'Invoke-WingetPackageSet', 'Get-RustupStableComponent',
                             'Test-RustupDefaultToolchain', 'Initialize-RustupToolchain',
                             'Get-NativeProcessorArchitecture', 'Get-WindowsArchitectureName', 'Get-BalunRelease', 'Invoke-BalunStep')) {
     $functionAst = $ast.Find({
@@ -63,6 +63,10 @@ Assert-True ($core -contains 'jm2.Tributary') 'Tributary is in core'
 Assert-True ($scriptText -match '(?m)^\$balunResult = Invoke-BalunStep ') 'Balun step runs in every profile (core)'
 Assert-True ($scriptText.IndexOf('Invoke-BalunStep -InstalledIds') -lt $scriptText.IndexOf('#--- 4. Self-updating native CLIs')) 'Balun step is part of the package phase'
 Assert-True (($BalunInstallerArgs -join ' ') -eq '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-') 'Balun uses Inno Setup silent switches'
+foreach ($tool in @($NativeCliTools | Where-Object { $_.RelativePath -like '.local\bin\*' })) {
+    # goose also adds .local\bin but is x64-only, so each tool there adds it itself.
+    Assert-True ([bool]$tool.AddToUserPath) "$($tool.Name) puts %USERPROFILE%\.local\bin on the user PATH"
+}
 Write-Output 'PROFILE CONTENTS PASSED'
 
 # --- Parameter validation ----------------------------------------------------
@@ -122,6 +126,131 @@ finally {
     Remove-Item -Path function:global:winget -ErrorAction SilentlyContinue
 }
 Write-Output 'NO-UPGRADE PASSED'
+
+# --- An installer-technology change is upgraded by uninstall + install --------
+# The mock tracks whether the package is still listed; `list --details` reports
+# an ARP entry only when $script:ArpDetails is set.
+$script:ArpDetails = $false
+$script:UninstallExit = 0
+$statefulWinget = {
+    $script:WingetCalls += ($args -join '|')
+    switch ($args[0]) {
+        'upgrade' { $global:LASTEXITCODE = 0x8A15008E }
+        'uninstall' { if ($script:UninstallExit -eq 0) { $script:PackageListed = $false }; $global:LASTEXITCODE = $script:UninstallExit }
+        'list' {
+            if ($args -contains '--details') {
+                if ($script:ArpDetails) { 'LLVM [LLVM.LLVM]'; 'Local Identifier: ARP\Machine\X86\LLVM'; 'Installer Category: exe' }
+                $global:LASTEXITCODE = 0
+            }
+            else { $global:LASTEXITCODE = if ($script:PackageListed) { 0 } else { 0x8A150014 } }
+        }
+        default { $global:LASTEXITCODE = 0 }
+    }
+}
+Set-Item -Path function:global:winget -Value $statefulWinget
+$savedUninstallWait = $WingetUninstallWaitSeconds
+$savedUninstallPoll = $WingetUninstallPollSeconds
+$WingetUninstallWaitSeconds = 0
+$WingetUninstallPollSeconds = 0
+$savedTestNsis = ${function:Test-NsisExecutable}
+$savedInvokeUninstall = ${function:Invoke-UninstallCommand}
+try {
+    $script:WingetCalls = @(); $script:PackageListed = $true
+    $result = Invoke-WingetPackageSet -InstalledIds @('LLVM.LLVM') -DesiredIds @('LLVM.LLVM') 3>$null 6>$null
+    $verbs = @($script:WingetCalls | ForEach-Object { ($_ -split '\|')[0] } | Where-Object { $_ -ne 'list' })
+    Assert-True (($verbs -join ',') -eq 'upgrade,uninstall,install') "an installer-technology mismatch reinstalls (got $($verbs -join ','))"
+    Assert-True ($result.UpdatedOrCurrent -contains 'LLVM.LLVM' -and $result.Failed.Count -eq 0) 'a successful reinstall counts as updated'
+
+    $script:WingetCalls = @(); $script:PackageListed = $true; $script:UninstallExit = 1
+    $result = Invoke-WingetPackageSet -InstalledIds @('LLVM.LLVM') -DesiredIds @('LLVM.LLVM') 3>$null 6>$null
+    Assert-True (@($script:WingetCalls | Where-Object { $_ -like 'install|*' }).Count -eq 0) 'a failed uninstall does not attempt the reinstall'
+    Assert-True ($result.Failed -contains 'upgrade LLVM.LLVM') 'a failed uninstall is reported as a failed upgrade'
+
+    # An uninstaller that returns while the package stays listed (an NSIS
+    # relaunch still running or waiting) does not get a reinstall on top.
+    function global:winget {
+        $script:WingetCalls += ($args -join '|')
+        $global:LASTEXITCODE = if ($args[0] -eq 'upgrade') { 0x8A15008E } else { 0 }
+    }
+    $script:WingetCalls = @()
+    $result = Invoke-WingetPackageSet -InstalledIds @('LLVM.LLVM') -DesiredIds @('LLVM.LLVM') 3>$null 6>$null
+    Assert-True (@($script:WingetCalls | Where-Object { $_ -like 'install|*' }).Count -eq 0) 'a package still listed after its uninstaller returns is not reinstalled'
+    Assert-True ($result.Failed -contains 'upgrade LLVM.LLVM') 'a package still listed after uninstall is reported as a failed upgrade'
+}
+finally {
+    $WingetUninstallWaitSeconds = $savedUninstallWait
+    $WingetUninstallPollSeconds = $savedUninstallPoll
+    Remove-Item -Path function:global:winget -ErrorAction SilentlyContinue
+}
+
+# NSIS uninstallers registered without a quiet command run with /S directly.
+function Get-ItemProperty {
+    [pscustomobject]@{ PSPath = $LiteralPath; UninstallString = '"C:\Program Files\LLVM\Uninstall.exe"'; QuietUninstallString = '' }
+}
+$script:UninstallInvocations = @()
+function Test-NsisExecutable { param($Path) $Path -eq 'C:\Program Files\LLVM\Uninstall.exe' }
+function Invoke-UninstallCommand { param($FilePath, $Arguments) $script:UninstallInvocations += "$FilePath|$Arguments"; $script:PackageListed = $false; 0 }
+Set-Item -Path function:global:winget -Value $statefulWinget
+try {
+    $script:ArpDetails = $true
+    $script:WingetCalls = @(); $script:PackageListed = $true
+    $entry = Get-WingetArpEntry -Id 'LLVM.LLVM'
+    Assert-True ($null -ne $entry) 'the ARP entry is found from winget list --details'
+    Assert-True (Remove-WingetPackageForReinstall -Id 'LLVM.LLVM' 6>$null) 'the NSIS uninstall is accepted'
+    Assert-True (($script:UninstallInvocations -join ';') -eq 'C:\Program Files\LLVM\Uninstall.exe|/S') "the NSIS uninstaller runs with /S (got $($script:UninstallInvocations -join ';'))"
+    Assert-True (@($script:WingetCalls | Where-Object { $_ -like 'uninstall|*' }).Count -eq 0) 'winget uninstall is not used for an NSIS uninstaller'
+}
+finally {
+    Remove-Item -Path function:Get-ItemProperty -ErrorAction SilentlyContinue
+    Set-Item -Path function:Test-NsisExecutable -Value $savedTestNsis
+    Set-Item -Path function:Invoke-UninstallCommand -Value $savedInvokeUninstall
+    Remove-Item -Path function:global:winget -ErrorAction SilentlyContinue
+}
+Write-Output 'INSTALLER TECHNOLOGY CHANGE PASSED'
+
+# --- The PowerShell 7 hosting the run is never upgraded by it ----------------
+$script:WingetCalls = @()
+function global:winget { $script:WingetCalls += ($args -join '|'); $global:LASTEXITCODE = 0 }
+try {
+    $result = Invoke-WingetPackageSet -InstalledIds @('Microsoft.PowerShell', 'Git.Git') -DesiredIds @('Microsoft.PowerShell', 'Git.Git') -HostIds @('Microsoft.PowerShell') 6>$null
+    Assert-True (@($script:WingetCalls | Where-Object { $_ -like '*Microsoft.PowerShell*' }).Count -eq 0) 'the hosting PowerShell is not upgraded'
+    Assert-True (@($script:WingetCalls | Where-Object { $_ -like 'upgrade|--id|Git.Git|*' }).Count -eq 1) 'other packages are still upgraded'
+    Assert-True ($result.HostSkipped -contains 'Microsoft.PowerShell' -and $result.Failed.Count -eq 0) 'the skipped host update is reported, not failed'
+}
+finally {
+    Remove-Item -Path function:global:winget -ErrorAction SilentlyContinue
+}
+Write-Output 'HOST POWERSHELL PASSED'
+
+# --- winget launch failures are retried, exit codes are not ------------------
+$savedRetrySeconds = $WingetLaunchRetrySeconds
+$WingetLaunchRetrySeconds = 0
+$script:WingetLaunches = 0
+function global:winget {
+    $script:WingetLaunches++
+    if ($script:WingetLaunches -eq 1) {
+        throw [System.Management.Automation.ApplicationFailedException]::new("Program 'winget.exe' failed to run: Access is denied")
+    }
+    $global:LASTEXITCODE = 0x8A15002B
+}
+try {
+    Invoke-Winget upgrade --id Git.Git 3>$null | Out-Null
+    Assert-True ($script:WingetLaunches -eq 2) 'a winget launch failure is retried once winget can start'
+    Assert-True ($LASTEXITCODE -eq 0x8A15002B) 'the exit code of the retried winget passes through'
+    $script:WingetLaunches = 1
+    Invoke-Winget upgrade --id Git.Git 3>$null | Out-Null
+    Assert-True ($script:WingetLaunches -eq 2) 'a winget non-zero exit code is not retried'
+    function global:winget { $script:WingetLaunches++; throw [System.Management.Automation.ApplicationFailedException]::new('Access is denied') }
+    $script:WingetLaunches = 0
+    $threw = $false
+    try { Invoke-Winget upgrade --id Git.Git 3>$null | Out-Null } catch { $threw = $true }
+    Assert-True ($threw -and $script:WingetLaunches -eq $WingetLaunchAttempts) 'a persistent winget launch failure throws after the last attempt'
+}
+finally {
+    $WingetLaunchRetrySeconds = $savedRetrySeconds
+    Remove-Item -Path function:global:winget -ErrorAction SilentlyContinue
+}
+Write-Output 'WINGET LAUNCH RETRY PASSED'
 
 # --- rustup initialization ---------------------------------------------------
 $script:RustupCalls = @()
