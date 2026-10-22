@@ -790,6 +790,64 @@ function Invoke-NativeCliSet {
     }
 }
 
+#--- PowerShell 7: the MSI, not the Microsoft Store package -------------------
+# The Store package runs through an app-execution alias that Codex's Windows
+# sandbox (a restricted token) cannot launch, so sandboxed agents can't run any
+# command. WinGet can count the Store copy as Microsoft.PowerShell, so a plain
+# install skips the MSI: force the MSI, verify it, then remove the Store copy.
+function Get-PowerShellMsiPath { Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe' }
+
+function Get-StorePowerShell {
+    @(Get-AppxPackage -Name Microsoft.PowerShell -AllUsers -ErrorAction SilentlyContinue)
+}
+
+function Test-PowerShellMsiRun {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    & $Path -NoProfile -Command 'exit 0'
+    return $LASTEXITCODE -eq 0
+}
+
+function Invoke-PowerShellMsiSwitch {
+    $msi = Get-PowerShellMsiPath
+    $status = 'current'
+    if (-not (Test-Path -LiteralPath $msi)) {
+        Write-Note 'PowerShell 7: installing the MSI (WinGet Microsoft.PowerShell, wix installer)'
+        Invoke-Winget install --id Microsoft.PowerShell --exact --source winget --installer-type wix --force --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Host
+        $code = $LASTEXITCODE
+        if ($WingetRebootCodes -contains $code) { $script:RebootNeeded = $true }
+        if (-not $WingetOkCodes.ContainsKey($code)) {
+            Write-Warning ("PowerShell 7 MSI: winget install exited with 0x{0:X8} ({0})" -f $code)
+            return 'failed'
+        }
+        $status = 'installed'
+    }
+    if (-not (Test-Path -LiteralPath $msi)) {
+        Write-Warning "PowerShell 7 MSI: $msi is missing after install; leaving any Store copy in place"
+        return 'failed'
+    }
+    if (-not (Test-PowerShellMsiRun -Path $msi)) {
+        Write-Warning "PowerShell 7 MSI: $msi does not run; leaving any Store copy in place"
+        return 'failed'
+    }
+    $store = Get-StorePowerShell
+    if ($store.Count -and (Get-Process -Id $PID).Path -like '*\WindowsApps\*') {
+        Write-Warning 'PowerShell 7 Store package: this script runs from it, so it stays; re-run from the MSI pwsh or powershell.exe to remove it'
+        return 'store-kept'
+    }
+    if ($store.Count) {
+        Write-Note "PowerShell 7: removing the Store package $($store[0].Version) (replaced by the MSI)"
+        try {
+            $store | Remove-AppxPackage -AllUsers -ErrorAction Stop
+            if ($status -eq 'current') { $status = 'store-removed' }
+        }
+        catch {
+            Write-Warning "PowerShell 7 Store package: $($_.Exception.Message)"
+            return 'failed'
+        }
+    }
+    return $status
+}
+
 # Rust comes only from rustup. A fresh WinGet install is not on this session's
 # PATH yet, so look in the per-user cargo directory first.
 function Get-RustupPath {
@@ -1544,6 +1602,13 @@ if ($Check) {
     foreach ($leftover in Get-OpenCodeNativeLeftover) {
         Write-State $false "OpenCode: $leftover" 'native install; removed on apply'
     }
+    $pwshMsi = Get-PowerShellMsiPath
+    $hasMsi = Test-Path -LiteralPath $pwshMsi
+    Write-State $hasMsi 'PowerShell 7 (MSI)' $(if ($hasMsi) { $pwshMsi } else { 'not installed' })
+    $storePwsh = Get-StorePowerShell
+    if ($storePwsh.Count) {
+        Write-State $false 'PowerShell 7 (Store package)' "$($storePwsh[0].Version); its alias can't run in Codex's sandbox; replaced by the MSI on apply"
+    }
     $balun = Get-BalunInstall
     $balunOwner = if ($installedIds -contains $BalunWingetId) { "WinGet $BalunWingetId" } else { 'GitHub release' }
     Write-State ($null -ne $balun) 'Balun' $(if ($balun) { "$($balun.Version) via $balunOwner" } else { 'not installed' })
@@ -1645,6 +1710,10 @@ $wingetResult = Invoke-WingetPackageSet `
 Write-Step 'OpenCode native installs (replaced by Goose and Crush)'
 $openCodeResult = Invoke-OpenCodeNativePurge
 
+Write-Step 'PowerShell 7 (MSI, not the Store package)'
+$pwshResult = Invoke-PowerShellMsiSwitch
+Write-Note "PowerShell 7: $pwshResult"
+
 Write-Step 'Balun (WinGet when published, otherwise verified GitHub release)'
 $balunResult = Invoke-BalunStep -InstalledIds $installedIds -NoUpgrade:$NoUpgrade
 Write-Note "Balun: $balunResult"
@@ -1677,4 +1746,4 @@ if ($nativeResult.Failed.Count) { Write-Note "failed: $($nativeResult.Failed -jo
 Write-Note "OpenCode native installs: $($openCodeResult.Removed.Count) removed, $($openCodeResult.Failed.Count) failed"
 if ($openCodeResult.Failed.Count) { Write-Note "failed: $($openCodeResult.Failed -join ', ')" }
 if ($balunResult -eq 'deferred') { Write-Note 'deferred (re-run after a reboot): Balun' }
-if ($wingetResult.Failed.Count -or $openCodeResult.Failed.Count -or $nativeResult.Failed.Count -or $rustResult -eq 'failed' -or $balunResult -eq 'failed' -or $gooseDesktopResult -eq 'failed') { exit 1 }
+if ($wingetResult.Failed.Count -or $openCodeResult.Failed.Count -or $nativeResult.Failed.Count -or $rustResult -eq 'failed' -or $balunResult -eq 'failed' -or $gooseDesktopResult -eq 'failed' -or $pwshResult -eq 'failed') { exit 1 }

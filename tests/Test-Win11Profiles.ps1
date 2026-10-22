@@ -31,7 +31,8 @@ foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetLeg
 }
 foreach ($functionName in @('Write-Note', 'Invoke-Winget', 'Get-WingetArpEntry', 'Test-NsisExecutable', 'Remove-WingetPackageForReinstall', 'Wait-WingetPackageRemoved', 'Split-UninstallCommand', 'Invoke-UninstallCommand', 'Invoke-WingetPackageSet', 'Get-RustupStableComponent',
                             'Test-RustupDefaultToolchain', 'Initialize-RustupToolchain',
-                            'Get-NativeProcessorArchitecture', 'Get-WindowsArchitectureName', 'Get-BalunRelease', 'Invoke-BalunStep')) {
+                            'Get-NativeProcessorArchitecture', 'Get-WindowsArchitectureName', 'Get-BalunRelease', 'Invoke-BalunStep',
+                            'Invoke-PowerShellMsiSwitch')) {
     $functionAst = $ast.Find({
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $functionName
@@ -388,4 +389,56 @@ finally {
     Remove-Item -Path function:Invoke-RestMethod, function:Invoke-WebRequest -ErrorAction SilentlyContinue
 }
 Write-Output 'BALUN PASSED'
+
+# --- PowerShell 7: MSI replaces the Store package ----------------------------
+$script:PwshDir = Join-Path ([IO.Path]::GetTempPath()) ("pwsh-msi-{0}" -f [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $script:PwshDir | Out-Null
+$script:PwshMsi = Join-Path $script:PwshDir 'pwsh.exe'
+$script:PwshCalls = @(); $script:PwshStore = @(); $script:PwshRuns = $true; $script:PwshWingetExit = 0
+function global:winget {
+    $script:PwshCalls += ($args -join '|'); $global:LASTEXITCODE = $script:PwshWingetExit
+    if ($script:PwshWingetExit -eq 0) { Set-Content -LiteralPath $script:PwshMsi -Value '' }
+}
+function Get-PowerShellMsiPath { $script:PwshMsi }
+function Get-StorePowerShell { @($script:PwshStore) }
+function Test-PowerShellMsiRun { param($Path) $script:PwshCalls += "run|$Path"; $script:PwshRuns }
+Set-Item -Path function:Remove-AppxPackage -Value { $script:PwshCalls += 'remove-appx'; $script:PwshStore = @() }
+function Invoke-PwshCase {
+    param([bool]$HasMsi, [bool]$HasStore)
+    $script:PwshCalls = @()
+    Remove-Item -LiteralPath $script:PwshMsi -ErrorAction SilentlyContinue
+    if ($HasMsi) { Set-Content -LiteralPath $script:PwshMsi -Value '' }
+    $script:PwshStore = @(if ($HasStore) { [pscustomobject]@{ Version = '7.6.7.0' } })
+    return (Invoke-PowerShellMsiSwitch 6>$null 3>$null)
+}
+try {
+    $status = Invoke-PwshCase $false $true
+    Assert-True ($status -eq 'installed') "Store-only host gets the MSI (got $status)"
+    $install = @($script:PwshCalls | Where-Object { $_ -like 'install|--id|Microsoft.PowerShell|*' })
+    Assert-True ($install.Count -eq 1 -and $install[0] -match '\|--installer-type\|wix\|' -and $install[0] -match '\|--force\|') 'MSI install is forced past the Store copy'
+    Assert-True ([Array]::IndexOf([object[]]$script:PwshCalls, 'remove-appx') -gt [Array]::IndexOf([object[]]$script:PwshCalls, "run|$script:PwshMsi")) 'Store copy is removed only after the MSI runs'
+
+    $status = Invoke-PwshCase $true $false
+    Assert-True ($status -eq 'current' -and @($script:PwshCalls | Where-Object { $_ -like 'install|*' -or $_ -eq 'remove-appx' }).Count -eq 0) 'MSI-only host is left alone'
+
+    $status = Invoke-PwshCase $true $true
+    Assert-True ($status -eq 'store-removed' -and $script:PwshCalls -contains 'remove-appx') 'leftover Store copy is removed when the MSI exists'
+
+    $script:PwshRuns = $false
+    $status = Invoke-PwshCase $true $true
+    Assert-True ($status -eq 'failed' -and $script:PwshCalls -notcontains 'remove-appx') 'a broken MSI keeps the Store copy'
+    $script:PwshRuns = $true
+
+    $script:PwshWingetExit = 1
+    $status = Invoke-PwshCase $false $true
+    Assert-True ($status -eq 'failed' -and $script:PwshCalls -notcontains 'remove-appx') 'failed MSI install keeps the Store copy'
+    $script:PwshWingetExit = 0
+}
+finally {
+    Remove-Item -Path function:global:winget, function:Remove-AppxPackage -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $script:PwshDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+Assert-True ($scriptText.IndexOf('$pwshResult = Invoke-PowerShellMsiSwitch') -lt $scriptText.IndexOf('#--- 4. Self-updating native CLIs')) 'PowerShell switch runs in the package phase'
+Assert-True ($scriptText -match "-or \`$pwshResult -eq 'failed'\) \{ exit 1 \}") 'a failed PowerShell switch fails the run'
+Write-Output 'POWERSHELL MSI PASSED'
 Write-Output 'ALL WIN11 PROFILE ASSERTIONS PASSED'

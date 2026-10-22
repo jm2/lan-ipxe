@@ -335,7 +335,12 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   shortcut; that zip build does not update itself, so each run replaces it when a newer
   release exists. Goose publishes x64 Windows builds only, so both are skipped on ARM64.
   Crush (CLI only; there is no Crush desktop app) comes from Charm's
-  `charmbracelet.crush` WinGet package. The highest stable Python 3 minor-package channel is resolved from WinGet
+  `charmbracelet.crush` WinGet package. PowerShell 7 must be the MSI
+  (`C:\Program Files\PowerShell\7`), not the Microsoft Store package: Codex's Windows
+  sandbox can't launch the Store app-execution alias, so sandboxed agents could run no
+  command. Apply installs the MSI, forced past a Store copy WinGet may count as
+  `Microsoft.PowerShell`, verifies it runs, then removes the Store package; `-Check`
+  reports a Store copy as drift. The highest stable Python 3 minor-package channel is resolved from WinGet
   rather than hard-coded. Antigravity IDE, VSCodium, and the OpenCode CLI and desktop app
   (`SST.opencode`, `SST.OpenCodeDesktop`) are removed, as are native OpenCode installs
   WinGet does not track: `%USERPROFILE%\.opencode\bin` with its user PATH entry and the
