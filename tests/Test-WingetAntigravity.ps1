@@ -26,6 +26,9 @@ $assignmentNames = @(
     'WingetRebootCodes'
     'WingetDeferredCodes'
     'WingetRemoveOkCodes'
+    'WingetLaunchAttempts'
+    'WingetLaunchRetrySeconds'
+    'WingetPackageArgs'
     'NativeCliTools'
     'GooseRepo'
     'GooseDesktopAsset'
@@ -43,7 +46,7 @@ foreach ($assignmentName in $assignmentNames) {
     . ([scriptblock]::Create($assignmentAst.Extent.Text))
 }
 
-foreach ($functionName in @('Resolve-LatestPythonWingetPackageId', 'Invoke-WingetPackageSet',
+foreach ($functionName in @('Invoke-Winget', 'Get-WingetPackageArgument', 'Resolve-LatestPythonWingetPackageId', 'Invoke-WingetPackageSet',
         'Get-NativeProcessorArchitecture', 'Test-NativeCliSupported', 'Get-NativeCliPath', 'Invoke-NativeCliSet',
         'Get-GooseDesktopRoot', 'Get-GooseDesktopInstall', 'Select-GooseDesktopAsset', 'Find-GooseDesktopAppDirectory', 'Invoke-GooseDesktopStep')) {
     $functionAst = $ast.Find({
@@ -344,7 +347,8 @@ try {
         Assert-Equal ($native.Installed -join ',') 'Claude Code,Antigravity CLI,goose CLI' 'new native installs are reported'
         Assert-Equal ($native.Failed -join ',') 'install Codex CLI' 'a failed native install is reported'
         Assert-Equal $native.Skipped.Count 0 'nothing is skipped on x64'
-        Assert-Equal ($script:PathAdds -join ',') (Join-Path (Join-Path $env:USERPROFILE '.local') 'bin') 'only goose asks for its bin directory on the user PATH'
+        $localBin = Join-Path (Join-Path $env:USERPROFILE '.local') 'bin'
+        Assert-Equal ($script:PathAdds -join ',') "$localBin,$localBin" 'Claude Code and goose (the .local\bin installers) ask for it on the user PATH'
 
         # -NoUpgrade keeps an existing native command without running its installer.
         $script:InstallerRuns = @()

@@ -25,6 +25,11 @@ $functionAst = $ast.Find({
 if (-not $functionAst) { throw 'Get-WingetInventory function not found' }
 $functionDefinition = [scriptblock]::Create($functionAst.Extent.Text)
 . $functionDefinition
+# Get-WingetInventory calls winget through its launch-retry wrapper.
+. ([scriptblock]::Create($ast.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-Winget'
+}, $true).Extent.Text))
 
 $constantAst = $ast.Find({
     param($node)

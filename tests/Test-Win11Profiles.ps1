@@ -19,7 +19,7 @@ if ($parseErrors.Count) {
 $tokens.Count | Out-Null
 
 foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetLegacyPackages', 'WingetPresenceOnlyPackages',
-                              'RustComponents', 'BalunWingetId', 'BalunRepo', 'BalunDisplayName', 'BalunInstallerArgs', 'WingetOkCodes', 'WingetRebootCodes', 'WingetDeferredCodes', 'WingetRemoveOkCodes', 'WingetLaunchAttempts', 'WingetLaunchRetrySeconds', 'WingetInstallTechMismatchCode', 'WingetUninstallWaitSeconds', 'WingetUninstallPollSeconds', 'NativeCliTools')) {
+                              'RustComponents', 'BalunWingetId', 'BalunRepo', 'BalunDisplayName', 'BalunInstallerArgs', 'WingetOkCodes', 'WingetRebootCodes', 'WingetDeferredCodes', 'WingetRemoveOkCodes', 'WingetLaunchAttempts', 'WingetLaunchRetrySeconds', 'WingetInstallTechMismatchCode', 'WingetUninstallWaitSeconds', 'WingetUninstallPollSeconds', 'NativeCliTools', 'WingetPackageArgs')) {
     $assignmentAst = $ast.Find({
         param($node)
         $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
@@ -29,7 +29,7 @@ foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetLeg
     if (-not $assignmentAst) { throw "$assignmentName declaration not found" }
     . ([scriptblock]::Create($assignmentAst.Extent.Text))
 }
-foreach ($functionName in @('Write-Note', 'Invoke-Winget', 'Get-WingetArpEntry', 'Test-NsisExecutable', 'Remove-WingetPackageForReinstall', 'Wait-WingetPackageRemoved', 'Split-UninstallCommand', 'Invoke-UninstallCommand', 'Invoke-WingetPackageSet', 'Get-RustupStableComponent',
+foreach ($functionName in @('Write-Note', 'Invoke-Winget', 'Get-WingetPackageArgument', 'Get-WingetArpEntry', 'Test-NsisExecutable', 'Remove-WingetPackageForReinstall', 'Wait-WingetPackageRemoved', 'Split-UninstallCommand', 'Invoke-UninstallCommand', 'Invoke-WingetPackageSet', 'Get-RustupStableComponent',
                             'Test-RustupDefaultToolchain', 'Initialize-RustupToolchain',
                             'Get-NativeProcessorArchitecture', 'Get-WindowsArchitectureName', 'Get-BalunRelease', 'Invoke-BalunStep',
                             'Invoke-PowerShellMsiSwitch')) {
@@ -185,7 +185,8 @@ finally {
 }
 
 # NSIS uninstallers registered without a quiet command run with /S directly.
-function Get-ItemProperty {
+Set-Item -Path function:Get-ItemProperty -Value {
+    param([string]$LiteralPath)
     [pscustomobject]@{ PSPath = $LiteralPath; UninstallString = '"C:\Program Files\LLVM\Uninstall.exe"'; QuietUninstallString = '' }
 }
 $script:UninstallInvocations = @()
@@ -217,6 +218,17 @@ try {
     Assert-True (@($script:WingetCalls | Where-Object { $_ -like '*Microsoft.PowerShell*' }).Count -eq 0) 'the hosting PowerShell is not upgraded'
     Assert-True (@($script:WingetCalls | Where-Object { $_ -like 'upgrade|--id|Git.Git|*' }).Count -eq 1) 'other packages are still upgraded'
     Assert-True ($result.HostSkipped -contains 'Microsoft.PowerShell' -and $result.Failed.Count -eq 0) 'the skipped host update is reported, not failed'
+
+    # Every PowerShell 7 install/upgrade stays the MSI and opts into Microsoft
+    # Update; other packages get no extra arguments (not even an empty one).
+    $msiArgs = '--installer-type|wix|--custom|USE_MU=1 ENABLE_MU=1'
+    $script:WingetCalls = @()
+    Invoke-WingetPackageSet -InstalledIds @('Microsoft.PowerShell', 'Git.Git') -DesiredIds @('Microsoft.PowerShell', 'Git.Git') 6>$null | Out-Null
+    Assert-True ($script:WingetCalls -contains "upgrade|--id|Microsoft.PowerShell|--exact|--source|winget|--include-unknown|--silent|--accept-package-agreements|--accept-source-agreements|--disable-interactivity|$msiArgs") 'PowerShell 7 upgrades as the Microsoft Update-enabled MSI'
+    Assert-True ($script:WingetCalls -contains 'upgrade|--id|Git.Git|--exact|--source|winget|--include-unknown|--silent|--accept-package-agreements|--accept-source-agreements|--disable-interactivity') 'other upgrades carry no extra arguments'
+    $script:WingetCalls = @()
+    Invoke-WingetPackageSet -InstalledIds @('Example.Unrelated') -DesiredIds @('Microsoft.PowerShell') 6>$null | Out-Null
+    Assert-True ($script:WingetCalls -contains "install|--id|Microsoft.PowerShell|--exact|--source|winget|--no-upgrade|--silent|--accept-package-agreements|--accept-source-agreements|--disable-interactivity|$msiArgs") 'a missing PowerShell 7 installs as the Microsoft Update-enabled MSI'
 }
 finally {
     Remove-Item -Path function:global:winget -ErrorAction SilentlyContinue
@@ -416,6 +428,7 @@ try {
     Assert-True ($status -eq 'installed') "Store-only host gets the MSI (got $status)"
     $install = @($script:PwshCalls | Where-Object { $_ -like 'install|--id|Microsoft.PowerShell|*' })
     Assert-True ($install.Count -eq 1 -and $install[0] -match '\|--installer-type\|wix\|' -and $install[0] -match '\|--force\|') 'MSI install is forced past the Store copy'
+    Assert-True ($install[0] -like '*|--custom|USE_MU=1 ENABLE_MU=1') 'the MSI install opts into Microsoft Update'
     Assert-True ([Array]::IndexOf([object[]]$script:PwshCalls, 'remove-appx') -gt [Array]::IndexOf([object[]]$script:PwshCalls, "run|$script:PwshMsi")) 'Store copy is removed only after the MSI runs'
 
     $status = Invoke-PwshCase $true $false

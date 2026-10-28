@@ -36,7 +36,9 @@ as presence-only or -NoUpgrade is given.
      moved from NSIS to MSI) is applied as an uninstall plus a fresh
      install, as winget requires. Run from the WinGet-installed PowerShell
      7, the Microsoft.PowerShell update is skipped (its MSI closes every
-     pwsh, ending the run); run from powershell.exe to update it.
+     pwsh, ending the run); run from powershell.exe to update it. Every
+     PowerShell 7 install and update forces the MSI and opts it into
+     Microsoft Update, so Windows Update keeps it current in between.
      "Already installed" and "reboot required"
      results count as success; any other failure is reported at the end
      (exit code 1) without stopping the run, so one broken installer never
@@ -197,6 +199,16 @@ $WingetLegacyPackages = @(
 )
 $RustComponents = @('rustfmt', 'clippy', 'rust-analyzer')
 
+# Extra WinGet arguments by package ID, for every install, upgrade and
+# reinstall of it. PowerShell 7 stays the MSI (WinGet can otherwise pick or
+# match the Store build) and opts into Microsoft Update through the MSI's
+# documented USE_MU/ENABLE_MU properties, so Windows Update keeps it current
+# between runs - including the runs that skip its update because they execute
+# from that pwsh.
+$WingetPackageArgs = @{
+    'Microsoft.PowerShell' = @('--installer-type', 'wix', '--custom', 'USE_MU=1 ENABLE_MU=1')
+}
+
 # AI CLIs that update themselves come from each vendor's official per-user
 # installer: their WinGet portable/zip packages pin them to a WinGet-managed
 # copy that never self-updates. Each replaces the WinGet package named by
@@ -322,6 +334,12 @@ function Invoke-Winget {
     }
 }
 
+function Get-WingetPackageArgument {
+    param([Parameter(Mandatory = $true)][string]$Id)
+    if ($WingetPackageArgs -and $WingetPackageArgs.ContainsKey($Id)) { return @($WingetPackageArgs[$Id]) }
+    return @()
+}
+
 # Ids of every installed package winget can match to a source. One
 # `winget export` is far cheaper than a `winget list` per package, and its
 # JSON is exact where the list's table output is truncated.
@@ -385,7 +403,8 @@ function Get-WingetArpEntry {
     $path = if ($match.Groups['Scope'].Value -eq 'User') { "HKCU:\$uninstall" }
     elseif ($match.Groups['Arch'].Value -eq 'X86' -and [Environment]::Is64BitOperatingSystem) { "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall" }
     else { "HKLM:\$uninstall" }
-    return Get-ItemProperty -LiteralPath (Join-Path $path $match.Groups['Key'].Value) -ErrorAction SilentlyContinue
+    # Concatenated, not Join-Path: Join-Path needs the registry drive to exist.
+    return Get-ItemProperty -LiteralPath "$path\$($match.Groups['Key'].Value)" -ErrorAction SilentlyContinue
 }
 
 # NSIS-built executables (installers and uninstallers) carry this signature in
@@ -402,7 +421,9 @@ function Test-NsisExecutable {
 # command as a plain "exe" and runs its uninstaller without /S, which then
 # waits on a confirmation dialog, so NSIS uninstallers are run with /S here.
 function Remove-WingetPackageForReinstall {
+    [CmdletBinding(SupportsShouldProcess = $true)]
     param([Parameter(Mandatory = $true)][string]$Id)
+    if (-not $PSCmdlet.ShouldProcess($Id, 'uninstall ahead of a reinstall')) { return $false }
     $entry = Get-WingetArpEntry -Id $Id
     if ($entry -and $entry.PSObject.Properties.Name -contains 'UninstallString' -and $entry.UninstallString -and
         -not ($entry.PSObject.Properties.Name -contains 'QuietUninstallString' -and $entry.QuietUninstallString)) {
@@ -562,7 +583,8 @@ function Invoke-WingetPackageSet {
 
     foreach ($id in $missing) {
         Write-Note "installing $id"
-        Invoke-Winget install --id $id --exact --source winget --no-upgrade --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Host
+        $extra = @(Get-WingetPackageArgument -Id $id)
+        Invoke-Winget install --id $id --exact --source winget --no-upgrade --silent --accept-package-agreements --accept-source-agreements --disable-interactivity @extra | Out-Host
         $code = $LASTEXITCODE
         if ($WingetRebootCodes -contains $code) { $script:RebootNeeded = $true }
         if ($WingetOkCodes.ContainsKey($code)) {
@@ -584,7 +606,8 @@ function Invoke-WingetPackageSet {
         # include-unknown prevents packages whose installed version is not
         # registered from silently freezing forever. Such a vendor installer
         # may be invoked again on a later setup run; Speedtest is exempt above.
-        Invoke-Winget upgrade --id $id --exact --source winget --include-unknown --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Host
+        $extra = @(Get-WingetPackageArgument -Id $id)
+        Invoke-Winget upgrade --id $id --exact --source winget --include-unknown --silent --accept-package-agreements --accept-source-agreements --disable-interactivity @extra | Out-Host
         $code = $LASTEXITCODE
         if ($code -eq $WingetInstallTechMismatchCode) {
             Write-Note "$id`: the update uses a different installer technology; reinstalling"
@@ -598,7 +621,7 @@ function Invoke-WingetPackageSet {
                 continue
             }
             # A failed install leaves the package missing; the next run installs it.
-            Invoke-Winget install --id $id --exact --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Host
+            Invoke-Winget install --id $id --exact --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity @extra | Out-Host
             $code = $LASTEXITCODE
         }
         if ($WingetRebootCodes -contains $code) { $script:RebootNeeded = $true }
@@ -812,7 +835,9 @@ function Invoke-PowerShellMsiSwitch {
     $status = 'current'
     if (-not (Test-Path -LiteralPath $msi)) {
         Write-Note 'PowerShell 7: installing the MSI (WinGet Microsoft.PowerShell, wix installer)'
-        Invoke-Winget install --id Microsoft.PowerShell --exact --source winget --installer-type wix --force --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Host
+        # --installer-type wix and the Microsoft Update opt-in come from $WingetPackageArgs.
+        $extra = @(Get-WingetPackageArgument -Id 'Microsoft.PowerShell')
+        Invoke-Winget install --id Microsoft.PowerShell --exact --source winget --force --silent --accept-package-agreements --accept-source-agreements --disable-interactivity @extra | Out-Host
         $code = $LASTEXITCODE
         if ($WingetRebootCodes -contains $code) { $script:RebootNeeded = $true }
         if (-not $WingetOkCodes.ContainsKey($code)) {
