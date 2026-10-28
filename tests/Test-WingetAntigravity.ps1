@@ -31,6 +31,9 @@ $assignmentNames = @(
     'GooseDesktopAsset'
     'GooseDesktopArchitectures'
     'GooseDesktopMarkerName'
+    'PowerShellWingetId'
+    'PowerShellStorePackage'
+    'WingetPackageArgs'
 )
 foreach ($assignmentName in $assignmentNames) {
     $assignmentAst = $ast.Find({
@@ -43,7 +46,9 @@ foreach ($assignmentName in $assignmentNames) {
     . ([scriptblock]::Create($assignmentAst.Extent.Text))
 }
 
-foreach ($functionName in @('Resolve-LatestPythonWingetPackageId', 'Invoke-WingetPackageSet',
+foreach ($functionName in @('Resolve-LatestPythonWingetPackageId', 'Get-WingetPackageArgument', 'Invoke-WingetPackageSet',
+        'Get-PowerShellMsiPath', 'Test-PowerShellMsiInstalled', 'Get-InventoryWithMsiPowerShell',
+        'Get-NativeWindowsPowerShell', 'Invoke-WindowsPowerShellCommand', 'Get-StorePowerShellPackage', 'Test-StorePowerShellHost', 'Invoke-StorePowerShellRemoval',
         'Get-NativeProcessorArchitecture', 'Test-NativeCliSupported', 'Get-NativeCliPath', 'Invoke-NativeCliSet',
         'Get-GooseDesktopRoot', 'Get-GooseDesktopInstall', 'Select-GooseDesktopAsset', 'Find-GooseDesktopAppDirectory', 'Invoke-GooseDesktopStep')) {
     $functionAst = $ast.Find({
@@ -446,6 +451,102 @@ try {
         $env:PROCESSOR_ARCHITECTURE = $savedRoots.PROCESSOR_ARCHITECTURE
         $env:PROCESSOR_ARCHITEW6432 = $savedRoots.PROCESSOR_ARCHITEW6432
         Remove-Item -LiteralPath $nativeRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    # PowerShell 7: the MSI only, upgrade-checked every run and opted into
+    # Microsoft Update; the Store build is removed first.
+    Assert-CollectionItem $WingetPackages $PowerShellWingetId 'PowerShell 7 stays in the desired WinGet set'
+    if ($WingetPresenceOnlyPackages -contains $PowerShellWingetId) {
+        throw 'ASSERT: PowerShell 7 must be upgrade-checked every run'
+    }
+    Assert-Equal ((Get-WingetPackageArgument -Id $PowerShellWingetId) -join '|') '--installer-type|wix|--custom|USE_MU=1 ENABLE_MU=1' 'PowerShell 7 is forced to the MSI and opted into Microsoft Update'
+    Assert-Equal (Get-WingetPackageArgument -Id 'Git.Git').Count 0 'other packages get no extra WinGet arguments'
+    $script:WingetCalls = @()
+    $script:ExitCodes = @{}
+    Invoke-WingetPackageSet -InstalledIds @('Git.Git') -DesiredIds @('Git.Git', $PowerShellWingetId) | Out-Null
+    Assert-Equal ($script:WingetCalls -join "`n") ((@(
+                'install|--id|Microsoft.PowerShell|--exact|--source|winget|--no-upgrade|--silent|--accept-package-agreements|--accept-source-agreements|--disable-interactivity|--installer-type|wix|--custom|USE_MU=1 ENABLE_MU=1'
+                'upgrade|--id|Git.Git|--exact|--source|winget|--include-unknown|--silent|--accept-package-agreements|--accept-source-agreements|--disable-interactivity'
+            )) -join "`n") 'a missing PowerShell 7 installs as the Microsoft Update-enabled MSI'
+    $script:WingetCalls = @()
+    Invoke-WingetPackageSet -InstalledIds @($PowerShellWingetId) -DesiredIds @($PowerShellWingetId) | Out-Null
+    Assert-Equal ($script:WingetCalls -join "`n") 'upgrade|--id|Microsoft.PowerShell|--exact|--source|winget|--include-unknown|--silent|--accept-package-agreements|--accept-source-agreements|--disable-interactivity|--installer-type|wix|--custom|USE_MU=1 ENABLE_MU=1' 'an installed PowerShell 7 is upgraded as the MSI'
+
+    # Only the MSI's pwsh.exe counts as Microsoft.PowerShell being installed.
+    $pwshRoot = Join-Path ([IO.Path]::GetTempPath()) ("pwsh-msi-test-{0}" -f [Guid]::NewGuid().ToString('N'))
+    $savedProgramFiles = $env:ProgramFiles
+    try {
+        $env:ProgramFiles = $pwshRoot
+        Assert-Equal ((Get-InventoryWithMsiPowerShell -InstalledIds @('Git.Git', $PowerShellWingetId)) -join ',') 'Git.Git' 'a Store-matched Microsoft.PowerShell without the MSI is treated as missing'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent (Get-PowerShellMsiPath)) | Out-Null
+        Set-Content -LiteralPath (Get-PowerShellMsiPath) -Value 'pwsh'
+        Assert-Equal ((Get-InventoryWithMsiPowerShell -InstalledIds @('Git.Git', $PowerShellWingetId)) -join ',') 'Git.Git,Microsoft.PowerShell' 'the MSI install keeps Microsoft.PowerShell installed'
+    }
+    finally {
+        $env:ProgramFiles = $savedProgramFiles
+        Remove-Item -LiteralPath $pwshRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    # Store removal runs in native Windows PowerShell, for all users, and is
+    # verified; it defers when the Store build is the host running setup.
+    $script:StorePackages = @()
+    $script:WindowsPowerShellCalls = @()
+    $script:RemovalWorks = $true
+    $script:StoreHost = $false
+    function Test-Elevated { return $true }
+    function Test-StorePowerShellHost { return $script:StoreHost }
+    function Invoke-WindowsPowerShellCommand {
+        param([string]$Command)
+        $script:WindowsPowerShellCalls += $Command
+        if ($Command -like 'Get-AppxPackage*') { return $script:StorePackages }
+        if ($Command -like 'Remove-AppxPackage*' -and $script:RemovalWorks) {
+            $script:StorePackages = @($script:StorePackages | Where-Object { $Command -notlike "*'$_'*" })
+        }
+    }
+    Assert-Equal (Invoke-StorePowerShellRemoval) 'absent' 'no Store PowerShell means nothing to remove'
+    Assert-Equal ($script:WindowsPowerShellCalls -join "`n") "Get-AppxPackage -AllUsers -Name 'Microsoft.PowerShell' | ForEach-Object { `$_.PackageFullName }" 'elevated runs query the Store build for every user'
+    $storeFullName = 'Microsoft.PowerShell_7.5.4.0_x64__8wekyb3d8bbwe'
+    $script:StorePackages = @($storeFullName)
+    $script:WindowsPowerShellCalls = @()
+    Assert-Equal (Invoke-StorePowerShellRemoval) 'removed' 'the Store build is removed'
+    Assert-Equal ($script:WindowsPowerShellCalls[1]) "Remove-AppxPackage -AllUsers -Package '$storeFullName'" 'the Store build is removed for every user'
+    Assert-Equal $script:WindowsPowerShellCalls.Count 3 'removal is verified with a second query'
+    $script:StorePackages = @($storeFullName)
+    $script:RemovalWorks = $false
+    Assert-Equal (Invoke-StorePowerShellRemoval 3>$null) 'failed' 'a Store build that survives removal is a failure'
+    $script:StoreHost = $true
+    $script:WindowsPowerShellCalls = @()
+    Assert-Equal (Invoke-StorePowerShellRemoval 3>$null) 'deferred' 'the Store build running setup is not removed mid-run'
+    Assert-Equal (@($script:WindowsPowerShellCalls | Where-Object { $_ -like 'Remove-AppxPackage*' }).Count) 0 'a deferred removal never calls Remove-AppxPackage'
+    function Test-Elevated { return $false }
+    $script:WindowsPowerShellCalls = @()
+    Get-StorePowerShellPackage | Out-Null
+    Assert-Equal ($script:WindowsPowerShellCalls -join '') "Get-AppxPackage -Name 'Microsoft.PowerShell' | ForEach-Object { `$_.PackageFullName }" 'an unelevated -Check queries only the current user'
+
+    # The command itself runs in native Windows PowerShell with errors stopping it.
+    $savedSystemRoot = $env:SystemRoot
+    $env:SystemRoot = Join-Path ([IO.Path]::GetTempPath()) 'winroot'
+    $nativeHost = Get-NativeWindowsPowerShell
+    $script:NativeHostArgs = @()
+    $script:NativeHostExit = 0
+    Set-Item -Path "function:global:$nativeHost" -Value {
+        $script:NativeHostArgs = @($args)
+        $global:LASTEXITCODE = $script:NativeHostExit
+        ' Microsoft.PowerShell_7.5.4.0_x64__8wekyb3d8bbwe '
+    }
+    try {
+        . ([scriptblock]::Create($ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-WindowsPowerShellCommand' }, $true).Extent.Text))
+        Assert-Equal (Invoke-WindowsPowerShellCommand 'Get-AppxPackage') 'Microsoft.PowerShell_7.5.4.0_x64__8wekyb3d8bbwe' 'native Windows PowerShell output is trimmed'
+        Assert-Equal ($script:NativeHostArgs -join '|') "-NoProfile|-NonInteractive|-ExecutionPolicy|Bypass|-Command|`$ErrorActionPreference = 'Stop'; Get-AppxPackage" 'the command runs non-interactively and stops on errors'
+        $script:NativeHostExit = 1
+        $rejected = $false
+        try { Invoke-WindowsPowerShellCommand 'Remove-AppxPackage' | Out-Null }
+        catch { $rejected = $_.Exception.Message -like 'Windows PowerShell failed:*' }
+        Assert-Equal $rejected $true 'a failing Windows PowerShell command is an error'
+    }
+    finally {
+        Remove-Item -Path "function:global:$nativeHost" -ErrorAction SilentlyContinue
+        $env:SystemRoot = $savedSystemRoot
     }
 }
 finally {

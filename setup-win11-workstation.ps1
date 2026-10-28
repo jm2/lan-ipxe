@@ -26,7 +26,10 @@ as presence-only or -NoUpgrade is given.
      presence-only Speedtest CLI and the Antigravity app, which updates
      itself. The legacy Antigravity IDE, VSCodium and
      standalone Rust MSI packages are removed in favor of Antigravity 2.0,
-     Microsoft VS Code and rustup; the OpenCode CLI and desktop app
+     Microsoft VS Code and rustup. PowerShell 7 is Microsoft's MSI only
+     (WinGet --installer-type wix, opted into Microsoft Update so it also
+     stays current between runs); a Microsoft Store PowerShell is removed for
+     every user before the WinGet snapshot. The OpenCode CLI and desktop app
      (SST.opencode, SST.OpenCodeDesktop) and any native OpenCode install
      (%USERPROFILE%\.opencode\bin with its PATH entry and Git Bash rc lines,
      or a desktop app installed directly from opencode.ai) are removed in
@@ -191,6 +194,20 @@ $WingetLegacyPackages = @(
     'Rustlang.Rust.MSVC'
 )
 $RustComponents = @('rustfmt', 'clippy', 'rust-analyzer')
+
+# PowerShell 7 comes only from Microsoft's MSI (WiX) through WinGet, installed
+# under %ProgramFiles%\PowerShell\7. The Microsoft Store (MSIX) build is removed
+# for every user: it runs from a sandboxed, versioned WindowsApps path and can
+# be matched to the same WinGet ID, which would otherwise keep the MSI from
+# ever installing.
+$PowerShellWingetId = 'Microsoft.PowerShell'
+$PowerShellStorePackage = 'Microsoft.PowerShell'
+# Extra WinGet arguments by package ID, for both install and upgrade. The MSI
+# is opted into Microsoft Update (its documented USE_MU/ENABLE_MU properties),
+# so Windows Update keeps PowerShell current between runs of this script too.
+$WingetPackageArgs = @{
+    'Microsoft.PowerShell' = @('--installer-type', 'wix', '--custom', 'USE_MU=1 ENABLE_MU=1')
+}
 
 # AI CLIs that update themselves come from each vendor's official per-user
 # installer: their WinGet portable/zip packages pin them to a WinGet-managed
@@ -381,6 +398,94 @@ function Resolve-LatestPythonWingetPackageId {
 # packages are checked for updates unless explicitly declared presence-only.
 # Superseded packages are removed before their supported replacements are
 # installed/upgraded.
+function Get-WingetPackageArgument {
+    param([Parameter(Mandatory = $true)][string]$Id)
+    if ($WingetPackageArgs -and $WingetPackageArgs.ContainsKey($Id)) { return @($WingetPackageArgs[$Id]) }
+    return @()
+}
+
+#--- PowerShell 7 (MSI only; the Microsoft Store build is removed) -----------
+function Get-PowerShellMsiPath {
+    if ([string]::IsNullOrWhiteSpace($env:ProgramFiles)) { return $null }
+    return Join-Path (Join-Path (Join-Path $env:ProgramFiles 'PowerShell') '7') 'pwsh.exe'
+}
+
+function Test-PowerShellMsiInstalled {
+    $path = Get-PowerShellMsiPath
+    return [bool]($path -and (Test-Path -LiteralPath $path -PathType Leaf))
+}
+
+# WinGet may match a Store copy to Microsoft.PowerShell. Only the MSI's
+# pwsh.exe counts as that package being installed, so a Store-only machine
+# gets the MSI installed instead of an upgrade check against the Store copy.
+function Get-InventoryWithMsiPowerShell {
+    param([string[]]$InstalledIds = @())
+    if (Test-PowerShellMsiInstalled) { return @($InstalledIds) }
+    return @($InstalledIds | Where-Object { $_ -ne $PowerShellWingetId })
+}
+
+# The Appx cmdlets are reliable only in native Windows PowerShell 5.1 (under
+# PowerShell 7 they need a compatibility session and can fail outright), so
+# Store queries and removals run there; Sysnative reaches the 64-bit System32
+# from a 32-bit process.
+function Get-NativeWindowsPowerShell {
+    $folder = if (-not [Environment]::Is64BitProcess -and [Environment]::Is64BitOperatingSystem) { 'Sysnative' } else { 'System32' }
+    return Join-Path $env:SystemRoot "$folder\WindowsPowerShell\v1.0\powershell.exe"
+}
+
+function Invoke-WindowsPowerShellCommand {
+    param([Parameter(Mandatory = $true)][string]$Command)
+    $hostPath = Get-NativeWindowsPowerShell
+    $output = @(& $hostPath -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "`$ErrorActionPreference = 'Stop'; $Command" 2>&1)
+    if ($LASTEXITCODE -ne 0) { throw "Windows PowerShell failed: $($output -join ' ')" }
+    return @($output | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+}
+
+function Test-Elevated {
+    $principal = New-Object Security.Principal.WindowsPrincipal ([Security.Principal.WindowsIdentity]::GetCurrent())
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+# Full names of the Store build: for every user when elevated, otherwise
+# (read-only -Check) for the current user.
+function Get-StorePowerShellPackage {
+    $scope = if (Test-Elevated) { ' -AllUsers' } else { '' }
+    return @(Invoke-WindowsPowerShellCommand "Get-AppxPackage$scope -Name '$PowerShellStorePackage' | ForEach-Object { `$_.PackageFullName }")
+}
+
+function Test-StorePowerShellHost {
+    return [string]$PSHOME -like '*\WindowsApps\*'
+}
+
+# Returns 'absent', 'removed', 'deferred' or 'failed'. A Store PowerShell that
+# is running this very script cannot remove itself; the MSI still installs,
+# and the next run (from Windows PowerShell or the MSI pwsh) finishes the job.
+function Invoke-StorePowerShellRemoval {
+    try {
+        $packages = @(Get-StorePowerShellPackage)
+        if (-not $packages.Count) {
+            Write-Note 'Microsoft Store PowerShell: absent'
+            return 'absent'
+        }
+        if (Test-StorePowerShellHost) {
+            Write-Warning 'Microsoft Store PowerShell is running this script, so it cannot be removed now; re-run from Windows PowerShell or the MSI pwsh to finish'
+            return 'deferred'
+        }
+        foreach ($package in $packages) {
+            Write-Note "removing Microsoft Store PowerShell $package (all users)"
+            Invoke-WindowsPowerShellCommand "Remove-AppxPackage -AllUsers -Package '$package'" | Out-Host
+        }
+        $left = @(Get-StorePowerShellPackage)
+        if ($left.Count) { throw "still installed: $($left -join ', ')" }
+        Write-Note 'Microsoft Store PowerShell: removed (replaced by the MSI)'
+        return 'removed'
+    }
+    catch {
+        Write-Warning "Microsoft Store PowerShell: $($_.Exception.Message)"
+        return 'failed'
+    }
+}
+
 function Invoke-WingetPackageSet {
     [CmdletBinding()]
     param(
@@ -452,7 +557,8 @@ function Invoke-WingetPackageSet {
 
     foreach ($id in $missing) {
         Write-Note "installing $id"
-        & winget install --id $id --exact --source winget --no-upgrade --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Host
+        $extra = @(Get-WingetPackageArgument -Id $id)
+        & winget install --id $id --exact --source winget --no-upgrade --silent --accept-package-agreements --accept-source-agreements --disable-interactivity @extra | Out-Host
         $code = $LASTEXITCODE
         if ($WingetRebootCodes -contains $code) { $script:RebootNeeded = $true }
         if ($WingetOkCodes.ContainsKey($code)) {
@@ -474,7 +580,8 @@ function Invoke-WingetPackageSet {
         # include-unknown prevents packages whose installed version is not
         # registered from silently freezing forever. Such a vendor installer
         # may be invoked again on a later setup run; Speedtest is exempt above.
-        & winget upgrade --id $id --exact --source winget --include-unknown --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Host
+        $extra = @(Get-WingetPackageArgument -Id $id)
+        & winget upgrade --id $id --exact --source winget --include-unknown --silent --accept-package-agreements --accept-source-agreements --disable-interactivity @extra | Out-Host
         $code = $LASTEXITCODE
         if ($WingetRebootCodes -contains $code) { $script:RebootNeeded = $true }
         if ($WingetOkCodes.ContainsKey($code)) {
@@ -1318,6 +1425,8 @@ if ($DryRun) {
     Write-Note "Balun: WinGet $BalunWingetId when it resolves; otherwise the latest stable $BalunRepo release"
     Write-Note '    balun-windows-<x86_64|aarch64>-setup.exe, SHA-256 checked against SHA256SUMS.txt and the asset digest,'
     Write-Note "    run silently ($($BalunInstallerArgs -join ' ')); skipped when present and -NoUpgrade"
+    Write-Note "PowerShell 7: $PowerShellWingetId as the MSI only ($((Get-WingetPackageArgument -Id $PowerShellWingetId) -join ' ')), upgrade-checked every run"
+    Write-Note "    and kept current by Microsoft Update; the Microsoft Store build ($PowerShellStorePackage) is removed for all users first"
     Write-Note 'Legacy packages removed if installed:'
     foreach ($id in $WingetLegacyPackages) { Write-Note "    $id" }
     Write-Note 'Native OpenCode installs removed after the WinGet legacy packages:'
@@ -1382,7 +1491,14 @@ if ($Check) {
     }
 
     Write-Step "winget package set ($($WingetPackages.Count) entries + Python 3)"
-    $installedIds = Get-WingetInventory
+    $installedIds = Get-InventoryWithMsiPowerShell -InstalledIds (Get-WingetInventory)
+    try {
+        $storePowerShell = @(Get-StorePowerShellPackage)
+        Write-State ($storePowerShell.Count -eq 0) 'Microsoft Store PowerShell absent' $(if ($storePowerShell.Count) { ($storePowerShell -join ', ') + ' (removed on apply)' } else { '' })
+    }
+    catch {
+        Write-Note "NOTE    Microsoft Store PowerShell: not queried ($($_.Exception.Message))"
+    }
     foreach ($id in $WingetPackages) {
         Write-State ($installedIds -contains $id) $id $(if ($installedIds -contains $id) { '' } else { 'not installed' })
     }
@@ -1494,14 +1610,29 @@ $latestPythonPackageId = Resolve-LatestPythonWingetPackageId
 $WingetPackages += $latestPythonPackageId
 Write-Note "Python 3: selected current WinGet channel $latestPythonPackageId"
 
+# Before the inventory snapshot, so WinGet never mistakes the Store copy for
+# the MSI it is about to install.
+Write-Step 'PowerShell 7: remove the Microsoft Store build (the MSI replaces it)'
+$storePowerShellResult = Invoke-StorePowerShellRemoval
+
 Write-Step "winget package set ($($WingetPackages.Count) entries)"
-$installedIds = Get-WingetInventory
+$installedIds = Get-InventoryWithMsiPowerShell -InstalledIds (Get-WingetInventory)
 $wingetResult = Invoke-WingetPackageSet `
     -InstalledIds $installedIds `
     -DesiredIds $WingetPackages `
     -PresenceOnlyIds $WingetPresenceOnlyPackages `
     -LegacyIds $WingetLegacyPackages `
     -NoUpgrade:$NoUpgrade
+if (Test-PowerShellMsiInstalled) {
+    Write-Note "PowerShell 7: MSI at $(Get-PowerShellMsiPath)"
+}
+elseif ($storePowerShellResult -eq 'deferred') {
+    Write-Warning 'PowerShell 7: the MSI did not install alongside the running Store copy; re-run from Windows PowerShell'
+}
+else {
+    Write-Warning "PowerShell 7: WinGet finished but $(Get-PowerShellMsiPath) is missing"
+    $wingetResult.Failed += "install $PowerShellWingetId (MSI)"
+}
 
 Write-Step 'OpenCode native installs (replaced by Goose and Crush)'
 $openCodeResult = Invoke-OpenCodeNativePurge
@@ -1534,7 +1665,8 @@ if ($script:RebootNeeded) {
 }
 Write-Note "native CLIs: $($nativeResult.Installed.Count) installed now, $($nativeResult.Current.Count) current, $($nativeResult.Skipped.Count) unsupported here, $($nativeResult.RetiredWinget.Count) WinGet copies removed, $($nativeResult.Failed.Count) failed"
 if ($nativeResult.Failed.Count) { Write-Note "failed: $($nativeResult.Failed -join ', ')" }
+Write-Note "Microsoft Store PowerShell: $storePowerShellResult"
 Write-Note "OpenCode native installs: $($openCodeResult.Removed.Count) removed, $($openCodeResult.Failed.Count) failed"
 if ($openCodeResult.Failed.Count) { Write-Note "failed: $($openCodeResult.Failed -join ', ')" }
 if ($balunResult -eq 'deferred') { Write-Note 'deferred (re-run after a reboot): Balun' }
-if ($wingetResult.Failed.Count -or $openCodeResult.Failed.Count -or $nativeResult.Failed.Count -or $rustResult -eq 'failed' -or $balunResult -eq 'failed' -or $gooseDesktopResult -eq 'failed') { exit 1 }
+if ($wingetResult.Failed.Count -or $storePowerShellResult -eq 'failed' -or $openCodeResult.Failed.Count -or $nativeResult.Failed.Count -or $rustResult -eq 'failed' -or $balunResult -eq 'failed' -or $gooseDesktopResult -eq 'failed') { exit 1 }

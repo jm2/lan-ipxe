@@ -19,7 +19,7 @@ if ($parseErrors.Count) {
 $tokens.Count | Out-Null
 
 foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetLegacyPackages', 'WingetPresenceOnlyPackages',
-                              'RustComponents', 'BalunWingetId', 'BalunRepo', 'BalunDisplayName', 'BalunInstallerArgs', 'WingetOkCodes', 'WingetRebootCodes', 'WingetDeferredCodes', 'WingetRemoveOkCodes')) {
+                              'RustComponents', 'BalunWingetId', 'BalunRepo', 'BalunDisplayName', 'BalunInstallerArgs', 'WingetOkCodes', 'WingetRebootCodes', 'WingetDeferredCodes', 'WingetRemoveOkCodes', 'WingetPackageArgs')) {
     $assignmentAst = $ast.Find({
         param($node)
         $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
@@ -29,7 +29,7 @@ foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetLeg
     if (-not $assignmentAst) { throw "$assignmentName declaration not found" }
     . ([scriptblock]::Create($assignmentAst.Extent.Text))
 }
-foreach ($functionName in @('Write-Note', 'Invoke-WingetPackageSet', 'Get-RustupStableComponent',
+foreach ($functionName in @('Write-Note', 'Get-WingetPackageArgument', 'Invoke-WingetPackageSet', 'Get-RustupStableComponent',
                             'Test-RustupDefaultToolchain', 'Initialize-RustupToolchain',
                             'Get-NativeProcessorArchitecture', 'Get-WindowsArchitectureName', 'Get-BalunRelease', 'Invoke-BalunStep')) {
     $functionAst = $ast.Find({
@@ -97,6 +97,7 @@ try {
         Assert-True ($text -match 'goose CLI: https://raw\.githubusercontent\.com/aaif-goose/goose/main/download_cli\.ps1 .*AMD64 only') "$profileName dry run lists the x64-only goose CLI"
         Assert-True ($text -match 'Goose Desktop \(AMD64 only; skipped elsewhere\)') "$profileName dry run lists the x64-only Goose Desktop"
         Assert-True ($text -match 'charmbracelet\.crush') "$profileName dry run lists Crush"
+        Assert-True ($text -match 'PowerShell 7: Microsoft\.PowerShell as the MSI only \(--installer-type wix --custom USE_MU=1 ENABLE_MU=1\)' -and $text -match 'Microsoft Store build \(Microsoft\.PowerShell\) is removed') "$profileName dry run plans the MSI-only PowerShell 7"
         Assert-True ($text.IndexOf('SST.opencode') -gt $text.IndexOf('Legacy packages removed') -and $text -match 'SST\.OpenCodeDesktop') "$profileName dry run purges, not installs, OpenCode"
         Assert-True (($text -match 'Valve\.Steam') -eq ($profileName -eq 'full')) "Steam listed only for full ($profileName)"
     }
