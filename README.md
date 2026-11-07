@@ -204,7 +204,10 @@ them `-Profile`, `-Check`, `-DryRun`, `-NoUpgrade`):
 
 Every platform installs Balun alongside Tributary in core (`balun` from the
 `jmsqrd/balun` COPR on Fedora, `balun-bin` from the AUR on Arch, release apps on macOS
-and Windows). Fedora and Arch also install Cockpit with file management, package
+and Windows). Fedora and Arch also install Switchworks, the coding-agent control plane
+(`switchworks` from the `jmsqrd/switchworks` COPR on Fedora; on Arch, the
+`switchworks-x86_64.pkg.tar.zst` asset of its latest GitHub release, verified against
+the release's published SHA-256 and installed with `pacman -U`). Fedora and Arch also install Cockpit with file management, package
 updates, Podman containers, and storage/LVM support, and start `cockpit.socket` for access at `https://localhost:9090`.
 
 - `setup-arch-workstation.sh` — run as your normal user; sudo is used for the
@@ -245,7 +248,7 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   `aide` + `wazuh-agent` from the AUR — their privileged setup (AIDE database init,
   Wazuh enablement) runs right after the interactive AUR phase.
 - `setup-fedora-workstation.sh` — run as your normal user; Fedora 41+ (dnf5). Adds the
-  signed third-party repos (`files/etc/yum.repos.d/`, the Tributary/Balun coprs, RPM Fusion,
+  signed third-party repos (`files/etc/yum.repos.d/`, the Tributary/Balun/Switchworks coprs, RPM Fusion,
   Microsoft VS Code, Chrome, Charm (for Crush), sing-box; the PowerShell repo on x86_64, plus the Steam/Plex
   repos in the full profile), installs the dnf and flatpak sets,
   applies available DNF/Flatpak updates, and installs Zed plus native AI tools. Rust

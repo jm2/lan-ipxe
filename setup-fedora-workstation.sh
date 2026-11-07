@@ -27,8 +27,9 @@
 # perform a lightweight update check.
 #
 # What it does, in order:
-#   1. signed third-party repos: VS Code, the jmsqrd/tributary and
-#      jmsqrd/balun coprs, RPM Fusion free+nonfree, Chrome, Charm (Crush),
+#   1. signed third-party repos: VS Code, the jmsqrd/tributary,
+#      jmsqrd/balun and jmsqrd/switchworks coprs, RPM Fusion free+nonfree,
+#      Chrome, Charm (Crush),
 #      sing-box; on
 #      x86_64 also Microsoft (PowerShell), plus (full) the RPM Fusion steam
 #      repo and Plex Media Server. The abandoned Antigravity 1.x RPM
@@ -91,7 +92,7 @@ FILES=${SCRIPT_DIR}/files
 ARCH=$(uname -m)
 FEDORA_MIN_VERSION=41
 
-COPRS=(jmsqrd/tributary jmsqrd/balun)
+COPRS=(jmsqrd/tributary jmsqrd/balun jmsqrd/switchworks)
 # Completed with the release number after preflight; no rpm call at load time
 # keeps --dry-run usable on non-Fedora hosts.
 RPMFUSION_FREE_URL_BASE=https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-
@@ -173,6 +174,8 @@ PKGS=(
   aide
   alsa-lib-devel
   alsa-sof-firmware
+  android-tools
+  arp-scan
   audit
   autoconf
   automake
@@ -205,6 +208,7 @@ PKGS=(
   cockpit-system
   code
   colordiff
+  copr-cli
   cronie
   crush
   cups
@@ -233,6 +237,7 @@ PKGS=(
   git
   git-lfs
   glibc-langpack-en
+  glslang
   gmp-devel
   @gnome-desktop
   gnome-extensions-app
@@ -243,6 +248,7 @@ PKGS=(
   gnome-tweaks
   gnupg2
   htop
+  icoutils
   iperf3
   json-c-devel
   kernel-headers
@@ -280,10 +286,16 @@ PKGS=(
   libva
   libva-utils
   libwebsockets-devel
+  libXcursor-devel
+  libXfixes-devel
+  libXi-devel
   libxkbcommon-devel
   libxml2
   libxml2-devel
+  libXrandr-devel
+  libXScrnSaver-devel
   libxslt
+  libXtst-devel
   lld
   lldb
   llvm
@@ -291,13 +303,20 @@ PKGS=(
   lzop
   maven
   meld
+  mesa-libEGL-devel
+  mesa-libGL-devel
   mesa-vulkan-drivers
   meson
+  mingw64-gcc-c++
+  mingw64-zlib-static
   mpfr-devel
   mpv
   nano
   ncurses-devel
+  ndisc6
+  net-snmp-utils
   NetworkManager
+  nmap
   nodejs
   npm
   openal-soft-devel
@@ -305,6 +324,11 @@ PKGS=(
   openssl-devel
   openssl-libs
   pacman
+  perf
+  perl-ExtUtils-MakeMaker
+  perl-FindBin
+  perl-IPC-Cmd
+  perl-Time-Piece
   pigz
   pipewire
   pipewire-alsa
@@ -314,22 +338,29 @@ PKGS=(
   protobuf-c-devel
   protobuf-compiler
   pulseaudio-libs-devel
+  python3-devel
   python3-protobuf
+  qdl
   rpm-build
   rpmdevtools
   rsync
   ruby
   rustup
+  samba-client
   schedtool
   SDL-devel
+  SDL3-devel
   seahorse
   sing-box
   sqlite
   sqlite-devel
   squashfs-tools
   sudo
+  swig
+  switchworks
   system-config-printer
   tar
+  testssl
   texinfo
   tmux
   transmission-cli
@@ -342,17 +373,23 @@ PKGS=(
   vulkan-loader
   vulkan-tools
   vulkan-validation-layers
+  wayland-protocols-devel
   wget
+  which
   wireplumber
   wpa_supplicant
+  xdotool
+  xorg-x11-server-Xvfb
   zip
   zlib-ng-compat-devel
+  zlib-ng-compat-static
   zram-generator
 )
 
 # Full profile only: games and media extras (transmission-cli stays in core)
 PKGS_FULL=(
   brasero
+  lgogdownloader
   lutris
   rhythmbox
   transmission
@@ -376,6 +413,7 @@ PKGS_FULL_X86_64=(
   readline-devel.i686
   steam
   vulkan-loader.i686
+  wine-common
   zlib-ng-compat-devel.i686
 )
 

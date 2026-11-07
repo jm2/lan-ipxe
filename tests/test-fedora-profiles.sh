@@ -92,7 +92,7 @@ test_profile_selection() {
       [[ ${out} != *r8152* ]] || fail "${arch}/${profile}: plan still mentions r8152"
 
       # Core developer surface, present in both profiles.
-      for item in balun tributary chromium google-chrome-stable code \
+      for item in balun tributary switchworks chromium google-chrome-stable code \
           clang golang nodejs cockpit-machines cockpit-podman transmission-cli \
           aide audit clamav clamav-update clamd firewalld; do
         has_line "${item}" "${pkgs}" || fail "${arch}/${profile}: omits core package ${item}"
@@ -117,7 +117,8 @@ test_profile_selection() {
       grep -Fq 'files/etc/yum.repos.d/charm.repo -> /etc/yum.repos.d/charm.repo' <<<"${out}" \
         || fail "${arch}/${profile}: plan omits Charm's repository file"
       for item in copr:copr.fedorainfracloud.org:jmsqrd:balun \
-          copr:copr.fedorainfracloud.org:jmsqrd:tributary charm; do
+          copr:copr.fedorainfracloud.org:jmsqrd:tributary \
+          copr:copr.fedorainfracloud.org:jmsqrd:switchworks charm; do
         has_line "${item}" "${repos}" || fail "${arch}/${profile}: omits core repo ${item}"
       done
       for item in antigravity agy goose goose-desktop claude codex zed speedtest; do

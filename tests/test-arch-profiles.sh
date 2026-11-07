@@ -174,10 +174,16 @@ test_check_exit_codes() (
     (( goose_desktop ))
   }
   installed=' '
+  switchworks=1
   pacman() {
     case $1 in
       -Sg) return 0 ;;
-      -Q) [[ ${installed} == *" $2 "* ]] && printf '%s 2.1.0-1\n' "$2" && return 0; return 1 ;;
+      # Switchworks comes from its GitHub release, not the package lists.
+      -Q) if [[ $2 == switchworks ]]; then
+            (( switchworks )) && printf 'switchworks 0.1.7-1\n' && return 0
+            return 1
+          fi
+          [[ ${installed} == *" $2 "* ]] && printf '%s 2.1.0-1\n' "$2" && return 0; return 1 ;;
       -T) shift; local p; for p in "$@"; do [[ ${p} == steam ]] && printf '%s\n' "${p}"; done
           [[ ${missing:-0} == 1 ]] && printf 'zed\n'; return 0 ;;
     esac
@@ -186,6 +192,11 @@ test_check_exit_codes() (
   missing=0
   rc=0; output=$(run_check) || rc=$?
   [[ ${rc} == 0 ]] || fail "converged core check exited ${rc}: ${output}"
+  switchworks=0
+  rc=0; output=$(run_check) || rc=$?
+  [[ ${rc} == 2 && ${output} == *'switchworks: not installed (GitHub release package)'* ]] \
+    || fail "check did not flag a missing Switchworks (${rc})"
+  switchworks=1
   missing=1
   rc=0; output=$(run_check) || rc=$?
   [[ ${rc} == 2 && ${output} == *'DRIFT    official package zed'* ]] \
