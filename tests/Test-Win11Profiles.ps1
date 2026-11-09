@@ -475,6 +475,7 @@ finally {
     Remove-Item -LiteralPath $script:PwshDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 Assert-True ($scriptText.IndexOf('$pwshResult = Invoke-PowerShellMsiSwitch') -lt $scriptText.IndexOf('#--- 4. Self-updating native CLIs')) 'PowerShell switch runs in the package phase'
-Assert-True ($scriptText -match "-or \`$pwshResult -eq 'failed'\) \{ exit 1 \}") 'a failed PowerShell switch fails the run'
+Assert-True ($scriptText -match "(?m)^if \(.*-or \`$pwshResult -eq 'failed'.*\) \{ exit 1 \}\r?$") 'a failed PowerShell switch fails the run'
+Assert-True ($scriptText -match "(?m)^if \(.*-or \`$googetResult -eq 'failed'.*\) \{ exit 1 \}\r?$") 'a failed GooGet step fails the run'
 Write-Output 'POWERSHELL MSI PASSED'
 Write-Output 'ALL WIN11 PROFILE ASSERTIONS PASSED'
