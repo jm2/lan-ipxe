@@ -1661,6 +1661,19 @@ function Get-GooGetTreeItem {
     }
 }
 
+# Pure: whether an ACE's access mask allows writing. .NET doesn't map
+# generic rights, so GENERIC_WRITE and GENERIC_ALL (common on inherit-only
+# ACEs) are checked as raw bits. FileSystemRights is an Int32 enum, so a mask
+# with GENERIC_READ (0x80000000) arrives negative and sign-extends; keeping
+# only the low 32 bits stops that from looking like every right.
+function Test-GooGetWriteRight {
+    param([Parameter(Mandatory = $true)][long]$Rights)
+    $value = $Rights -band [long]4294967295
+    $mask = [long][Security.AccessControl.FileSystemRights]'Write, Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership'
+    $mask = $mask -bor [long]1073741824 -bor [long]268435456   # GENERIC_WRITE, GENERIC_ALL
+    return (($value -band $mask) -ne 0)
+}
+
 # Read-only: why the tree under an existing $Root can't be trusted by an
 # elevated googet. Any finding means another account may have controlled part
 # of it - or edited googet.conf, a .repo file or googet.exe - so apply refuses
@@ -1669,7 +1682,6 @@ function Get-GooGetTreeItem {
 # written before it.
 function Get-GooGetTreeProblem {
     param([Parameter(Mandatory = $true)][string]$Root)
-    $writeRights = [Security.AccessControl.FileSystemRights]'Write, Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership'
     foreach ($item in Get-GooGetTreeItem -Root $Root) {
         $path = $item.FullName
         if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
@@ -1689,7 +1701,7 @@ function Get-GooGetTreeProblem {
         foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
             if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
             if ($GooGetAclTrustedSids -contains $rule.IdentityReference.Value) { continue }
-            if (($rule.FileSystemRights -band $writeRights) -ne 0) { "$path lets $($rule.IdentityReference.Value) write" }
+            if (Test-GooGetWriteRight -Rights ([long]$rule.FileSystemRights)) { "$path lets $($rule.IdentityReference.Value) write" }
         }
     }
 }
@@ -1733,7 +1745,7 @@ function Initialize-GooGetRoot {
     }
     $problems = @(Get-GooGetTreeProblem -Root $root)
     if ($problems.Count) {
-        throw "refusing to use $root ($(@($problems | Select-Object -First 3) -join '; ')). Another account may have controlled it; inspect it, remove it, and re-run to recreate it locked."
+        throw "refusing to use $root ($(@($problems | Select-Object -First 3) -join '; ')). Another account may have controlled it; inspect it, remove it, and re-run to recreate it locked. (If this root was made by this script, check the 'Default owner for objects created by members of the Administrators group' policy: 'Object creator' makes files owned by your user, not Administrators.)"
     }
     return $result
 }
