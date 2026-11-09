@@ -32,7 +32,7 @@ foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetLeg
 foreach ($functionName in @('Write-Note', 'Invoke-Winget', 'Get-WingetPackageArgument', 'Get-WingetArpEntry', 'Test-NsisExecutable', 'Remove-WingetPackageForReinstall', 'Wait-WingetPackageRemoved', 'Split-UninstallCommand', 'Invoke-UninstallCommand', 'Invoke-WingetPackageSet', 'Get-RustupStableComponent',
                             'Test-RustupDefaultToolchain', 'Initialize-RustupToolchain',
                             'Get-NativeProcessorArchitecture', 'Get-WindowsArchitectureName', 'Get-BalunRelease', 'Invoke-BalunStep',
-                            'Invoke-PowerShellMsiSwitch', 'Select-GooGetSource', 'Get-GooGetConfText', 'Get-GooGetRepoFileText')) {
+                            'Invoke-PowerShellMsiSwitch', 'Select-GooGetSource', 'Get-GooGetConfText', 'Get-GooGetRepoFileText', 'Test-GooGetWriteRight')) {
     $functionAst = $ast.Find({
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $functionName
@@ -142,6 +142,14 @@ Assert-True ($scriptText -notmatch 'icacls') 'GooGet never repairs ACLs in place
 Assert-True ($GooGetAclTrustedSids.Count -eq 2 -and $GooGetAclTrustedSids -contains 'S-1-5-32-544' -and $GooGetAclTrustedSids -contains 'S-1-5-18') 'only Administrators and SYSTEM may own or write in the GooGet root'
 $walkAst = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-GooGetTreeItem' }, $true).Extent.Text
 Assert-True ($walkAst -match 'ReparsePoint') 'the GooGet tree walk does not descend into reparse points'
+foreach ($writable in @(0x40000000, 0x10000000, 0x40000000 + 0x20000, 0x2, 0x4, 0x10000, 0x40, 0x40000, 0x80000, 0x1301BF, 0x1F01FF, ([int]::MinValue + 0x40000000))) {
+    Assert-True (Test-GooGetWriteRight -Rights $writable) ("access mask 0x{0:X} counts as write" -f $writable)
+}
+# 2147483648 is GENERIC_READ; [int]::MinValue is the same bit as an Int32
+# FileSystemRights value delivers it (sign-extended when widened).
+foreach ($readOnly in @(0x1200A9, 0x120089, [long]2147483648, [int]::MinValue, ([long]2147483648 + 0x1200A9), 0x20000000, 0x100000)) {
+    Assert-True (-not (Test-GooGetWriteRight -Rights $readOnly)) ("access mask 0x{0:X} is read-only" -f $readOnly)
+}
 Write-Output 'GOOGET PASSED'
 
 # --- -NoUpgrade installs missing packages only -------------------------------
