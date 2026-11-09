@@ -19,7 +19,7 @@ if ($parseErrors.Count) {
 $tokens.Count | Out-Null
 
 foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetLegacyPackages', 'WingetPresenceOnlyPackages',
-                              'RustComponents', 'BalunWingetId', 'BalunRepo', 'BalunDisplayName', 'BalunInstallerArgs', 'WingetOkCodes', 'WingetRebootCodes', 'WingetDeferredCodes', 'WingetRemoveOkCodes', 'WingetLaunchAttempts', 'WingetLaunchRetrySeconds', 'WingetInstallTechMismatchCode', 'WingetUninstallWaitSeconds', 'WingetUninstallPollSeconds', 'NativeCliTools', 'WingetPackageArgs')) {
+                              'RustComponents', 'BalunWingetId', 'BalunRepo', 'BalunDisplayName', 'BalunInstallerArgs', 'WingetOkCodes', 'WingetRebootCodes', 'WingetDeferredCodes', 'WingetRemoveOkCodes', 'WingetLaunchAttempts', 'WingetLaunchRetrySeconds', 'WingetInstallTechMismatchCode', 'WingetUninstallWaitSeconds', 'WingetUninstallPollSeconds', 'NativeCliTools', 'WingetPackageArgs', 'GooGetGitHubRepo', 'GooGetRepoName', 'GooGetRepoUrl')) {
     $assignmentAst = $ast.Find({
         param($node)
         $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
@@ -32,7 +32,7 @@ foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetLeg
 foreach ($functionName in @('Write-Note', 'Invoke-Winget', 'Get-WingetPackageArgument', 'Get-WingetArpEntry', 'Test-NsisExecutable', 'Remove-WingetPackageForReinstall', 'Wait-WingetPackageRemoved', 'Split-UninstallCommand', 'Invoke-UninstallCommand', 'Invoke-WingetPackageSet', 'Get-RustupStableComponent',
                             'Test-RustupDefaultToolchain', 'Initialize-RustupToolchain',
                             'Get-NativeProcessorArchitecture', 'Get-WindowsArchitectureName', 'Get-BalunRelease', 'Invoke-BalunStep',
-                            'Invoke-PowerShellMsiSwitch')) {
+                            'Invoke-PowerShellMsiSwitch', 'Select-GooGetSource', 'Get-GooGetConfText', 'Get-GooGetRepoFileText')) {
     $functionAst = $ast.Find({
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $functionName
@@ -102,6 +102,8 @@ try {
         Assert-True ($text -match 'goose CLI: https://raw\.githubusercontent\.com/aaif-goose/goose/main/download_cli\.ps1 .*AMD64 only') "$profileName dry run lists the x64-only goose CLI"
         Assert-True ($text -match 'Goose Desktop \(AMD64 only; skipped elsewhere\)') "$profileName dry run lists the x64-only Goose Desktop"
         Assert-True ($text -match 'charmbracelet\.crush') "$profileName dry run lists Crush"
+        Assert-True ($text -match 'GooGet: go install from the head of google/googet') "$profileName dry run lists the GooGet build"
+        Assert-True ($text -match 'repo linux-packages -> http://192\.168\.1\.11:8080/goo/linux-packages') "$profileName dry run lists the linux-packages GooGet repo"
         Assert-True ($text.IndexOf('SST.opencode') -gt $text.IndexOf('Legacy packages removed') -and $text -match 'SST\.OpenCodeDesktop') "$profileName dry run purges, not installs, OpenCode"
         Assert-True (($text -match 'Valve\.Steam') -eq ($profileName -eq 'full')) "Steam listed only for full ($profileName)"
     }
@@ -110,6 +112,27 @@ finally {
     foreach ($name in $mockNames) { Remove-Item -Path "function:global:$name" -ErrorAction SilentlyContinue }
 }
 Write-Output 'DRY RUN PASSED'
+
+# --- GooGet: build inputs, googet.conf and the repo file ---------------------
+$sha = '56b678a6e6249ecae2a6b89f35686e6080e85358'
+$source = Select-GooGetSource -Commit $sha -GoMod "module github.com/google/googet/v2`n`ngo 1.26.0`n" -GooSpec '{{$version := "3.4.1@0" -}}'
+Assert-True ($source.Module -eq 'github.com/google/googet/v2' -and $source.Version -eq '3.4.1@0' -and $source.Commit -eq $sha) 'GooGet source reads module and version from the commit'
+$source = Select-GooGetSource -Commit $sha -GoMod "module github.com/google/googet/v3`r`n" -GooSpec '{{$version := "4.0.0" -}}'
+Assert-True ($source.Module -eq 'github.com/google/googet/v3' -and $source.Version -eq '4.0.0') 'GooGet follows a module major-version bump'
+foreach ($case in @(
+        @{ Commit = 'main'; GoMod = 'module github.com/google/googet/v2'; GooSpec = '$version := "1.0.0"' },
+        @{ Commit = $sha; GoMod = 'module example.com/other'; GooSpec = '$version := "1.0.0"' },
+        @{ Commit = $sha; GoMod = 'module github.com/google/googet/v2'; GooSpec = 'no version here' })) {
+    $threw = $false
+    try { Select-GooGetSource @case | Out-Null } catch { $threw = $true }
+    Assert-True $threw "GooGet source rejects commit '$($case.Commit)' / '$($case.GoMod)' / '$($case.GooSpec)'"
+}
+Assert-True ((Get-GooGetConfText -Text '') -eq "allowunsafeurl: true`n") 'empty googet.conf gains allowunsafeurl'
+Assert-True ((Get-GooGetConfText -Text "proxyserver: http://p:3128`r`nallowunsafeurl: false`r`n") -eq "proxyserver: http://p:3128`nallowunsafeurl: true`n") 'googet.conf keeps other keys and flips allowunsafeurl'
+$conf = Get-GooGetConfText -Text "archs: [x86_64]`n"
+Assert-True ((Get-GooGetConfText -Text $conf) -eq $conf) 'googet.conf rewrite is idempotent'
+Assert-True ((Get-GooGetRepoFileText) -eq "- name: linux-packages`n  url: http://192.168.1.11:8080/goo/linux-packages`n") 'repo file matches what googet addrepo writes'
+Write-Output 'GOOGET PASSED'
 
 # --- -NoUpgrade installs missing packages only -------------------------------
 $script:WingetCalls = @()
@@ -452,6 +475,7 @@ finally {
     Remove-Item -LiteralPath $script:PwshDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 Assert-True ($scriptText.IndexOf('$pwshResult = Invoke-PowerShellMsiSwitch') -lt $scriptText.IndexOf('#--- 4. Self-updating native CLIs')) 'PowerShell switch runs in the package phase'
-Assert-True ($scriptText -match "-or \`$pwshResult -eq 'failed'\) \{ exit 1 \}") 'a failed PowerShell switch fails the run'
+Assert-True ($scriptText -match "(?m)^if \(.*-or \`$pwshResult -eq 'failed'.*\) \{ exit 1 \}\r?$") 'a failed PowerShell switch fails the run'
+Assert-True ($scriptText -match "(?m)^if \(.*-or \`$googetResult -eq 'failed'.*\) \{ exit 1 \}\r?$") 'a failed GooGet step fails the run'
 Write-Output 'POWERSHELL MSI PASSED'
 Write-Output 'ALL WIN11 PROFILE ASSERTIONS PASSED'
