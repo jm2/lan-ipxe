@@ -57,12 +57,14 @@ as presence-only or -NoUpgrade is given.
   6. Rust through rustup only: a stable default toolchain (only when none is
      configured) with rustfmt, clippy and rust-analyzer.
   7. GooGet built from the head of google/googet with the GoLang.Go toolchain
-     (the newest prebuilt googet.exe is v2.20.0 from 2024), installed to
+     (the newest prebuilt googet.exe is v2.20.0 from 2024; until google/googet
+     PRs #227 and #228 merge, a pinned jm2/googet commit carrying them,
+     checked out with Git.Git), installed to
      %ProgramData%\GooGet the way googet's own install.ps1 does (GooGetRoot,
      machine PATH, ACLs), except that the root is created already locked and
      a pre-existing one is used only when nothing in it is owned or writable
      by any account but Administrators and SYSTEM and it holds no junctions
-     or symlinks; otherwise apply stops for a person to remove it. Each run rebuilds when the head commit
+     or symlinks; otherwise apply stops for a person to remove it. Each run rebuilds when the source commit
      moved.
      googet.conf allows plain-HTTP repos and repos\linux-packages.repo points
      at crossdock's linux-packages GooGet repo on enthoo.
@@ -286,6 +288,17 @@ $OpenCodeRcFiles = @('.bashrc', '.bash_profile', '.profile')
 # The module path and version are read from that commit's go.mod and
 # googet.goospec, so a module rename upstream doesn't break the build.
 $GooGetGitHubRepo = 'google/googet'
+# Until google/googet PRs #227 and #228 (googet install with Provides) are
+# merged, apply builds this jm2/googet commit instead: the head of its
+# install-versioned-provides branch, which stacks both PRs on upstream master.
+# The fork keeps the github.com/google/googet module path, so the proxy can't
+# serve it; it is checked out with git (commit id verified) and built with
+# `go build -mod=readonly`, which still verifies every dependency against
+# go.sum. Once GitHub reports every listed PR merged, apply goes back to
+# upstream's head on its own; then empty these three.
+$GooGetPatchedRepo = 'jm2/googet'
+$GooGetPatchedCommit = '645ecb0cbbef3fdb459807a54e1423949dcfa3db'
+$GooGetPatchedPulls = @(227, 228)
 $GooGetMarkerName = '.lan-ipxe-build'
 # crossdock on enthoo serves linux-packages' GooGet repo over plain HTTP on
 # the trusted LAN, which googet 2.11+ refuses unless googet.conf sets
@@ -1530,7 +1543,8 @@ function Get-GooGetInstall {
             if ($line -match '^(?<Key>[a-z0-9-]+)=(?<Value>.*)$') { $fields[$Matches.Key] = $Matches.Value }
         }
     }
-    return [pscustomobject]@{ Exe = $exe; Commit = [string]$fields['commit']; Version = [string]$fields['version'] }
+    $repo = if ($fields['repo']) { [string]$fields['repo'] } elseif ($fields['commit']) { $GooGetGitHubRepo } else { '' }
+    return [pscustomobject]@{ Exe = $exe; Commit = [string]$fields['commit']; Version = [string]$fields['version']; Repo = $repo }
 }
 
 # Pure: the build inputs from one commit's go.mod and googet.goospec.
@@ -1538,27 +1552,55 @@ function Select-GooGetSource {
     param(
         [Parameter(Mandatory = $true)][string]$Commit,
         [Parameter(Mandatory = $true)][AllowEmptyString()][string]$GoMod,
-        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$GooSpec
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$GooSpec,
+        [string]$Repo = $GooGetGitHubRepo
     )
-    if ($Commit -notmatch '^[0-9a-f]{40}$') { throw "unexpected $GooGetGitHubRepo commit id '$Commit'" }
+    if ($Commit -notmatch '^[0-9a-f]{40}$') { throw "unexpected $Repo commit id '$Commit'" }
     if ($GoMod -notmatch '(?m)^module\s+(?<Module>github\.com/google/googet(/v\d+)?)\s*$') {
-        throw "go.mod at $Commit does not declare a github.com/google/googet module"
+        throw "go.mod at $Repo@$Commit does not declare a github.com/google/googet module"
     }
     $module = $Matches.Module
     if ($GooSpec -notmatch '\$version\s*:=\s*"(?<Version>\d+\.\d+\.\d+(@\d+)?)"') {
-        throw "googet.goospec at $Commit has no version"
+        throw "googet.goospec at $Repo@$Commit has no version"
     }
-    return [pscustomobject]@{ Commit = $Commit; Module = $module; Version = $Matches.Version }
+    return [pscustomobject]@{ Repo = $Repo; Commit = $Commit; Module = $module; Version = $Matches.Version }
+}
+
+# Pure: whether apply still builds the patched commit, given each listed
+# upstream PR's merged state (a missing or false value counts as unmerged).
+function Test-GooGetPatchPending {
+    param([AllowEmptyCollection()][object[]]$Merged = @())
+    if (-not $GooGetPatchedCommit -or @($GooGetPatchedPulls).Count -eq 0) { return $false }
+    if (@($Merged).Count -lt @($GooGetPatchedPulls).Count) { return $true }
+    return [bool](@($Merged | Where-Object { $_ -ne $true }).Count)
 }
 
 function Get-GooGetSource {
     $headers = @{ 'User-Agent' = 'lan-ipxe-setup' }
-    $commit = [string](Invoke-RestMethod -Uri "https://api.github.com/repos/$GooGetGitHubRepo/commits/HEAD" -Headers $headers).sha
-    if ($commit -notmatch '^[0-9a-f]{40}$') { throw "unexpected $GooGetGitHubRepo commit id '$commit'" }
-    $raw = "https://raw.githubusercontent.com/$GooGetGitHubRepo/$commit"
+    $repo = $GooGetGitHubRepo
+    $commit = ''
+    if ($GooGetPatchedCommit) {
+        $merged = @(foreach ($number in $GooGetPatchedPulls) {
+            # A failed lookup (rate limit, network) keeps the patched build.
+            try { [bool](Invoke-RestMethod -Uri "https://api.github.com/repos/$GooGetGitHubRepo/pulls/$number" -Headers $headers).merged }
+            catch { Write-Warning "GooGet: could not read $GooGetGitHubRepo PR #$number ($($_.Exception.Message)); assuming unmerged"; $false }
+        })
+        if (Test-GooGetPatchPending -Merged $merged) {
+            $repo = $GooGetPatchedRepo
+            $commit = $GooGetPatchedCommit
+        }
+        else {
+            Write-Note "GooGet: $GooGetGitHubRepo PRs #$($GooGetPatchedPulls -join ', #') are merged; building upstream head (the `$GooGetPatched* settings can be emptied)"
+        }
+    }
+    if (-not $commit) {
+        $commit = [string](Invoke-RestMethod -Uri "https://api.github.com/repos/$GooGetGitHubRepo/commits/HEAD" -Headers $headers).sha
+    }
+    if ($commit -notmatch '^[0-9a-f]{40}$') { throw "unexpected $repo commit id '$commit'" }
+    $raw = "https://raw.githubusercontent.com/$repo/$commit"
     $goMod = [string](Invoke-RestMethod -Uri "$raw/go.mod" -Headers $headers)
     $gooSpec = [string](Invoke-RestMethod -Uri "$raw/googet.goospec" -Headers $headers)
-    return Select-GooGetSource -Commit $commit -GoMod $goMod -GooSpec $gooSpec
+    return Select-GooGetSource -Repo $repo -Commit $commit -GoMod $goMod -GooSpec $gooSpec
 }
 
 # go.exe from PATH, or from the GoLang.Go MSI's directory when this session
@@ -1573,16 +1615,33 @@ function Get-GoPath {
     return $null
 }
 
-# Builds $Source with `go install module@commit` into a temp GOBIN, checks the
-# binary reports the expected version, then replaces googet.exe and writes the
-# marker. The build pins Go's default module proxy and checksum database, so a
-# machine-wide GOSUMDB=off or GOPRIVATE/GONOSUMDB override can't skip
-# verification of the downloaded source.
+# git.exe from PATH, or from the Git.Git installer's directory when this
+# session predates the install.
+function Get-GitPath {
+    $command = Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($command) { return $command.Source }
+    if ($env:ProgramFiles) {
+        $candidate = Join-Path $env:ProgramFiles 'Git\cmd\git.exe'
+        if (Test-Path -LiteralPath $candidate) { return $candidate }
+    }
+    return $null
+}
+
+# Builds $Source with `go install module@commit` into a temp GOBIN (or, for
+# a commit outside upstream, a git checkout verified against the commit id
+# and `go build -mod=readonly`), checks the binary reports the expected
+# version, then replaces googet.exe and writes the marker. The build pins
+# Go's default module proxy and checksum database, so a machine-wide
+# GOSUMDB=off or GOPRIVATE/GONOSUMDB override can't skip verification of the
+# downloaded source.
 function Install-GooGet {
     param(
         [Parameter(Mandatory = $true)]$Source,
-        [Parameter(Mandatory = $true)][string]$Go
+        [Parameter(Mandatory = $true)][string]$Go,
+        [string]$Git = ''
     )
+    $fromCheckout = $Source.Repo -ne $GooGetGitHubRepo
+    if ($fromCheckout -and -not $Git) { throw "building $($Source.Repo) needs git" }
     $root = Get-GooGetRoot
     if (-not $root) { throw '%ProgramData% is not set' }
     $dir = Join-Path ([IO.Path]::GetTempPath()) ("googet-build-{0}" -f [Guid]::NewGuid().ToString('N'))
@@ -1592,16 +1651,33 @@ function Install-GooGet {
         GOBIN = $dir; CGO_ENABLED = '0'; GOTOOLCHAIN = 'auto'; GOFLAGS = ''
         GOPROXY = 'https://proxy.golang.org'; GOSUMDB = 'sum.golang.org'
         GOPRIVATE = ''; GONOPROXY = ''; GONOSUMDB = ''; GOINSECURE = ''
+        GIT_TERMINAL_PROMPT = '0'
     }
     try {
         foreach ($name in $buildEnv.Keys) {
             $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
             [Environment]::SetEnvironmentVariable($name, $buildEnv[$name], 'Process')
         }
-        & $Go install -trimpath "-ldflags=-s -w -X main.version=$($Source.Version)" "$($Source.Module)@$($Source.Commit)" | Out-Host
-        if ($LASTEXITCODE -ne 0) { throw "go install $($Source.Module)@$($Source.Commit) failed (exit $LASTEXITCODE)" }
+        $ldflags = "-ldflags=-s -w -X main.version=$($Source.Version)"
         $built = Join-Path $dir 'googet.exe'
-        if (-not (Test-Path -LiteralPath $built)) { throw 'go install produced no googet.exe' }
+        if ($fromCheckout) {
+            $src = Join-Path $dir 'src'
+            & $Git init -q $src | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "git init failed (exit $LASTEXITCODE)" }
+            & $Git -C $src fetch -q --depth 1 "https://github.com/$($Source.Repo).git" $Source.Commit | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "git fetch $($Source.Repo)@$($Source.Commit) failed (exit $LASTEXITCODE)" }
+            & $Git -C $src -c advice.detachedHead=false checkout -q FETCH_HEAD | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "git checkout $($Source.Commit) failed (exit $LASTEXITCODE)" }
+            $head = [string](& $Git -C $src rev-parse HEAD)
+            if ($head.Trim() -ne $Source.Commit) { throw "checked-out commit '$head' is not $($Source.Commit)" }
+            & $Go -C $src build -mod=readonly -trimpath $ldflags -o $built . | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "go build $($Source.Repo)@$($Source.Commit) failed (exit $LASTEXITCODE)" }
+        }
+        else {
+            & $Go install -trimpath $ldflags "$($Source.Module)@$($Source.Commit)" | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "go install $($Source.Module)@$($Source.Commit) failed (exit $LASTEXITCODE)" }
+        }
+        if (-not (Test-Path -LiteralPath $built)) { throw 'the build produced no googet.exe' }
         $reported = (@(& $built -version 2>&1) -join ' ')
         if ($reported -notlike "*$($Source.Version)*") { throw "built googet.exe reports '$reported', expected $($Source.Version)" }
         Initialize-GooGetRoot | Out-Null
@@ -1610,6 +1686,7 @@ function Install-GooGet {
         Set-Content -LiteralPath (Join-Path $root $GooGetMarkerName) -Value @(
             'managed-by=lan-ipxe/setup-win11-workstation.ps1'
             "version=$($Source.Version)"
+            "repo=$($Source.Repo)"
             "commit=$($Source.Commit)"
             "module=$($Source.Module)"
         )
@@ -1829,8 +1906,16 @@ function Invoke-GooGetStep {
                     Write-Note 'GooGet: Go is not installed yet; re-run after GoLang.Go installs'
                     return 'deferred'
                 }
-                Write-Note "GooGet: building $($source.Version) from $GooGetGitHubRepo@$short"
-                Install-GooGet -Source $source -Go $go
+                $git = ''
+                if ($source.Repo -ne $GooGetGitHubRepo) {
+                    $git = Get-GitPath
+                    if (-not $git) {
+                        Write-Note 'GooGet: Git is not installed yet; re-run after Git.Git installs'
+                        return 'deferred'
+                    }
+                }
+                Write-Note "GooGet: building $($source.Version) from $($source.Repo)@$short"
+                Install-GooGet -Source $source -Go $go -Git $git
                 $result = if ($existing) { 'updated' } else { 'installed' }
             }
         }
@@ -1918,7 +2003,13 @@ if ($DryRun) {
     Write-Note '    SHA-256 checked against the GitHub asset digest, unpacked to %LOCALAPPDATA%\Programs\Goose + Start menu shortcut;'
     Write-Note '    replaced when a newer release exists; skipped when present and -NoUpgrade'
     Write-Note "Rust: rustup stable default (when none set) + $($RustComponents -join ', ')"
-    Write-Note "GooGet: go install from the head of $GooGetGitHubRepo (rebuilt when it moves; skipped when present and -NoUpgrade)"
+    if ($GooGetPatchedCommit) {
+        Write-Note "GooGet: go build of $GooGetPatchedRepo@$($GooGetPatchedCommit.Substring(0, 12)) (git checkout) until $GooGetGitHubRepo PRs #$($GooGetPatchedPulls -join ', #') merge,"
+        Write-Note "    then go install from the head of $GooGetGitHubRepo (rebuilt when the source moves; skipped when present and -NoUpgrade)"
+    }
+    else {
+        Write-Note "GooGet: go install from the head of $GooGetGitHubRepo (rebuilt when it moves; skipped when present and -NoUpgrade)"
+    }
     Write-Note '    into %ProgramData%\GooGet with GooGetRoot, the machine PATH entry and ACLs as googet''s install.ps1 sets them;'
     Write-Note "    googet.conf allowunsafeurl: true; repo $GooGetRepoName -> $GooGetRepoUrl"
     exit 0
@@ -2025,8 +2116,8 @@ if ($Check) {
     Write-Step 'GooGet'
     $googet = Get-GooGetInstall
     $googetDetail = if (-not $googet) { 'not installed' }
-        elseif ($googet.Commit) { "$($googet.Version) ($($googet.Commit.Substring(0, 12)); newer head commits built on apply)" }
-        else { 'not built by this script; rebuilt from head on apply' }
+        elseif ($googet.Commit) { "$($googet.Version) ($($googet.Repo)@$($googet.Commit.Substring(0, 12)); rebuilt on apply when the source moves)" }
+        else { 'not built by this script; rebuilt from source on apply' }
     Write-State ($null -ne $googet -and [bool]$googet.Commit) 'googet.exe' $googetDetail
     $googetDrift = @(Get-GooGetConfigurationDrift)
     Write-State ($googetDrift.Count -eq 0) "GooGet configuration ($GooGetRepoName repo)" $(if ($googetDrift.Count) { 'missing ' + ($googetDrift -join ', ') } else { '' })
@@ -2139,7 +2230,7 @@ $rustResult = Initialize-RustupToolchain -NoUpgrade:$NoUpgrade
 Write-Note "rustup: $rustResult"
 
 #--- 7. GooGet (built from google/googet head) ------------------------------
-Write-Step 'GooGet (built from google/googet head) and the linux-packages repo'
+Write-Step 'GooGet (built from source) and the linux-packages repo'
 $googetResult = Invoke-GooGetStep -NoUpgrade:$NoUpgrade
 Write-Note "GooGet: $googetResult"
 
