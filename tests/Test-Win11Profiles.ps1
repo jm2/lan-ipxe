@@ -132,6 +132,15 @@ Assert-True ((Get-GooGetConfText -Text "proxyserver: http://p:3128`r`nallowunsaf
 $conf = Get-GooGetConfText -Text "archs: [x86_64]`n"
 Assert-True ((Get-GooGetConfText -Text $conf) -eq $conf) 'googet.conf rewrite is idempotent'
 Assert-True ((Get-GooGetRepoFileText) -eq "- name: linux-packages`n  url: http://192.168.1.11:8080/goo/linux-packages`n") 'repo file matches what googet addrepo writes'
+$installAst = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Install-GooGet' }, $true).Extent.Text
+Assert-True ($installAst.IndexOf('Initialize-GooGetRoot') -ge 0 -and $installAst.IndexOf('Initialize-GooGetRoot') -lt $installAst.IndexOf('Copy-Item')) 'GooGet root is locked before googet.exe is copied in'
+$syncAst = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Sync-GooGetConfiguration' }, $true).Extent.Text
+Assert-True ($syncAst.IndexOf('Initialize-GooGetRoot') -ge 0 -and $syncAst.IndexOf('Initialize-GooGetRoot') -lt $syncAst.IndexOf('machine PATH')) 'GooGet root is validated before it joins the machine PATH'
+$initAst = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Initialize-GooGetRoot' }, $true).Extent.Text
+Assert-True ($initAst.IndexOf('refusing to use') -lt $initAst.IndexOf('icacls.exe')) 'a root another account controls is refused before any icacls'
+Assert-True ($initAst -notmatch '/setowner') 'Initialize-GooGetRoot never takes ownership (icacls /setowner /T follows junctions)'
+$walkAst = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-GooGetTreeItem' }, $true).Extent.Text
+Assert-True ($walkAst -match 'ReparsePoint') 'the GooGet tree walk does not descend into reparse points'
 Write-Output 'GOOGET PASSED'
 
 # --- -NoUpgrade installs missing packages only -------------------------------
