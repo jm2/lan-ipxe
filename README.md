@@ -367,7 +367,10 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   pinned to Go's default module proxy and checksum database so local `GOSUMDB`/`GOPRIVATE`
   overrides can't skip source verification; the newest prebuilt `googet.exe` is
   v2.20.0 from 2024) and installed to `%ProgramData%\GooGet` the way googet's own
-  `install.ps1` does; each run rebuilds it when the head commit moved. `googet.conf` sets
+  `install.ps1` does, but with the root created already locked (a pre-existing root that
+  another account owns any part of, or that contains junctions or symlinks, is refused,
+  since googet runs elevated from the machine PATH); each run rebuilds it when the head
+  commit moved. `googet.conf` sets
   `allowunsafeurl: true` and `repos\linux-packages.repo` points at crossdock's
   plain-HTTP GooGet repo on the LAN (`http://192.168.1.11:8080/goo/linux-packages`).
   Full adds Steam, GOG Galaxy, the
