@@ -19,7 +19,7 @@ if ($parseErrors.Count) {
 $tokens.Count | Out-Null
 
 foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetLegacyPackages', 'WingetPresenceOnlyPackages',
-                              'RustComponents', 'BalunWingetId', 'BalunRepo', 'BalunDisplayName', 'BalunInstallerArgs', 'WingetOkCodes', 'WingetRebootCodes', 'WingetDeferredCodes', 'WingetRemoveOkCodes', 'WingetLaunchAttempts', 'WingetLaunchRetrySeconds', 'WingetInstallTechMismatchCode', 'WingetUninstallWaitSeconds', 'WingetUninstallPollSeconds', 'NativeCliTools', 'WingetPackageArgs', 'GooGetGitHubRepo', 'GooGetRepoName', 'GooGetRepoUrl', 'GooGetAclTrustedSids')) {
+                              'RustComponents', 'BalunWingetId', 'BalunRepo', 'BalunDisplayName', 'BalunInstallerArgs', 'WingetOkCodes', 'WingetRebootCodes', 'WingetDeferredCodes', 'WingetRemoveOkCodes', 'WingetLaunchAttempts', 'WingetLaunchRetrySeconds', 'WingetInstallTechMismatchCode', 'WingetUninstallWaitSeconds', 'WingetUninstallPollSeconds', 'NativeCliTools', 'WingetPackageArgs', 'GooGetGitHubRepo', 'GooGetPatchedRepo', 'GooGetPatchedCommit', 'GooGetPatchedPulls', 'GooGetRepoName', 'GooGetRepoUrl', 'GooGetAclTrustedSids')) {
     $assignmentAst = $ast.Find({
         param($node)
         $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
@@ -32,7 +32,7 @@ foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetLeg
 foreach ($functionName in @('Write-Note', 'Invoke-Winget', 'Get-WingetPackageArgument', 'Get-WingetArpEntry', 'Test-NsisExecutable', 'Remove-WingetPackageForReinstall', 'Wait-WingetPackageRemoved', 'Split-UninstallCommand', 'Invoke-UninstallCommand', 'Invoke-WingetPackageSet', 'Get-RustupStableComponent',
                             'Test-RustupDefaultToolchain', 'Initialize-RustupToolchain',
                             'Get-NativeProcessorArchitecture', 'Get-WindowsArchitectureName', 'Get-BalunRelease', 'Invoke-BalunStep',
-                            'Invoke-PowerShellMsiSwitch', 'Select-GooGetSource', 'Get-GooGetConfText', 'Get-GooGetRepoFileText', 'Test-GooGetWriteRight')) {
+                            'Invoke-PowerShellMsiSwitch', 'Select-GooGetSource', 'Test-GooGetPatchPending', 'Get-GooGetConfText', 'Get-GooGetRepoFileText', 'Test-GooGetWriteRight')) {
     $functionAst = $ast.Find({
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $functionName
@@ -102,7 +102,8 @@ try {
         Assert-True ($text -match 'goose CLI: https://raw\.githubusercontent\.com/aaif-goose/goose/main/download_cli\.ps1 .*AMD64 only') "$profileName dry run lists the x64-only goose CLI"
         Assert-True ($text -match 'Goose Desktop \(AMD64 only; skipped elsewhere\)') "$profileName dry run lists the x64-only Goose Desktop"
         Assert-True ($text -match 'charmbracelet\.crush') "$profileName dry run lists Crush"
-        Assert-True ($text -match 'GooGet: go install from the head of google/googet') "$profileName dry run lists the GooGet build"
+        Assert-True ($text -match 'GooGet: go build of jm2/googet@645ecb0cbbef \(git checkout\) until google/googet PRs #227, #228 merge') "$profileName dry run lists the patched GooGet build"
+        Assert-True ($text -match 'then go install from the head of google/googet') "$profileName dry run lists the upstream GooGet build"
         Assert-True ($text -match 'repo linux-packages -> http://192\.168\.1\.11:8080/goo/linux-packages') "$profileName dry run lists the linux-packages GooGet repo"
         Assert-True ($text.IndexOf('SST.opencode') -gt $text.IndexOf('Legacy packages removed') -and $text -match 'SST\.OpenCodeDesktop') "$profileName dry run purges, not installs, OpenCode"
         Assert-True (($text -match 'Valve\.Steam') -eq ($profileName -eq 'full')) "Steam listed only for full ($profileName)"
@@ -119,6 +120,14 @@ $source = Select-GooGetSource -Commit $sha -GoMod "module github.com/google/goog
 Assert-True ($source.Module -eq 'github.com/google/googet/v2' -and $source.Version -eq '3.4.1@0' -and $source.Commit -eq $sha) 'GooGet source reads module and version from the commit'
 $source = Select-GooGetSource -Commit $sha -GoMod "module github.com/google/googet/v3`r`n" -GooSpec '{{$version := "4.0.0" -}}'
 Assert-True ($source.Module -eq 'github.com/google/googet/v3' -and $source.Version -eq '4.0.0') 'GooGet follows a module major-version bump'
+Assert-True ($source.Repo -eq 'google/googet') 'GooGet source defaults to upstream'
+$source = Select-GooGetSource -Repo 'jm2/googet' -Commit $sha -GoMod "module github.com/google/googet/v2`n" -GooSpec '{{$version := "3.4.2@0" -}}'
+Assert-True ($source.Repo -eq 'jm2/googet' -and $source.Module -eq 'github.com/google/googet/v2') 'a fork commit keeps the upstream module path'
+Assert-True ($GooGetPatchedCommit -match '^[0-9a-f]{40}$' -and $GooGetPatchedRepo -eq 'jm2/googet' -and @($GooGetPatchedPulls).Count -gt 0) 'the patched GooGet build is pinned to a full commit id'
+Assert-True (Test-GooGetPatchPending -Merged @($false, $false)) 'patched build while no PR is merged'
+Assert-True (Test-GooGetPatchPending -Merged @($true, $false)) 'patched build while one PR is still open'
+Assert-True (Test-GooGetPatchPending -Merged @($true)) 'patched build when a PR state is missing'
+Assert-True (-not (Test-GooGetPatchPending -Merged @($true, $true))) 'upstream head once every PR is merged'
 foreach ($case in @(
         @{ Commit = 'main'; GoMod = 'module github.com/google/googet/v2'; GooSpec = '$version := "1.0.0"' },
         @{ Commit = $sha; GoMod = 'module example.com/other'; GooSpec = '$version := "1.0.0"' },
@@ -133,6 +142,7 @@ $conf = Get-GooGetConfText -Text "archs: [x86_64]`n"
 Assert-True ((Get-GooGetConfText -Text $conf) -eq $conf) 'googet.conf rewrite is idempotent'
 Assert-True ((Get-GooGetRepoFileText) -eq "- name: linux-packages`n  url: http://192.168.1.11:8080/goo/linux-packages`n") 'repo file matches what googet addrepo writes'
 $installAst = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Install-GooGet' }, $true).Extent.Text
+Assert-True ($installAst -match 'rev-parse HEAD' -and $installAst -match 'build -mod=readonly') 'a fork checkout is verified against its commit id and built read-only'
 Assert-True ($installAst.IndexOf('Initialize-GooGetRoot') -ge 0 -and $installAst.IndexOf('Initialize-GooGetRoot') -lt $installAst.IndexOf('Copy-Item')) 'GooGet root is locked before googet.exe is copied in'
 $syncAst = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Sync-GooGetConfiguration' }, $true).Extent.Text
 Assert-True ($syncAst.IndexOf('Initialize-GooGetRoot') -ge 0 -and $syncAst.IndexOf('Initialize-GooGetRoot') -lt $syncAst.IndexOf('machine PATH')) 'GooGet root is validated before it joins the machine PATH'

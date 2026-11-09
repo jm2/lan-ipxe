@@ -366,12 +366,16 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   `google/googet` with the core Go toolchain (`go install module@commit`, with the build
   pinned to Go's default module proxy and checksum database so local `GOSUMDB`/`GOPRIVATE`
   overrides can't skip source verification; the newest prebuilt `googet.exe` is
-  v2.20.0 from 2024) and installed to `%ProgramData%\GooGet` the way googet's own
+  v2.20.0 from 2024). Until `google/googet` PRs #227 and #228 (install with `Provides`)
+  merge, it instead builds a pinned `jm2/googet` commit carrying both: a git checkout
+  checked against the commit id, built with `go build -mod=readonly` so dependencies are
+  still verified; once GitHub reports both merged it returns to upstream's head by itself.
+  googet is installed to `%ProgramData%\GooGet` the way googet's own
   `install.ps1` does, but with the root created already locked. A pre-existing root is
   used only when nothing in it is owned or writable by any account but Administrators and
   SYSTEM and it contains no junctions or symlinks; otherwise apply stops for you to remove
   it (nothing is repaired in place, since googet runs elevated from the machine PATH).
-  Each run rebuilds it when the head commit moved. `googet.conf` sets
+  Each run rebuilds it when the source commit moved. `googet.conf` sets
   `allowunsafeurl: true` and `repos\linux-packages.repo` points at crossdock's
   plain-HTTP GooGet repo on the LAN (`http://192.168.1.11:8080/goo/linux-packages`).
   googet needs `GooGetRoot`, so shells opened before the first run must be reopened.
