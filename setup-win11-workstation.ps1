@@ -1837,6 +1837,9 @@ function Invoke-GooGetStep {
         $changed = @(Sync-GooGetConfiguration)
         if ($changed.Count) {
             Write-Note "GooGet: set $($changed -join ', ')"
+            if ($changed -contains 'GooGetRoot' -or $changed -contains 'machine PATH') {
+                Write-Note 'GooGet: open a new shell to use googet (shells started earlier lack GooGetRoot and the PATH entry)'
+            }
             if ($result -eq 'current') { $result = 'changed' }
         }
         return $result
