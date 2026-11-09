@@ -363,8 +363,9 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   (legacy Rust MSI packages are removed). Balun has no WinGet package yet, so it
   installs from its SHA-256-verified GitHub release (silent Inno Setup) and switches to
   `jm2.Balun` automatically once that ID resolves. GooGet is built from the head of
-  `google/googet` with the core Go toolchain (`go install module@commit`, so the module
-  proxy and checksum database verify the source; the newest prebuilt `googet.exe` is
+  `google/googet` with the core Go toolchain (`go install module@commit`, with the build
+  pinned to Go's default module proxy and checksum database so local `GOSUMDB`/`GOPRIVATE`
+  overrides can't skip source verification; the newest prebuilt `googet.exe` is
   v2.20.0 from 2024) and installed to `%ProgramData%\GooGet` the way googet's own
   `install.ps1` does; each run rebuilds it when the head commit moved. `googet.conf` sets
   `allowunsafeurl: true` and `repos\linux-packages.repo` points at crossdock's

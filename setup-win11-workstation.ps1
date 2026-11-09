@@ -288,6 +288,9 @@ $GooGetMarkerName = '.lan-ipxe-build'
 # allowunsafeurl.
 $GooGetRepoName = 'linux-packages'
 $GooGetRepoUrl = 'http://192.168.1.11:8080/goo/linux-packages'
+# Principals allowed to write under %ProgramData%\GooGet, as well-known SIDs
+# (account names are localized): Administrators and SYSTEM.
+$GooGetAclTrustedSids = @('S-1-5-32-544', 'S-1-5-18')
 
 # Balun (core, beside jm2.Tributary). Its WinGet manifest jm2.Balun is pending
 # review, so apply prefers WinGet as soon as the ID resolves and otherwise
@@ -1563,9 +1566,11 @@ function Get-GoPath {
     return $null
 }
 
-# Builds $Source with `go install module@commit` (module proxy and checksum
-# database verify the source) into a temp GOBIN, checks the binary reports
-# the expected version, then replaces googet.exe and writes the marker.
+# Builds $Source with `go install module@commit` into a temp GOBIN, checks the
+# binary reports the expected version, then replaces googet.exe and writes the
+# marker. The build pins Go's default module proxy and checksum database, so a
+# machine-wide GOSUMDB=off or GOPRIVATE/GONOSUMDB override can't skip
+# verification of the downloaded source.
 function Install-GooGet {
     param(
         [Parameter(Mandatory = $true)]$Source,
@@ -1576,7 +1581,11 @@ function Install-GooGet {
     $dir = Join-Path ([IO.Path]::GetTempPath()) ("googet-build-{0}" -f [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $dir | Out-Null
     $saved = @{}
-    $buildEnv = @{ GOBIN = $dir; CGO_ENABLED = '0'; GOTOOLCHAIN = 'auto'; GOFLAGS = '' }
+    $buildEnv = @{
+        GOBIN = $dir; CGO_ENABLED = '0'; GOTOOLCHAIN = 'auto'; GOFLAGS = ''
+        GOPROXY = 'https://proxy.golang.org'; GOSUMDB = 'sum.golang.org'
+        GOPRIVATE = ''; GONOPROXY = ''; GONOSUMDB = ''; GOINSECURE = ''
+    }
     try {
         foreach ($name in $buildEnv.Keys) {
             $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
@@ -1630,11 +1639,29 @@ function Get-MachinePathEntry {
     return @($raw -split ';' | Where-Object { $_ })
 }
 
+# Read-only: whether the root has install.ps1's ACLs - inheritance off and no
+# principal but Administrators and SYSTEM allowed to write. googet.exe there
+# is on the machine PATH, so this is checked every run, not only on rebuilds.
+function Test-GooGetRootAcl {
+    param([Parameter(Mandatory = $true)][string]$Root)
+    if (-not (Test-Path -LiteralPath $Root -PathType Container)) { return $false }
+    $acl = Get-Acl -LiteralPath $Root
+    if (-not $acl.AreAccessRulesProtected) { return $false }
+    $writeRights = [Security.AccessControl.FileSystemRights]'Write, Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership'
+    foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+        if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
+        if ($GooGetAclTrustedSids -contains $rule.IdentityReference.Value) { continue }
+        if (($rule.FileSystemRights -band $writeRights) -ne 0) { return $false }
+    }
+    return $true
+}
+
 # Read-only: what install.ps1 and this repo's config would still change.
 function Get-GooGetConfigurationDrift {
     $root = Get-GooGetRoot
     if (-not $root) { return @('%ProgramData% is not set') }
     $drift = @()
+    if (-not (Test-GooGetRootAcl -Root $root)) { $drift += 'root ACLs' }
     if ([Environment]::GetEnvironmentVariable('GooGetRoot', 'Machine') -ne $root) { $drift += 'GooGetRoot machine variable' }
     if ((Get-PathListWithout -Entries (Get-MachinePathEntry) -Directory $root).Count -eq (Get-MachinePathEntry).Count) { $drift += 'machine PATH entry' }
     $conf = Read-TextOrEmpty -Path (Join-Path $root 'googet.conf')
@@ -1644,15 +1671,23 @@ function Get-GooGetConfigurationDrift {
     return $drift
 }
 
-# Applies googet's install.ps1 (GooGetRoot, machine PATH, ACLs on the root)
-# and this repo's googet.conf and repo file. Files are UTF-8 without a BOM.
-# Returns the names of the items it changed.
+# Applies googet's install.ps1 (ACLs on the root, GooGetRoot, machine PATH)
+# and this repo's googet.conf and repo file. ACLs come first, from observed
+# state, so the root is locked down before it joins PATH and a failed reset is
+# retried next run. Files are UTF-8 without a BOM. Returns the names of the
+# items it changed.
 function Sync-GooGetConfiguration {
-    param([switch]$ResetAcl)
     $root = Get-GooGetRoot
     if (-not $root) { throw '%ProgramData% is not set' }
     $changed = @()
     $utf8 = New-Object System.Text.UTF8Encoding $false
+    New-Item -ItemType Directory -Force -Path $root | Out-Null
+    if (-not (Test-GooGetRootAcl -Root $root)) {
+        & icacls.exe $root /grant:r '*S-1-5-32-544:(OI)(CI)F' /grant:r '*S-1-5-18:(OI)(CI)F' /grant:r '*S-1-5-32-545:(OI)(CI)RX' /inheritance:r | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "icacls on $root failed (exit $LASTEXITCODE)" }
+        if (-not (Test-GooGetRootAcl -Root $root)) { throw "$root still allows writes by principals other than Administrators and SYSTEM" }
+        $changed += 'ACLs'
+    }
     if ([Environment]::GetEnvironmentVariable('GooGetRoot', 'Machine') -ne $root) {
         [Environment]::SetEnvironmentVariable('GooGetRoot', $root, 'Machine')
         $changed += 'GooGetRoot'
@@ -1667,11 +1702,6 @@ function Sync-GooGetConfiguration {
         $changed += 'machine PATH'
     }
     New-Item -ItemType Directory -Force -Path (Join-Path $root 'repos') | Out-Null
-    if ($ResetAcl) {
-        & icacls.exe $root /grant:r 'Administrators:(OI)(CI)F' /grant:r 'SYSTEM:(OI)(CI)F' /grant:r 'Users:(OI)(CI)RX' /inheritance:r | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "icacls on $root failed (exit $LASTEXITCODE)" }
-        $changed += 'ACLs'
-    }
     $confPath = Join-Path $root 'googet.conf'
     $conf = Read-TextOrEmpty -Path $confPath
     $wantConf = Get-GooGetConfText -Text $conf
@@ -1708,7 +1738,7 @@ function Invoke-GooGetStep {
                 $result = if ($existing) { 'updated' } else { 'installed' }
             }
         }
-        $changed = @(Sync-GooGetConfiguration -ResetAcl:($result -ne 'current'))
+        $changed = @(Sync-GooGetConfiguration)
         if ($changed.Count) {
             Write-Note "GooGet: set $($changed -join ', ')"
             if ($result -eq 'current') { $result = 'changed' }
