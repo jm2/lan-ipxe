@@ -19,7 +19,7 @@ if ($parseErrors.Count) {
 $tokens.Count | Out-Null
 
 foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetLegacyPackages', 'WingetPresenceOnlyPackages',
-                              'RustComponents', 'BalunWingetId', 'BalunRepo', 'BalunDisplayName', 'BalunInstallerArgs', 'WingetOkCodes', 'WingetRebootCodes', 'WingetDeferredCodes', 'WingetRemoveOkCodes', 'WingetLaunchAttempts', 'WingetLaunchRetrySeconds', 'WingetInstallTechMismatchCode', 'WingetUninstallWaitSeconds', 'WingetUninstallPollSeconds', 'NativeCliTools', 'WingetPackageArgs', 'GooGetGitHubRepo', 'GooGetRepoName', 'GooGetRepoUrl')) {
+                              'RustComponents', 'BalunWingetId', 'BalunRepo', 'BalunDisplayName', 'BalunInstallerArgs', 'WingetOkCodes', 'WingetRebootCodes', 'WingetDeferredCodes', 'WingetRemoveOkCodes', 'WingetLaunchAttempts', 'WingetLaunchRetrySeconds', 'WingetInstallTechMismatchCode', 'WingetUninstallWaitSeconds', 'WingetUninstallPollSeconds', 'NativeCliTools', 'WingetPackageArgs', 'GooGetGitHubRepo', 'GooGetRepoName', 'GooGetRepoUrl', 'GooGetAclTrustedSids')) {
     $assignmentAst = $ast.Find({
         param($node)
         $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
@@ -137,8 +137,9 @@ Assert-True ($installAst.IndexOf('Initialize-GooGetRoot') -ge 0 -and $installAst
 $syncAst = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Sync-GooGetConfiguration' }, $true).Extent.Text
 Assert-True ($syncAst.IndexOf('Initialize-GooGetRoot') -ge 0 -and $syncAst.IndexOf('Initialize-GooGetRoot') -lt $syncAst.IndexOf('machine PATH')) 'GooGet root is validated before it joins the machine PATH'
 $initAst = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Initialize-GooGetRoot' }, $true).Extent.Text
-Assert-True ($initAst.IndexOf('refusing to use') -lt $initAst.IndexOf('icacls.exe')) 'a root another account controls is refused before any icacls'
-Assert-True ($initAst -notmatch '/setowner') 'Initialize-GooGetRoot never takes ownership (icacls /setowner /T follows junctions)'
+Assert-True ($initAst -match 'refusing to use') 'an untrusted GooGet root is refused'
+Assert-True ($scriptText -notmatch 'icacls') 'GooGet never repairs ACLs in place (icacls /T and /setowner follow junctions)'
+Assert-True ($GooGetAclTrustedSids.Count -eq 2 -and $GooGetAclTrustedSids -contains 'S-1-5-32-544' -and $GooGetAclTrustedSids -contains 'S-1-5-18') 'only Administrators and SYSTEM may own or write in the GooGet root'
 $walkAst = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-GooGetTreeItem' }, $true).Extent.Text
 Assert-True ($walkAst -match 'ReparsePoint') 'the GooGet tree walk does not descend into reparse points'
 Write-Output 'GOOGET PASSED'

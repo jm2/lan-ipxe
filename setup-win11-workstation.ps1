@@ -60,8 +60,9 @@ as presence-only or -NoUpgrade is given.
      (the newest prebuilt googet.exe is v2.20.0 from 2024), installed to
      %ProgramData%\GooGet the way googet's own install.ps1 does (GooGetRoot,
      machine PATH, ACLs), except that the root is created already locked and
-     a pre-existing one is refused when another account owns anything in it
-     or it holds junctions/symlinks. Each run rebuilds when the head commit
+     a pre-existing one is used only when nothing in it is owned or writable
+     by any account but Administrators and SYSTEM and it holds no junctions
+     or symlinks; otherwise apply stops for a person to remove it. Each run rebuilds when the head commit
      moved.
      googet.conf allows plain-HTTP repos and repos\linux-packages.repo points
      at crossdock's linux-packages GooGet repo on enthoo.
@@ -291,12 +292,12 @@ $GooGetMarkerName = '.lan-ipxe-build'
 # allowunsafeurl.
 $GooGetRepoName = 'linux-packages'
 $GooGetRepoUrl = 'http://192.168.1.11:8080/goo/linux-packages'
-# Principals allowed to write under %ProgramData%\GooGet, as well-known SIDs
-# (account names are localized): Administrators and SYSTEM. Every item there
-# must also be owned by one of them or TrustedInstaller: an owner keeps
-# implicit WRITE_DAC, and googet runs elevated from the machine PATH.
+# The only principals that may own or write anything under
+# %ProgramData%\GooGet, as well-known SIDs (account names are localized):
+# Administrators and SYSTEM. An owner keeps implicit WRITE_DAC, and googet
+# runs elevated from the machine PATH. TrustedInstaller is deliberately
+# absent: nothing there is a system file, and a hard link to one must fail.
 $GooGetAclTrustedSids = @('S-1-5-32-544', 'S-1-5-18')
-$GooGetTrustedOwnerSids = @('S-1-5-32-544', 'S-1-5-18', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
 
 # Balun (core, beside jm2.Tributary). Its WinGet manifest jm2.Balun is pending
 # review, so apply prefers WinGet as soon as the ID resolves and otherwise
@@ -1660,37 +1661,35 @@ function Get-GooGetTreeItem {
     }
 }
 
-# Read-only: why the tree under an existing $Root is unsafe for an elevated
-# googet. Hard problems (reparse points, untrusted or unreadable owners) mean
-# someone else controls part of it, so apply refuses; soft ones (inheritance
-# or write access for other principals) are fixed by locking the tree.
+# Read-only: why the tree under an existing $Root can't be trusted by an
+# elevated googet. Any finding means another account may have controlled part
+# of it - or edited googet.conf, a .repo file or googet.exe - so apply refuses
+# and nothing is repaired in place: in-place ACL repair can be steered through
+# a junction created after the check, and relocking doesn't vouch for content
+# written before it.
 function Get-GooGetTreeProblem {
     param([Parameter(Mandatory = $true)][string]$Root)
     $writeRights = [Security.AccessControl.FileSystemRights]'Write, Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership'
     foreach ($item in Get-GooGetTreeItem -Root $Root) {
         $path = $item.FullName
         if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-            [pscustomobject]@{ Hard = $true; Text = "$path is a reparse point" }
+            "$path is a reparse point"
             continue
         }
         try { $acl = Get-Acl -LiteralPath $path }
         catch {
-            [pscustomobject]@{ Hard = $true; Text = "$path has an unreadable security descriptor" }
+            "$path has an unreadable security descriptor"
             continue
         }
         $owner = [string]$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
-        if ($GooGetTrustedOwnerSids -notcontains $owner) {
-            [pscustomobject]@{ Hard = $true; Text = "$path is owned by $owner" }
-        }
+        if ($GooGetAclTrustedSids -notcontains $owner) { "$path is owned by $owner" }
         if ($path.TrimEnd('\') -ieq $Root.TrimEnd('\') -and -not $acl.AreAccessRulesProtected) {
-            [pscustomobject]@{ Hard = $false; Text = "$path inherits permissions" }
+            "$path inherits permissions from its parent"
         }
         foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
             if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
             if ($GooGetAclTrustedSids -contains $rule.IdentityReference.Value) { continue }
-            if (($rule.FileSystemRights -band $writeRights) -ne 0) {
-                [pscustomobject]@{ Hard = $false; Text = "$path lets $($rule.IdentityReference.Value) write" }
-            }
+            if (($rule.FileSystemRights -band $writeRights) -ne 0) { "$path lets $($rule.IdentityReference.Value) write" }
         }
     }
 }
@@ -1718,12 +1717,12 @@ function New-GooGetRootDirectory {
     }
 }
 
-# Makes %ProgramData%\GooGet safe before anything is written to it: a new root
-# is created locked; an existing one is refused when someone else controls
-# part of it, otherwise its own ACL is locked and every child is reset to
-# inherit from it. The tree is validated again afterwards, which also catches
-# a root another user created between the check and the creation. Returns
-# 'created', 'locked' or 'current'.
+# Makes sure %ProgramData%\GooGet is safe before anything is written to it. A
+# missing root is created locked. An existing root (including one another
+# user created between the check and the creation) is used only when the
+# whole tree passes Get-GooGetTreeProblem; otherwise apply stops and a person
+# removes it, after which the next run recreates it locked. Returns 'created'
+# or 'current'.
 function Initialize-GooGetRoot {
     $root = Get-GooGetRoot
     if (-not $root) { throw '%ProgramData% is not set' }
@@ -1733,22 +1732,8 @@ function Initialize-GooGetRoot {
         $result = 'created'
     }
     $problems = @(Get-GooGetTreeProblem -Root $root)
-    $hard = @($problems | Where-Object Hard)
-    if ($hard.Count) {
-        throw "refusing to use $root, which another account controls ($(@($hard | Select-Object -First 3 | ForEach-Object Text) -join '; ')). Inspect it, remove it, and re-run."
-    }
     if ($problems.Count) {
-        & icacls.exe $root /grant:r '*S-1-5-32-544:(OI)(CI)F' /grant:r '*S-1-5-18:(OI)(CI)F' /grant:r '*S-1-5-32-545:(OI)(CI)RX' /inheritance:r /Q | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "icacls on $root failed (exit $LASTEXITCODE)" }
-        if (@(Get-ChildItem -LiteralPath $root -Force).Count) {
-            & icacls.exe (Join-Path $root '*') /reset /T /Q | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw "icacls /reset under $root failed (exit $LASTEXITCODE)" }
-        }
-        $problems = @(Get-GooGetTreeProblem -Root $root)
-        if ($problems.Count) {
-            throw "$root is still not locked down ($(@($problems | Select-Object -First 3 | ForEach-Object Text) -join '; '))"
-        }
-        if ($result -eq 'current') { $result = 'locked' }
+        throw "refusing to use $root ($(@($problems | Select-Object -First 3) -join '; ')). Another account may have controlled it; inspect it, remove it, and re-run to recreate it locked."
     }
     return $result
 }
@@ -1762,7 +1747,7 @@ function Get-GooGetConfigurationDrift {
     else {
         try {
             $problems = @(Get-GooGetTreeProblem -Root $root)
-            if ($problems.Count) { $drift += "root permissions ($(@($problems | Select-Object -First 3 | ForEach-Object Text) -join '; '))" }
+            if ($problems.Count) { $drift += "untrusted root, refused on apply ($(@($problems | Select-Object -First 3) -join '; '))" }
         }
         catch { $drift += "root permissions (not readable: $($_.Exception.Message))" }
     }
@@ -1776,10 +1761,10 @@ function Get-GooGetConfigurationDrift {
 }
 
 # Applies googet's install.ps1 (ACLs on the root, GooGetRoot, machine PATH)
-# and this repo's googet.conf and repo file. The root is validated and locked
-# first (Initialize-GooGetRoot), from observed state, so it is safe before it
-# joins PATH and a failed lock is retried next run. Files are UTF-8 without a
-# BOM. Returns the names of the items it changed.
+# and this repo's googet.conf and repo file. The root is created locked or
+# validated first (Initialize-GooGetRoot), so it is safe before it joins
+# PATH. Files are UTF-8 without a BOM. Returns the names of the items it
+# changed.
 function Sync-GooGetConfiguration {
     $root = Get-GooGetRoot
     if (-not $root) { throw '%ProgramData% is not set' }
