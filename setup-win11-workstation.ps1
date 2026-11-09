@@ -1581,7 +1581,9 @@ function Get-GooGetSource {
     $commit = ''
     if ($GooGetPatchedCommit) {
         $merged = @(foreach ($number in $GooGetPatchedPulls) {
-            [bool](Invoke-RestMethod -Uri "https://api.github.com/repos/$GooGetGitHubRepo/pulls/$number" -Headers $headers).merged
+            # A failed lookup (rate limit, network) keeps the patched build.
+            try { [bool](Invoke-RestMethod -Uri "https://api.github.com/repos/$GooGetGitHubRepo/pulls/$number" -Headers $headers).merged }
+            catch { Write-Warning "GooGet: could not read $GooGetGitHubRepo PR #$number ($($_.Exception.Message)); assuming unmerged"; $false }
         })
         if (Test-GooGetPatchPending -Merged $merged) {
             $repo = $GooGetPatchedRepo
