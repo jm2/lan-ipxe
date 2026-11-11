@@ -66,8 +66,9 @@ as presence-only or -NoUpgrade is given.
      by any account but Administrators and SYSTEM and it holds no junctions
      or symlinks; otherwise apply stops for a person to remove it. Each run rebuilds when the source commit
      moved.
-     googet.conf allows plain-HTTP repos and repos\linux-packages.repo points
-     at crossdock's linux-packages GooGet repo on enthoo.
+     googet.conf allows plain-HTTP repos and repos\game-packages.repo points
+     at crossdock's game-packages GooGet repo on enthoo. The repo file from
+     before the rename (repos\linux-packages.repo) is removed.
 
 Exit codes: 0 converged (or -DryRun), 1 error/failed install, 2 drift found by
 -Check.
@@ -300,11 +301,17 @@ $GooGetPatchedRepo = 'jm2/googet'
 $GooGetPatchedCommit = '645ecb0cbbef3fdb459807a54e1423949dcfa3db'
 $GooGetPatchedPulls = @(227, 228)
 $GooGetMarkerName = '.lan-ipxe-build'
-# crossdock on enthoo serves linux-packages' GooGet repo over plain HTTP on
+# crossdock on enthoo serves game-packages' GooGet repo over plain HTTP on
 # the trusted LAN, which googet 2.11+ refuses unless googet.conf sets
 # allowunsafeurl.
-$GooGetRepoName = 'linux-packages'
-$GooGetRepoUrl = 'http://192.168.1.11:8080/goo/linux-packages'
+$GooGetRepoName = 'game-packages'
+$GooGetRepoUrl = 'http://192.168.1.11:8080/goo/game-packages'
+# Repo files this script wrote under earlier names, by name and URL. Apply
+# removes one only while it still holds exactly what was written, so a repo
+# someone set up by hand under the same name stays.
+$GooGetRetiredRepos = @(
+    @{ Name = 'linux-packages'; Url = 'http://192.168.1.11:8080/goo/linux-packages' }
+)
 # The only principals that may own or write anything under
 # %ProgramData%\GooGet, as well-known SIDs (account names are localized):
 # Administrators and SYSTEM. An owner keeps implicit WRITE_DAC, and googet
@@ -1710,6 +1717,18 @@ function Get-GooGetRepoFileText {
     return "- name: $GooGetRepoName`n  url: $GooGetRepoUrl`n"
 }
 
+# The retired repo files still present with the content this script
+# wrote, as @{ Name; Path }.
+function Get-GooGetRetiredRepoFile {
+    param([Parameter(Mandatory)][string]$Root)
+    foreach ($r in $GooGetRetiredRepos) {
+        $path = Join-Path (Join-Path $Root 'repos') "$($r.Name).repo"
+        if ((Read-TextOrEmpty -Path $path) -eq "- name: $($r.Name)`n  url: $($r.Url)`n") {
+            [pscustomobject]@{ Name = $r.Name; Path = $path }
+        }
+    }
+}
+
 function Read-TextOrEmpty {
     param([Parameter(Mandatory = $true)][string]$Path)
     if (Test-Path -LiteralPath $Path) { return [IO.File]::ReadAllText($Path) }
@@ -1846,6 +1865,7 @@ function Get-GooGetConfigurationDrift {
     if ($conf -ne (Get-GooGetConfText -Text $conf)) { $drift += 'googet.conf allowunsafeurl' }
     $repoFile = Join-Path (Join-Path $root 'repos') "$GooGetRepoName.repo"
     if ((Read-TextOrEmpty -Path $repoFile) -ne (Get-GooGetRepoFileText)) { $drift += "$GooGetRepoName repo" }
+    foreach ($old in @(Get-GooGetRetiredRepoFile -Root $root)) { $drift += "retired $($old.Name) repo" }
     return $drift
 }
 
@@ -1882,6 +1902,10 @@ function Sync-GooGetConfiguration {
     $repoFile = Join-Path (Join-Path $root 'repos') "$GooGetRepoName.repo"
     $wantRepo = Get-GooGetRepoFileText
     if ((Read-TextOrEmpty -Path $repoFile) -ne $wantRepo) { [IO.File]::WriteAllText($repoFile, $wantRepo, $utf8); $changed += "$GooGetRepoName repo" }
+    foreach ($old in @(Get-GooGetRetiredRepoFile -Root $root)) {
+        Remove-Item -LiteralPath $old.Path -Force
+        $changed += "removed $($old.Name) repo"
+    }
     return $changed
 }
 
@@ -2230,7 +2254,7 @@ $rustResult = Initialize-RustupToolchain -NoUpgrade:$NoUpgrade
 Write-Note "rustup: $rustResult"
 
 #--- 7. GooGet (built from google/googet head) ------------------------------
-Write-Step 'GooGet (built from source) and the linux-packages repo'
+Write-Step 'GooGet (built from source) and the game-packages repo'
 $googetResult = Invoke-GooGetStep -NoUpgrade:$NoUpgrade
 Write-Note "GooGet: $googetResult"
 
