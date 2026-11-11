@@ -1723,7 +1723,7 @@ function Get-GooGetRetiredRepoFile {
     param([Parameter(Mandatory)][string]$Root)
     foreach ($r in $GooGetRetiredRepos) {
         $path = Join-Path (Join-Path $Root 'repos') "$($r.Name).repo"
-        if ((Read-TextOrEmpty -Path $path) -ceq "- name: $($r.Name)`n  url: $($r.Url)`n") {
+        if ([string]::Equals((Read-TextOrEmpty -Path $path), "- name: $($r.Name)`n  url: $($r.Url)`n", [StringComparison]::Ordinal)) {
             [pscustomobject]@{ Name = $r.Name; Path = $path }
         }
     }
