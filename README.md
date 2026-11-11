@@ -376,8 +376,10 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   SYSTEM and it contains no junctions or symlinks; otherwise apply stops for you to remove
   it (nothing is repaired in place, since googet runs elevated from the machine PATH).
   Each run rebuilds it when the source commit moved. `googet.conf` sets
-  `allowunsafeurl: true` and `repos\linux-packages.repo` points at crossdock's
-  plain-HTTP GooGet repo on the LAN (`http://192.168.1.11:8080/goo/linux-packages`).
+  `allowunsafeurl: true` and `repos\game-packages.repo` points at crossdock's
+  plain-HTTP GooGet repo on the LAN (`http://192.168.1.11:8080/goo/game-packages`). The
+  `repos\linux-packages.repo` written before the rename is removed while it still holds
+  what the script wrote.
   googet needs `GooGetRoot`, so shells opened before the first run must be reopened.
   Full adds Steam, GOG Galaxy, the
   SuperTux games, benchmarks, Plex, iTunes, HDHomeRun, MakeMKV, and Google Drive.
