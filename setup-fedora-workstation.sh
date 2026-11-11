@@ -2488,8 +2488,12 @@ if (( IS_X86_64 )) && [[ ${PROFILE} == full ]]; then
   # dnf-automatic never meets a key prompt. Off the LAN, the first refresh on
   # the LAN imports it (dnf upgrade -y below, or the next run).
   if curl -fsI --max-time 3 -o /dev/null http://192.168.1.11:8080/rpm/game-packages/repodata/repomd.xml; then
-    sudo dnf -y -q makecache --repo game-packages
-    note "game-packages: metadata key imported, cache refreshed"
+    # skip_if_unavailable would let a failed fetch or signature check pass.
+    if sudo dnf -y -q makecache --repo game-packages --setopt=game-packages.skip_if_unavailable=False; then
+      note "game-packages: metadata key imported, cache refreshed"
+    else
+      warn "game-packages: crossdock answered but its metadata could not be fetched or verified"
+    fi
   else
     note "game-packages: crossdock unreachable; dnf skips it until the LAN answers"
   fi
