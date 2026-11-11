@@ -1723,7 +1723,7 @@ function Get-GooGetRetiredRepoFile {
     param([Parameter(Mandatory)][string]$Root)
     foreach ($r in $GooGetRetiredRepos) {
         $path = Join-Path (Join-Path $Root 'repos') "$($r.Name).repo"
-        if ((Read-TextOrEmpty -Path $path) -eq "- name: $($r.Name)`n  url: $($r.Url)`n") {
+        if ((Read-TextOrEmpty -Path $path) -ceq "- name: $($r.Name)`n  url: $($r.Url)`n") {
             [pscustomobject]@{ Name = $r.Name; Path = $path }
         }
     }
@@ -2036,6 +2036,7 @@ if ($DryRun) {
     }
     Write-Note '    into %ProgramData%\GooGet with GooGetRoot, the machine PATH entry and ACLs as googet''s install.ps1 sets them;'
     Write-Note "    googet.conf allowunsafeurl: true; repo $GooGetRepoName -> $GooGetRepoUrl"
+    foreach ($r in $GooGetRetiredRepos) { Write-Note "    removes repos\$($r.Name).repo while it still points at $($r.Url)" }
     exit 0
 }
 

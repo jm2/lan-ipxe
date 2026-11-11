@@ -19,7 +19,7 @@ if ($parseErrors.Count) {
 $tokens.Count | Out-Null
 
 foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetLegacyPackages', 'WingetPresenceOnlyPackages',
-                              'RustComponents', 'BalunWingetId', 'BalunRepo', 'BalunDisplayName', 'BalunInstallerArgs', 'WingetOkCodes', 'WingetRebootCodes', 'WingetDeferredCodes', 'WingetRemoveOkCodes', 'WingetLaunchAttempts', 'WingetLaunchRetrySeconds', 'WingetInstallTechMismatchCode', 'WingetUninstallWaitSeconds', 'WingetUninstallPollSeconds', 'NativeCliTools', 'WingetPackageArgs', 'GooGetGitHubRepo', 'GooGetPatchedRepo', 'GooGetPatchedCommit', 'GooGetPatchedPulls', 'GooGetRepoName', 'GooGetRepoUrl', 'GooGetAclTrustedSids')) {
+                              'RustComponents', 'BalunWingetId', 'BalunRepo', 'BalunDisplayName', 'BalunInstallerArgs', 'WingetOkCodes', 'WingetRebootCodes', 'WingetDeferredCodes', 'WingetRemoveOkCodes', 'WingetLaunchAttempts', 'WingetLaunchRetrySeconds', 'WingetInstallTechMismatchCode', 'WingetUninstallWaitSeconds', 'WingetUninstallPollSeconds', 'NativeCliTools', 'WingetPackageArgs', 'GooGetGitHubRepo', 'GooGetPatchedRepo', 'GooGetPatchedCommit', 'GooGetPatchedPulls', 'GooGetRepoName', 'GooGetRepoUrl', 'GooGetRetiredRepos', 'GooGetAclTrustedSids')) {
     $assignmentAst = $ast.Find({
         param($node)
         $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
@@ -32,7 +32,7 @@ foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetLeg
 foreach ($functionName in @('Write-Note', 'Invoke-Winget', 'Get-WingetPackageArgument', 'Get-WingetArpEntry', 'Test-NsisExecutable', 'Remove-WingetPackageForReinstall', 'Wait-WingetPackageRemoved', 'Split-UninstallCommand', 'Invoke-UninstallCommand', 'Invoke-WingetPackageSet', 'Get-RustupStableComponent',
                             'Test-RustupDefaultToolchain', 'Initialize-RustupToolchain',
                             'Get-NativeProcessorArchitecture', 'Get-WindowsArchitectureName', 'Get-BalunRelease', 'Invoke-BalunStep',
-                            'Invoke-PowerShellMsiSwitch', 'Select-GooGetSource', 'Test-GooGetPatchPending', 'Get-GooGetConfText', 'Get-GooGetRepoFileText', 'Test-GooGetWriteRight')) {
+                            'Invoke-PowerShellMsiSwitch', 'Select-GooGetSource', 'Test-GooGetPatchPending', 'Get-GooGetConfText', 'Get-GooGetRepoFileText', 'Get-GooGetRetiredRepoFile', 'Read-TextOrEmpty', 'Test-GooGetWriteRight')) {
     $functionAst = $ast.Find({
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $functionName
@@ -105,6 +105,7 @@ try {
         Assert-True ($text -match 'GooGet: go build of jm2/googet@645ecb0cbbef \(git checkout\) until google/googet PRs #227, #228 merge') "$profileName dry run lists the patched GooGet build"
         Assert-True ($text -match 'then go install from the head of google/googet') "$profileName dry run lists the upstream GooGet build"
         Assert-True ($text -match 'repo game-packages -> http://192\.168\.1\.11:8080/goo/game-packages') "$profileName dry run lists the game-packages GooGet repo"
+        Assert-True ($text -match 'removes repos\\linux-packages\.repo while it still points at http://192\.168\.1\.11:8080/goo/linux-packages') "$profileName dry run lists the retired repo removal"
         Assert-True ($text.IndexOf('SST.opencode') -gt $text.IndexOf('Legacy packages removed') -and $text -match 'SST\.OpenCodeDesktop') "$profileName dry run purges, not installs, OpenCode"
         Assert-True (($text -match 'Valve\.Steam') -eq ($profileName -eq 'full')) "Steam listed only for full ($profileName)"
     }
@@ -151,6 +152,8 @@ try {
     Assert-True ($found.Count -eq 1 -and $found[0].Name -eq 'linux-packages' -and $found[0].Path -eq $retiredFile) 'the linux-packages repo file this script wrote is found for removal'
     [IO.File]::WriteAllText($retiredFile, "- name: linux-packages`n  url: http://example.invalid/goo`n")
     Assert-True (@(Get-GooGetRetiredRepoFile -Root $retiredRoot).Count -eq 0) 'a hand-made linux-packages repo file is left alone'
+    [IO.File]::WriteAllText($retiredFile, "- name: linux-packages`n  url: http://192.168.1.11:8080/goo/LINUX-packages`n")
+    Assert-True (@(Get-GooGetRetiredRepoFile -Root $retiredRoot).Count -eq 0) 'a repo file differing only in case is left alone'
 }
 finally { Remove-Item -LiteralPath $retiredRoot -Recurse -Force }
 $installAst = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Install-GooGet' }, $true).Extent.Text
