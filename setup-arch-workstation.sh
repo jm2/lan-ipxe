@@ -539,10 +539,12 @@ select_profile() {
 select_profile "${PROFILE}"
 
 #--- Helpers ----------------------------------------------------------------
-# game_packages_key_fpr: the fingerprint of the vendored crossdock key.
+# game_packages_key_fpr: the primary-key fingerprints in the vendored crossdock
+# key file, one per line (signing subkeys are not listed). Exactly one, the
+# pinned one, is accepted.
 game_packages_key_fpr() {
   gpg --batch --show-keys --with-colons -- "${GAME_PACKAGES_KEY}" 2>/dev/null \
-    | awk -F: '$1 == "fpr" { print toupper($10); exit }'
+    | awk -F: '$1 == "pub" { want = 1; next } $1 == "sub" { want = 0 } $1 == "fpr" && want { print toupper($10); want = 0 }'
 }
 
 # game_packages_key_trusted: true when pacman's keyring holds the crossdock key
@@ -555,7 +557,9 @@ game_packages_key_trusted() {
 }
 
 # pacman_conf_has_game_packages_include [file]: true when the pacman config
-# ends its repositories with the game-packages Include line.
+# ends its repositories with the game-packages Include line. The tests pass a
+# file; the script itself checks /etc/pacman.conf.
+# shellcheck disable=SC2120
 pacman_conf_has_game_packages_include() {
   grep -qxF -- "${GAME_PACKAGES_INCLUDE}" "${1:-/etc/pacman.conf}"
 }
@@ -1848,10 +1852,14 @@ run_check() {
     else
       report DRIFT "/etc/pacman.conf: missing '${GAME_PACKAGES_INCLUDE}'"
     fi
-    if [[ -f ${GAME_PACKAGES_CONF} ]]; then
-      report CURRENT "${GAME_PACKAGES_CONF}: present ($(grep -q '^\[game-packages\]' "${GAME_PACKAGES_CONF}" && echo 'repository enabled: LAN reachable' || echo 'empty: LAN unreachable'))"
-    else
+    if [[ ! -f ${GAME_PACKAGES_CONF} || -L ${GAME_PACKAGES_CONF} ]]; then
       report DRIFT "${GAME_PACKAGES_CONF}: missing"
+    elif [[ ! -s ${GAME_PACKAGES_CONF} ]]; then
+      report CURRENT "${GAME_PACKAGES_CONF}: empty (crossdock was unreachable at the last network change)"
+    elif [[ $(cat -- "${GAME_PACKAGES_CONF}"; printf x) == "$("${FILES}/usr/local/libexec/game-packages-repo" --section; printf x)" ]]; then
+      report CURRENT "${GAME_PACKAGES_CONF}: [game-packages] enabled (crossdock reachable)"
+    else
+      report DRIFT "${GAME_PACKAGES_CONF}: neither empty nor the expected [game-packages] section"
     fi
   fi
 

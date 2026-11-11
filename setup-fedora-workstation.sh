@@ -2474,14 +2474,25 @@ if (( IS_X86_64 )) && [[ ${PROFILE} == full ]]; then
   # Games and engines built from jm2/game-packages, served by crossdock on the
   # LAN. The key ships in files/ (the repo is plain HTTP); dnf skips the repo
   # when the LAN is out of reach (skip_if_unavailable).
+  # Exactly one primary key, the pinned one: rpmkeys would trust every key in
+  # the file. Signing subkeys are allowed.
   game_packages_fpr=$(gpg --batch --show-keys --with-colons "${FILES}/keys/game-packages.asc" 2>/dev/null \
-    | awk -F: '$1 == "fpr" { print toupper($10); exit }')
+    | awk -F: '$1 == "pub" { want = 1; next } $1 == "sub" { want = 0 } $1 == "fpr" && want { print toupper($10); want = 0 }')
   [[ ${game_packages_fpr} == "${GAME_PACKAGES_KEY_FINGERPRINT}" ]] \
-    || die "files/keys/game-packages.asc is not the pinned key ${GAME_PACKAGES_KEY_FINGERPRINT}"
+    || die "files/keys/game-packages.asc must hold only the pinned key ${GAME_PACKAGES_KEY_FINGERPRINT}"
   put_file -s "${FILES}/keys/game-packages.asc" /etc/pki/rpm-gpg/RPM-GPG-KEY-game-packages
   sudo rpmkeys --import "${GAME_PACKAGES_KEY_FILE}"
   put_file -s "${FILES}/etc/yum.repos.d/game-packages.repo" /etc/yum.repos.d/game-packages.repo
   dnf_repo_enabled game-packages || die "the game-packages repository is not enabled"
+  # repo_gpgcheck keeps its own metadata key; import it now, unattended, so
+  # dnf-automatic never meets a key prompt. Off the LAN, the first refresh on
+  # the LAN imports it (dnf upgrade -y below, or the next run).
+  if curl -fsI --max-time 3 -o /dev/null http://192.168.1.11:8080/rpm/game-packages/repodata/repomd.xml; then
+    sudo dnf -y -q makecache --repo game-packages
+    note "game-packages: metadata key imported, cache refreshed"
+  else
+    note "game-packages: crossdock unreachable; dnf skips it until the LAN answers"
+  fi
 fi
 # sing-box: modern multi-protocol proxy (shadowsocks incl. 2022 ciphers).
 # Reconcile enabled state rather than treating any file as sufficient.

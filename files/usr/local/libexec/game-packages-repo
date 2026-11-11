@@ -9,19 +9,31 @@
 #
 # Run by NetworkManager's dispatcher (50-game-packages), by the daily
 # pacman-update job and by setup-arch-workstation.sh. Always exits 0.
+# --section prints the enabled section, which setup's --check compares with.
 set -u
+# shellcheck disable=SC2016 # pacman expands $repo and $arch itself
+section='[game-packages]
+SigLevel = Required DatabaseRequired PackageOptional
+Server = http://192.168.1.11:8080/arch/$repo/$arch
+'
+if [[ ${1:-} == --section ]]; then
+  printf '%s' "${section}"
+  exit 0
+fi
 # The overrides exist for the tests.
 base=${GAME_PACKAGES_BASE:-http://192.168.1.11:8080/arch/game-packages/x86_64}
 conf=${GAME_PACKAGES_CONF:-/etc/pacman.d/game-packages.conf}
+lock=${GAME_PACKAGES_LOCK:-/run/lock/game-packages-repo.lock}
+
+# One probe-and-write at a time, so a slow run can't put back a result that
+# a later network change already replaced.
+exec 9>"${lock}" || exit 0
+flock -w 30 9 || exit 0
 
 want=''
 if curl -fsI --max-time 3 -o /dev/null "${base}/game-packages.db" \
    && curl -fsI --max-time 3 -o /dev/null "${base}/game-packages.db.sig"; then
-  # shellcheck disable=SC2016 # pacman expands $repo and $arch itself
-  want='[game-packages]
-SigLevel = Required DatabaseRequired PackageOptional
-Server = http://192.168.1.11:8080/arch/$repo/$arch
-'
+  want=${section}
 fi
 
 if [[ -f ${conf} && ! -L ${conf} ]] && [[ $(cat -- "${conf}"; printf x) == "${want}x" ]]; then

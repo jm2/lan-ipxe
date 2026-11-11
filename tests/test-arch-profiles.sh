@@ -501,6 +501,7 @@ test_game_packages_repo() (
   load_helpers
   local entry found=0 conf=${TEST_ROOT}/gp/game-packages.conf served=${TEST_ROOT}/gp/served
   local toggle=${REPO_ROOT}/files/usr/local/libexec/game-packages-repo port pid
+  export GAME_PACKAGES_LOCK=${TEST_ROOT}/gp/lock
   for entry in "${MANAGED_FILES[@]}"; do
     [[ ${entry} == *game-packages* ]] && found=1
   done
@@ -510,6 +511,7 @@ test_game_packages_repo() (
     [[ ${entry} == *game-packages-repo* ]] && found=1
   done
   (( found )) || fail 'full does not manage the game-packages toggle'
+  # shellcheck disable=SC2034 # read by the sourced game_packages_key_fpr
   GAME_PACKAGES_KEY=${REPO_ROOT}/files/keys/game-packages.asc
   [[ $(game_packages_key_fpr) == "${GAME_PACKAGES_KEY_FPR}" ]] \
     || fail 'files/keys/game-packages.asc is not the pinned crossdock key'
@@ -538,6 +540,15 @@ test_game_packages_repo() (
   GAME_PACKAGES_CONF=${conf} GAME_PACKAGES_BASE=http://127.0.0.1:${port}/arch "${toggle}"
   kill "${pid}"
   [[ ! -s ${conf} ]] || fail 'an unsigned database enabled [game-packages]'
+  [[ $("${toggle}" --section) == *'SigLevel = Required DatabaseRequired PackageOptional'* ]] \
+    || fail '--section does not print the enabled section'
+  # A second primary key in the vendored file is refused.
+  install -d -m 0700 "${TEST_ROOT}/gp/gnupg"
+  GAME_PACKAGES_KEY=${TEST_ROOT}/gp/two.asc
+  { cat "${REPO_ROOT}/files/keys/game-packages.asc"; gpg --batch --quiet --homedir "${TEST_ROOT}/gp/gnupg" --passphrase '' \
+      --quick-gen-key 'other <other@example.invalid>' ed25519 sign never >/dev/null 2>&1 \
+    && gpg --batch --homedir "${TEST_ROOT}/gp/gnupg" --armor --export other@example.invalid; } >"${GAME_PACKAGES_KEY}"
+  [[ $(game_packages_key_fpr) != "${GAME_PACKAGES_KEY_FPR}" ]] || fail 'a key file with two primary keys was accepted'
 )
 
 test_argument_parsing
