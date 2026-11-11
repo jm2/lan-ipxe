@@ -32,7 +32,9 @@
 #      Chrome, Charm (Crush),
 #      sing-box; on
 #      x86_64 also Microsoft (PowerShell), plus (full) the RPM Fusion steam
-#      repo and Plex Media Server. The abandoned Antigravity 1.x RPM
+#      repo, Plex Media Server and the LAN's game-packages repo (crossdock on
+#      enthoo; its key is vendored in files/keys and pinned by fingerprint,
+#      and skip_if_unavailable keeps dnf working off the LAN). The abandoned Antigravity 1.x RPM
 #      repo/package, VSCodium and the Claude Code RPM repo/key are retired in
 #      favor of native Antigravity 2.0+, VS Code and native Claude Code.
 #   2. CA-bundle symlinks at the Debian-style paths some tools hard-code
@@ -104,6 +106,9 @@ MICROSOFT_KEY_FILE=/etc/pki/rpm-gpg/MICROSOFT-RPM-GPG-KEY
 PLEX_KEY_URL=https://downloads.plex.tv/plex-keys/PlexSign.v2.key
 PLEX_KEY_FINGERPRINT=6EFFEB478A6559D75C7C4FE706C521790B9CFFDE
 PLEX_KEY_FILE=/etc/pki/rpm-gpg/PLEX-RPM-GPG-KEY
+# crossdock's signing key for the LAN game-packages repo, vendored in files/.
+GAME_PACKAGES_KEY_FINGERPRINT=38C92DEA894BB3E48C50D6F0B48EFCBE62AAFAB2
+GAME_PACKAGES_KEY_FILE=/etc/pki/rpm-gpg/RPM-GPG-KEY-game-packages
 # Claude Code moved from Anthropic's RPM repo to its self-updating native
 # install; the repo file this script used to install and its key are retired.
 LEGACY_CLAUDE_REPO=/etc/yum.repos.d/claude-code.repo
@@ -2078,13 +2083,15 @@ select_profile() {
     if (( IS_X86_64 )); then
       SELECTED_PKGS+=("${PKGS_FULL_X86_64[@]}")
       SELECTED_SERVICES+=("${SERVICES_FULL_X86_64[@]}")
-      SELECTED_REPOS+=(rpmfusion-nonfree-steam PlexTv)
+      SELECTED_REPOS+=(rpmfusion-nonfree-steam PlexTv game-packages)
       # Plex publishes x86_64 RPMs only; Steam's i686 stack is x86_64-only,
       # and so is its in-home streaming surface.
       FIREWALL_LAN_SERVICES+=(plexmediaserver steam-streaming)
       MANAGED_FILES+=(
         "etc/yum.repos.d/rpmfusion-nonfree-steam.repo|/etc/yum.repos.d/rpmfusion-nonfree-steam.repo"
         "etc/yum.repos.d/plex.repo|/etc/yum.repos.d/plex.repo"
+        "etc/yum.repos.d/game-packages.repo|/etc/yum.repos.d/game-packages.repo"
+        "keys/game-packages.asc|${GAME_PACKAGES_KEY_FILE}"
       )
     fi
   fi
@@ -2464,6 +2471,33 @@ if (( IS_X86_64 )) && [[ ${PROFILE} == full ]]; then
     "${PLEX_KEY_FINGERPRINT}" "${PLEX_KEY_FILE}"
   put_file -s "${FILES}/etc/yum.repos.d/plex.repo" /etc/yum.repos.d/plex.repo
   dnf_repo_enabled PlexTv || die "the Plex Media Server repository is not enabled"
+  # Games and engines built from jm2/game-packages, served by crossdock on the
+  # LAN. The key ships in files/ (the repo is plain HTTP); dnf skips the repo
+  # when the LAN is out of reach (skip_if_unavailable).
+  # Exactly one primary key, the pinned one: rpmkeys would trust every key in
+  # the file. Signing subkeys are allowed.
+  game_packages_fpr=$(gpg --batch --show-keys --with-colons "${FILES}/keys/game-packages.asc" 2>/dev/null \
+    | awk -F: '$1 == "pub" { want = 1; next } $1 == "sub" { want = 0 } $1 == "fpr" && want { print toupper($10); want = 0 }')
+  [[ ${game_packages_fpr} == "${GAME_PACKAGES_KEY_FINGERPRINT}" ]] \
+    || die "files/keys/game-packages.asc must hold only the pinned key ${GAME_PACKAGES_KEY_FINGERPRINT}"
+  put_file -s "${FILES}/keys/game-packages.asc" /etc/pki/rpm-gpg/RPM-GPG-KEY-game-packages
+  sudo rpmkeys --import "${GAME_PACKAGES_KEY_FILE}"
+  put_file -s "${FILES}/etc/yum.repos.d/game-packages.repo" /etc/yum.repos.d/game-packages.repo
+  dnf_repo_enabled game-packages || die "the game-packages repository is not enabled"
+  # repo_gpgcheck keeps its own metadata key; import it now, unattended, so
+  # dnf-automatic never meets a key prompt. Off the LAN, the first refresh on
+  # the LAN imports it (dnf upgrade -y below, or the next run).
+  if curl -fsI --max-time 3 -o /dev/null http://192.168.1.11:8080/rpm/game-packages/repodata/repomd.xml; then
+    # skip_if_unavailable would let a failed fetch or signature check pass, and
+    # without --refresh unexpired cached metadata would be reused.
+    if sudo dnf -y -q makecache --refresh --repo game-packages --setopt=game-packages.skip_if_unavailable=False; then
+      note "game-packages: metadata key imported, cache refreshed"
+    else
+      warn "game-packages: crossdock answered but its metadata could not be fetched or verified"
+    fi
+  else
+    note "game-packages: crossdock unreachable; dnf skips it until the LAN answers"
+  fi
 fi
 # sing-box: modern multi-protocol proxy (shadowsocks incl. 2022 ciphers).
 # Reconcile enabled state rather than treating any file as sufficient.
