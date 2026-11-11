@@ -239,7 +239,14 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   from rustup: an installed distro `rust` (and its split packages) is replaced by
   `rustup`, and each user gets the stable toolchain with rustfmt, clippy, and
   rust-analyzer. `[multilib]` is enabled only by the full profile, which adds Steam,
-  Lutris, the lib32 graphics stack, and the AUR games. GNOME uses Vitals for sensors,
+  Lutris, the lib32 graphics stack, and the AUR games. Full also adds the LAN's
+  `[game-packages]` repository (crossdock on enthoo): crossdock's key from
+  `files/keys/game-packages.asc`, pinned by fingerprint and locally signed with
+  `pacman-key`, and `Include = /etc/pacman.d/game-packages.conf` at the end of
+  `/etc/pacman.conf`. pacman fails a whole sync when any repository is down, so that
+  file holds the section only while crossdock answers: `/usr/local/libexec/game-packages-repo`
+  rewrites it from a NetworkManager dispatcher hook and before the daily
+  `pacman-update` run, and laptops off the LAN update as usual. GNOME uses Vitals for sensors,
   Dash to Dock from the AUR, and the bundled System Monitor extension with `libgtop`.
   The security baseline (see "Workstation security layer" under the Fedora bullet)
   uses the same ClamAV/firewalld/auditd/AIDE/Wazuh pieces with Arch package and unit
@@ -266,6 +273,9 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   SHA-256 digests GitHub publishes, and both are skipped when the installed version is
   already current, and their services are enabled. Full also adds Lutris, Steam with its
   i686 libraries (x86_64), the io.jor.* game Flatpaks, and desktop media apps.
+  Full on x86_64 also adds the LAN's `game-packages` repo (crossdock on enthoo) with
+  `repo_gpgcheck=1` against the vendored, fingerprint-pinned key and
+  `skip_if_unavailable=True`, so dnf carries on without it off the LAN.
   Installs `dnf5-plugin-automatic` and enables `dnf5-automatic.timer` immediately,
   with the controller setup's `apply_updates = yes` and `reboot = when-needed`
   policy in `/etc/dnf/automatic.conf`.

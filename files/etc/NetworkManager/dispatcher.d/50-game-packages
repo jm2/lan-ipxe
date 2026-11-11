@@ -1,0 +1,8 @@
+#!/bin/sh
+# Re-check whether the LAN's game-packages repository is reachable whenever
+# the network changes (see /usr/local/libexec/game-packages-repo).
+case "$2" in
+  up|down|dhcp4-change|dhcp6-change|connectivity-change|vpn-up|vpn-down)
+    exec /usr/local/libexec/game-packages-repo ;;
+esac
+exit 0

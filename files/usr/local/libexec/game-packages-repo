@@ -1,0 +1,38 @@
+#!/bin/bash
+# Enables the game-packages pacman repository only while crossdock on the LAN
+# answers. pacman fails a whole -Syu when any repository is unreachable and
+# has no per-repository opt-out, so /etc/pacman.conf ends with
+#   Include = /etc/pacman.d/game-packages.conf
+# and this rewrites that file: the [game-packages] section on the LAN, empty
+# elsewhere. Another network's 192.168.1.11 can't feed packages in: the
+# database must carry crossdock's signature (DatabaseRequired).
+#
+# Run by NetworkManager's dispatcher (50-game-packages), by the daily
+# pacman-update job and by setup-arch-workstation.sh. Always exits 0.
+set -u
+# The overrides exist for the tests.
+base=${GAME_PACKAGES_BASE:-http://192.168.1.11:8080/arch/game-packages/x86_64}
+conf=${GAME_PACKAGES_CONF:-/etc/pacman.d/game-packages.conf}
+
+want=''
+if curl -fsI --max-time 3 -o /dev/null "${base}/game-packages.db" \
+   && curl -fsI --max-time 3 -o /dev/null "${base}/game-packages.db.sig"; then
+  # shellcheck disable=SC2016 # pacman expands $repo and $arch itself
+  want='[game-packages]
+SigLevel = Required DatabaseRequired PackageOptional
+Server = http://192.168.1.11:8080/arch/$repo/$arch
+'
+fi
+
+if [[ -f ${conf} && ! -L ${conf} ]] && [[ $(cat -- "${conf}"; printf x) == "${want}x" ]]; then
+  exit 0
+fi
+tmp=$(mktemp "${conf}.XXXXXX") || exit 0
+printf '%s' "${want}" >"${tmp}" && chmod 0644 -- "${tmp}" && mv -f -- "${tmp}" "${conf}" \
+  || rm -f -- "${tmp}"
+if [[ -n ${want} ]]; then
+  logger -t game-packages-repo -- 'crossdock reachable: [game-packages] enabled' 2>/dev/null
+else
+  logger -t game-packages-repo -- 'crossdock unreachable: [game-packages] disabled' 2>/dev/null
+fi
+exit 0

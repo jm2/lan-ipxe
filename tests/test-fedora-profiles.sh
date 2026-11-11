@@ -473,9 +473,25 @@ EOF
     || fail 'a missing manager did not disable an enabled wazuh-agent'
 )
 
+test_game_packages_repo() {
+  local repo=${REPO_ROOT}/files/etc/yum.repos.d/game-packages.repo out
+  grep -qx 'skip_if_unavailable=True' "${repo}" || fail 'game-packages.repo does not skip an unreachable LAN'
+  grep -qx 'repo_gpgcheck=1' "${repo}" || fail 'game-packages.repo does not verify repomd.xml'
+  grep -qx 'gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-game-packages' "${repo}" \
+    || fail 'game-packages.repo does not use the vendored key'
+  [[ $(gpg --batch --show-keys --with-colons "${REPO_ROOT}/files/keys/game-packages.asc" | awk -F: '$1 == "fpr" { print $10; exit }') \
+     == 38C92DEA894BB3E48C50D6F0B48EFCBE62AAFAB2 ]] || fail 'files/keys/game-packages.asc is not the pinned crossdock key'
+  out=$(run_script x86_64 --profile full --dry-run)
+  plan_section 'repositories' "${out}" | grep -qx 'game-packages' || fail 'full x86_64 does not enable game-packages'
+  out=$(run_script x86_64 --profile core --dry-run)
+  ! plan_section 'repositories' "${out}" | grep -qx 'game-packages' || fail 'core enables game-packages'
+}
+
 test_argument_parsing
 printf 'PASS Fedora profile/mode argument parsing and core default\n'
 test_profile_selection
+test_game_packages_repo
+printf 'PASS Fedora game-packages repository: full x86_64 only, pinned key, skipped off the LAN\n'
 printf 'PASS Fedora core/full package, Flatpak, service and repo selection (x86_64 + aarch64)\n'
 test_managed_files_are_applied
 printf 'PASS Fedora managed-file list matches apply-time put_file calls\n'

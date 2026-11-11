@@ -92,6 +92,7 @@ test_profile_selection() (
 test_managed_files_are_applied() (
   load_helpers
   local entry owner src dst mode flag
+  select_profile full
   for entry in "${MANAGED_FILES[@]}"; do
     IFS='|' read -r owner src dst mode <<<"${entry}"
     flag=''
@@ -100,7 +101,7 @@ test_managed_files_are_applied() (
     [[ ${dst} == '"${HOME}'* ]] && dst+='"'
     [[ ${mode} == 0644 ]] && mode='' || mode=" ${mode}"
     awk -v want="put_file ${flag}\"\${FILES}/${src}\" ${dst}${mode}" \
-      '{ line = $0; gsub(/  +/, " ", line) } line == want { found = 1 } END { exit !found }' \
+      '{ line = $0; sub(/^ +/, "", line); gsub(/  +/, " ", line) } line == want { found = 1 } END { exit !found }' \
       "${SCRIPT}" || fail "managed file ${src} has no matching apply-time put_file"
   done
 )
@@ -494,8 +495,55 @@ EOF
     || fail 'a missing manager did not disable an enabled wazuh-agent'
 )
 
+# The LAN game-packages repository is full-only, pinned to crossdock's key,
+# and listed in pacman only while crossdock answers.
+test_game_packages_repo() (
+  load_helpers
+  local entry found=0 conf=${TEST_ROOT}/gp/game-packages.conf served=${TEST_ROOT}/gp/served
+  local toggle=${REPO_ROOT}/files/usr/local/libexec/game-packages-repo port pid
+  for entry in "${MANAGED_FILES[@]}"; do
+    [[ ${entry} == *game-packages* ]] && found=1
+  done
+  (( ! found )) || fail 'core manages game-packages files'
+  select_profile full
+  for entry in "${MANAGED_FILES[@]}"; do
+    [[ ${entry} == *game-packages-repo* ]] && found=1
+  done
+  (( found )) || fail 'full does not manage the game-packages toggle'
+  GAME_PACKAGES_KEY=${REPO_ROOT}/files/keys/game-packages.asc
+  [[ $(game_packages_key_fpr) == "${GAME_PACKAGES_KEY_FPR}" ]] \
+    || fail 'files/keys/game-packages.asc is not the pinned crossdock key'
+
+  printf '[options]\n[core]\nInclude = /etc/pacman.d/mirrorlist\n' >"${TEST_ROOT}/pacman.conf"
+  ! pacman_conf_has_game_packages_include "${TEST_ROOT}/pacman.conf" || fail 'Include found where absent'
+  printf '%s\n' "${GAME_PACKAGES_INCLUDE}" >>"${TEST_ROOT}/pacman.conf"
+  pacman_conf_has_game_packages_include "${TEST_ROOT}/pacman.conf" || fail 'Include line not found'
+
+  # Unreachable: an empty file, which pacman accepts as an Include.
+  mkdir -p "${served}/arch"
+  GAME_PACKAGES_CONF=${conf} GAME_PACKAGES_BASE=http://127.0.0.1:9/arch "${toggle}"
+  [[ -f ${conf} && ! -s ${conf} ]] || fail 'unreachable crossdock did not leave an empty include file'
+  # Reachable (a local server with the database and its signature).
+  : >"${served}/arch/game-packages.db"
+  : >"${served}/arch/game-packages.db.sig"
+  port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+  python3 -m http.server -b 127.0.0.1 -d "${served}" "${port}" >/dev/null 2>&1 &
+  pid=$!
+  for _ in $(seq 50); do curl -fsI "http://127.0.0.1:${port}/arch/game-packages.db" >/dev/null 2>&1 && break; sleep 0.1; done
+  GAME_PACKAGES_CONF=${conf} GAME_PACKAGES_BASE=http://127.0.0.1:${port}/arch "${toggle}"
+  grep -qx '\[game-packages\]' "${conf}" && grep -qx 'SigLevel = Required DatabaseRequired PackageOptional' "${conf}" \
+    || { kill "${pid}"; fail 'reachable crossdock did not enable [game-packages]'; }
+  # A database without its signature counts as unreachable.
+  rm -f -- "${served}/arch/game-packages.db.sig"
+  GAME_PACKAGES_CONF=${conf} GAME_PACKAGES_BASE=http://127.0.0.1:${port}/arch "${toggle}"
+  kill "${pid}"
+  [[ ! -s ${conf} ]] || fail 'an unsigned database enabled [game-packages]'
+)
+
 test_argument_parsing
 printf 'PASS Arch argument parsing and usage errors\n'
+test_game_packages_repo
+printf 'PASS Arch game-packages repository: full-only, pinned key, LAN-only include\n'
 test_profile_selection
 printf 'PASS Arch core/full package selection (games/media full-only, rustup, no r8152)\n'
 test_managed_files_are_applied

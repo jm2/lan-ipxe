@@ -1,0 +1,12 @@
+# Games and engines built from jm2/game-packages, served by crossdock on the
+# LAN (enthoo). repo_gpgcheck verifies the signed repomd.xml, which pins every
+# package's SHA-256; crossdock doesn't sign RPM headers, so gpgcheck is off.
+# skip_if_unavailable lets dnf carry on without this repo off the LAN.
+[game-packages]
+name=game-packages (LAN)
+baseurl=http://192.168.1.11:8080/rpm/game-packages
+enabled=1
+repo_gpgcheck=1
+gpgcheck=0
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-game-packages
+skip_if_unavailable=True
