@@ -623,10 +623,31 @@ class ConfigurationTests(unittest.TestCase):
         self.assertNotIn('apps', self.obj.receipts)
 
     def test_android_stable_selection_and_one_root(self):
-        listing = '''\n platforms;android-35 | 1 | stable\n platforms;android-36 | 1 | stable\n platforms;android-37-ext1 | 1 | extension\n platforms;android-Z | 1 | preview\n build-tools;36.0.0 | 1 | stable\n build-tools;36.1.0 | 1 | stable\n build-tools;37.0.0-rc1 | 1 | preview\n ndk;29.0.1 | 1 | stable\n ndk;30.0.2 | 1 | stable\n system-images;android-99;google_apis;arm64-v8a | 1 | ignored\n'''
-        self.assertEqual(w.sdk_versions(listing), ['platforms;android-36', 'build-tools;36.1.0', 'ndk;30.0.2'])
+        # `android sdk list --all` rows: installed packages (with "->" updates)
+        # and the stable repository listing; previews, extensions and system
+        # images never count.
+        listing = """Installed packages:
+  cmdline-tools/latest    19.0                   Android SDK Command-line Tools (latest)
+  platforms/android-35    3          ->  4       Android SDK Platform 35
+
+Available packages:
+  platforms/android-36    1                      Android SDK Platform 36
+  platforms/android-37-ext1 1                    Android SDK Platform 37 Extension 1
+  platforms/android-Z     1                      Android SDK Platform Z Preview
+  build-tools/36.0.0      36.0.0                 Android SDK Build-Tools 36
+  build-tools/36.1.0      36.1.0                 Android SDK Build-Tools 36.1
+  build-tools/37.0.0-rc1  37.0.0 rc1             Android SDK Build-Tools 37-rc1
+  ndk/29.0.1              29.0.1                 NDK (Side by side) 29.0.1
+  ndk/30.0.2              30.0.2                 NDK (Side by side) 30.0.2
+  system-images/android-99/google_apis/arm64-v8a 1  ignored
+"""
+        self.assertEqual(w.sdk_versions(listing), ['platforms/android-36', 'build-tools/36.1.0', 'ndk/30.0.2'])
+        # The semicolon form is accepted for compatibility.
+        self.assertEqual(w.sdk_versions('platforms;android-36 1\nbuild-tools;36.0.0 1\nndk;29.0.1 1\n'),
+                         ['platforms/android-36', 'build-tools/36.0.0', 'ndk/29.0.1'])
+        self.assertEqual(w.sdk_package('ndk;29.0.1'), 'ndk/29.0.1')
         with self.assertRaises(w.Deferred):
-            w.sdk_versions('platforms;android-35 | 1 | stable')
+            w.sdk_versions('  platforms/android-35    1   Android SDK Platform 35')
         with patch.dict(os.environ, {'ANDROID_HOME': str(self.home / 'sdk'), 'ANDROID_SDK_ROOT': str(self.home / 'different')}):
             with self.assertRaises(w.Deferred):
                 self.obj.sdk_root()
@@ -634,30 +655,77 @@ class ConfigurationTests(unittest.TestCase):
         for name in ['platforms/android-33', 'platforms/android-35', 'build-tools/35.0.0', 'build-tools/36.0.0-rc1', 'ndk/27.0.1']:
             path = root / name / 'source.properties'
             path.parent.mkdir(parents=True); path.write_text('Pkg.Revision=1')
-        self.assertEqual(w.installed_sdk_versions(root), {'platforms': 'platforms;android-35', 'build-tools': 'build-tools;35.0.0', 'ndk': 'ndk;27.0.1'})
+        self.assertEqual(w.installed_sdk_versions(root), {'platforms': 'platforms/android-35', 'build-tools': 'build-tools/35.0.0', 'ndk': 'ndk/27.0.1'})
 
-    def test_android_uses_standalone_jdk_before_unlaunched_studio_runtime(self):
+    def test_android_cli_replaces_deprecated_sdkmanager(self):
         root = self.home / 'sdk'
-        packages = ['platforms;android-36', 'build-tools;36.0.0', 'ndk;29.0.1']
-        for relative in ['platform-tools/adb'] + [name.replace(';', '/') + '/source.properties' for name in packages]:
-            path = root / relative; path.parent.mkdir(parents=True, exist_ok=True); path.touch()
+        packages = ['platforms/android-36', 'build-tools/36.0.0', 'ndk/29.0.1']
+        (root / 'platform-tools').mkdir(parents=True)
+        (root / 'platform-tools/adb').touch()
         jdk = self.obj.prefix / 'opt/openjdk/libexec/openjdk.jdk/Contents/Home'
         studio = self.obj.applications / 'Android Studio.app'
         for path in [jdk / 'bin/java', studio / 'Contents/jbr/Contents/Home/bin/java']:
             path.parent.mkdir(parents=True); path.touch()
+        cli = self.obj.prefix / 'bin/android'
+        cli.parent.mkdir(parents=True, exist_ok=True); cli.touch(); cli.chmod(0o755)
         self.obj.apps = [{'id': 'com.google.android.studio', 'path': studio}]
         self.obj.args.no_upgrade = False
-        calls = []
+        calls, links = [], []
         def command(argv, **kwargs):
-            calls.append((argv, kwargs['env']['JAVA_HOME']))
-            return subprocess.CompletedProcess(argv, 0, '\n'.join(name + ' | 1 | stable' for name in packages), '')
+            calls.append(([str(a) for a in argv], kwargs.get('env', {}).get('JAVA_HOME')))
+            if argv[-2:] == ['list', '--all']:
+                return subprocess.CompletedProcess(argv, 0, '\n'.join('  %s  1  pkg' % name for name in packages), '')
+            if 'install' in argv:
+                for name in argv[argv.index('install') + 1:]:
+                    if name != 'platform-tools':
+                        (root / name).mkdir(parents=True, exist_ok=True); (root / name / 'source.properties').touch()
+            return subprocess.CompletedProcess(argv, 0, '', '')
+        installed = []
         with patch.object(self.obj, 'sdk_root', return_value=root), \
-                patch.object(self.obj, 'package'), patch.object(self.obj, 'link'), \
+                patch.object(self.obj, 'package', side_effect=lambda name, kind='formula': installed.append((name, kind))), \
+                patch.object(self.obj, 'link', side_effect=lambda link, target: links.append((link, target))), \
                 patch.object(self.obj, 'command', side_effect=command):
             self.obj.android()
-        self.assertEqual(len(calls), 2)
-        self.assertTrue(all(java == str(jdk) for _, java in calls))
-        self.assertTrue(all('--sdk_root=' + str(root) in argv for argv, _ in calls))
+        self.assertEqual(installed, [('android-commandlinetools', 'cask'), ('android/tap/android-cli', 'cask')])
+        argvs = [argv for argv, _ in calls]
+        self.assertEqual(argvs[0], [str(cli), 'update'])
+        sdk = [str(cli), '--sdk=' + str(root), 'sdk']
+        self.assertEqual(argvs[1:], [sdk + ['list', '--all'], sdk + ['install'] + packages, sdk + ['install', 'platform-tools']])
+        self.assertFalse(any('sdkmanager' in part or '--licenses' in part for argv in argvs for part in argv))
+        # The standalone JDK wins over an unlaunched Studio runtime.
+        self.assertTrue(all(java == str(jdk) for argv, java in calls[1:]))
+        self.assertIn((root / 'ndk/current', root / 'ndk/29.0.1'), links)
+        self.assertEqual(self.obj.receipts['android']['packages'], packages)
+
+        # A converged -NoUpgrade run reuses the receipt (old semicolon names
+        # too), installs nothing and does not update the CLI.
+        calls.clear()
+        self.obj.args.no_upgrade = True
+        self.obj.receipts['android'] = {'root': str(root), 'packages': [name.replace('/', ';') for name in packages]}
+        with patch.object(self.obj, 'sdk_root', return_value=root), patch.object(self.obj, 'package'), \
+                patch.object(self.obj, 'link'), patch.object(self.obj, 'command', side_effect=command):
+            self.obj.android()
+        self.assertEqual(calls, [])
+
+    def test_tapped_cask_is_tapped_and_found_by_short_name(self):
+        self.obj.updated = True
+        self.obj.outdated = set()
+        calls = []
+        def command(argv, **kwargs):
+            calls.append([str(a) for a in argv][1:])
+            if argv[1] == 'info':
+                return subprocess.CompletedProcess(argv, 0, json.dumps({'casks': [{}]}), '')
+            if argv[1] == 'install':
+                (self.obj.prefix / 'Caskroom/android-cli/.metadata').mkdir(parents=True)
+            return subprocess.CompletedProcess(argv, 0, '', '')
+        with patch.object(self.obj, 'command', side_effect=command):
+            self.obj.package('android/tap/android-cli', 'cask')
+            self.assertEqual(calls[0], ['tap', 'android/tap'])
+            self.assertEqual(calls[-1], ['install', '--no-ask', '--cask', 'android/tap/android-cli'])
+            calls.clear()
+            self.obj.package('android/tap/android-cli', 'cask')
+        self.assertEqual(calls, [])
+        self.assertEqual(self.obj.events[-1]['status'], 'CURRENT')
 
     def test_sharing_service_detection_formats(self):
         formats = {

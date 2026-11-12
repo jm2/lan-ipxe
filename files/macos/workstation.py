@@ -186,14 +186,24 @@ def merge_jsonc(text, desired):
 
 
 def sdk_versions(listing):
-    """Only exact stable numeric paths; exclude previews, extensions, emulators."""
+    """Only exact stable numeric paths; exclude previews, extensions, emulators.
+
+    Reads `android sdk list --all` (stable channel only), whose rows start
+    with a slash-separated package path; the semicolon form is accepted too.
+    Returns slash-separated paths, which are also the SDK directories."""
     result = []
-    for pattern in (r'platforms;android-([0-9]+)', r'build-tools;([0-9]+\.[0-9]+\.[0-9]+)', r'ndk;([0-9]+\.[0-9]+\.[0-9]+)'):
-        matches = re.findall(r'^\s*(' + pattern + r')\s*\|', listing, re.M)
+    for group, pattern in (('platforms', r'android-([0-9]+)'), ('build-tools', r'([0-9]+\.[0-9]+\.[0-9]+)'),
+                           ('ndk', r'([0-9]+\.[0-9]+\.[0-9]+)')):
+        matches = re.findall(r'^\s*' + group + r'[/;](' + pattern + r')(?=\s|$)', listing, re.M)
         if not matches:
-            raise Deferred('Stable Android package unavailable: ' + pattern)
-        result.append(max(matches, key=lambda item: tuple(map(int, item[1].split('.'))))[0])
+            raise Deferred('Stable Android package unavailable: ' + group + '/' + pattern)
+        result.append(group + '/' + max(matches, key=lambda item: tuple(map(int, item[1].split('.'))))[0])
     return result
+
+
+def sdk_package(name):
+    """SDK package path in the Android CLI's slash form (receipts may hold sdkmanager's semicolons)."""
+    return name.replace(';', '/')
 
 
 def installed_sdk_versions(root):
@@ -203,7 +213,7 @@ def installed_sdk_versions(root):
         for path in (root / group).glob('*'):
             match = re.fullmatch(pattern, path.name)
             if match and (path / 'source.properties').is_file():
-                candidates.append((tuple(map(int, match[1].split('.'))), group + ';' + path.name))
+                candidates.append((tuple(map(int, match[1].split('.'))), group + '/' + path.name))
         if candidates:
             result[group] = max(candidates)[1]
     return result
@@ -505,8 +515,12 @@ class Workstation:
             self.outdated = {item.get('name', item.get('token')) for group in data.values() for item in group}
         self.updated = True
 
+    def cask_installed(self, name):
+        # A tapped cask (user/tap/name) installs under its short name.
+        return (self.prefix / 'Caskroom' / name.rsplit('/', 1)[-1] / '.metadata').is_dir()
+
     def package(self, name, kind='formula'):
-        installed = self.formula_installed(name) if kind == 'formula' else (self.prefix / 'Caskroom' / name / '.metadata').is_dir()
+        installed = self.formula_installed(name) if kind == 'formula' else self.cask_installed(name)
         if self.preview:
             self.emit('CURRENT' if installed else 'DRIFT', kind + ' ' + name)
             return
@@ -515,7 +529,7 @@ class Workstation:
         canonical = self.manifest['aliases'].get(name, name)
         if installed and (self.args.no_upgrade or not {name, canonical} & self.outdated):
             self.emit('CURRENT', kind + ' ' + name); return
-        if kind == 'formula' and '/' in name and not installed:
+        if '/' in name and not installed:
             # Vendor taps are not tapped implicitly by every brew command.
             self.command([self.brew, 'tap', name.rsplit('/', 1)[0]], mutate=True, capture=False)
         data = json.loads(self.command([self.brew, 'info', '--json=v2', '--' + kind, name]).stdout)
@@ -533,7 +547,7 @@ class Workstation:
             self.rosetta()
         operation = 'upgrade' if installed else 'install'
         self.command([self.brew, operation, '--no-ask', '--' + kind, name], mutate=True, capture=False)
-        okay = self.formula_installed(name) if kind == 'formula' else (self.prefix / 'Caskroom' / name / '.metadata').is_dir()
+        okay = self.formula_installed(name) if kind == 'formula' else self.cask_installed(name)
         if not okay:
             raise RuntimeError('Package postcondition missing: ' + name)
         self.emit('CHANGED', kind + ' ' + name, operation)
@@ -1087,13 +1101,29 @@ class Workstation:
         self.receipts['platform_tools'] = {'root': str(root), 'version': data['version'], 'sha256': data['sha256']}
         self.emit('CHANGED', 'Android platform-tools', str(target))
 
+    def android_cli(self):
+        # Google deprecated sdkmanager for the Android CLI's `android sdk`. Its
+        # official Homebrew tap ships an unversioned cask (never "outdated"), so
+        # the CLI's own `android update` keeps it current.
+        self.package('android/tap/android-cli', 'cask')
+        cli = self.prefix / 'bin/android'
+        if self.preview:
+            return cli
+        if not os.access(cli, os.X_OK):
+            raise RuntimeError('Android CLI cask did not provide ' + str(cli))
+        if not self.args.no_upgrade:
+            self.command([cli, 'update'], mutate=True, capture=False)
+        return cli
+
     def android(self):
         root = self.sdk_root()
+        # Still the owner of cmdline-tools/latest (avdmanager, apkanalyzer, ...).
         self.package('android-commandlinetools', 'cask')
-        manager = self.prefix / 'share/android-commandlinetools/cmdline-tools/latest/bin/sdkmanager'
+        tools = self.prefix / 'share/android-commandlinetools/cmdline-tools/latest'
+        cli = self.android_cli()
         if self.preview:
-            required = self.receipts.get('android', {}).get('packages', [])
-            present = required and all((root / name.replace(';', '/') / 'source.properties').exists() for name in required)
+            required = [sdk_package(name) for name in self.receipts.get('android', {}).get('packages', [])]
+            present = required and all((root / name / 'source.properties').exists() for name in required)
             self.emit('CURRENT' if present else 'DRIFT', 'Android stable SDK/build-tools/NDK',
                       str(root) + '; upstream stable versions and licenses checked only during apply')
             return
@@ -1108,29 +1138,31 @@ class Workstation:
         if not (java / 'bin/java').exists():
             raise Deferred('Android requires the full JDK/Studio runtime')
         env = dict(self.env, JAVA_HOME=str(java), ANDROID_HOME=str(root), ANDROID_SDK_ROOT=str(root))
-        args = [manager, '--sdk_root=' + str(root)]
+        args = [cli, '--sdk=' + str(root), 'sdk']
         receipt = self.receipts.get('android', {})
         packages = receipt.get('packages', []) if self.args.no_upgrade and receipt.get('root') == str(root) else []
+        packages = [sdk_package(name) for name in packages]
         if not packages:
             retained = installed_sdk_versions(root) if self.args.no_upgrade else {}
             if len(retained) == 3:
                 packages = list(retained.values())
             else:
-                listing = self.command(args + ['--list', '--channel=0'], mutate=True, env=env).stdout
-                packages = [retained.get(name.split(';')[0], name) for name in sdk_versions(listing)]
-        missing = [name for name in packages if not (root / name.replace(';', '/') / 'source.properties').exists()]
+                # Stable channel only (the default without --beta/--canary).
+                listing = self.command(args + ['list', '--all'], mutate=True, env=env).stdout
+                packages = [retained.get(name.split('/')[0], name) for name in sdk_versions(listing)]
+        missing = [name for name in packages if not (root / name / 'source.properties').exists()]
         if missing:
-            if not sys.stdin.isatty():
-                raise Deferred('Rerun full in a terminal to review Android SDK licenses')
-            self.command(args + ['--licenses'], mutate=True, capture=False, env=env)
-            # The selected SDK is the sole platform-tools owner in both profiles.
-            self.command(args + ['--install'] + missing, mutate=True, capture=False, env=env)
+            # `android sdk install` records the package licenses itself (in the
+            # format Gradle and older SDK tools read); there is no separate
+            # --licenses step any more. The selected SDK is the sole
+            # platform-tools owner in both profiles.
+            self.command(args + ['install'] + missing, mutate=True, capture=False, env=env)
         if not self.args.no_upgrade:
-            self.command(args + ['--install', 'platform-tools'], mutate=True, capture=False, env=env)
-        if not all((root / name.replace(';', '/') / 'source.properties').exists() for name in packages):
-            raise Deferred('Android licenses/packages are incomplete')
-        self.link(root / 'cmdline-tools/latest', manager.parent.parent)
-        ndk = next(name for name in packages if name.startswith('ndk;')).split(';')[1]
+            self.command(args + ['install', 'platform-tools'], mutate=True, capture=False, env=env)
+        if not all((root / name / 'source.properties').exists() for name in packages):
+            raise Deferred('Android SDK packages are incomplete')
+        self.link(root / 'cmdline-tools/latest', tools)
+        ndk = next(name for name in packages if name.startswith('ndk/')).split('/')[1]
         self.link(root / 'ndk/current', root / 'ndk' / ndk)
         self.receipts['android'] = {'root': str(root), 'packages': packages}
         self.receipts['platform_tools'] = {'root': str(root), 'owner': 'Google SDK repository'}

@@ -108,7 +108,7 @@ Core parity is default. Full contains the additional heavy developer and optiona
 | `zlib-ng-compat-devel` (F) | full | Homebrew zlib-ng |
 | `maelstrom` (A) | full | Native Mac Source Ports app; disabled Homebrew cask unused |
 | `ollama-cuda` (A), `ollama-vulkan` (A) | full | Native Ollama runtime; Apple acceleration, no CUDA/Vulkan backend packages or model downloads |
-| `android-ndk` (A), `android-sdk-build-tools` (A), `android-sdk-cmdline-tools-latest` (A), `android-studio` (A) | full | Studio + SDK manager; latest stable platform/build-tools/NDK, no emulator images |
+| `android-ndk` (A), `android-sdk-build-tools` (A), `android-sdk-cmdline-tools-latest` (A), `android-studio` (A) | full | Studio + Android CLI (`android sdk`, replacing the deprecated `sdkmanager`); latest stable platform/build-tools/NDK, no emulator images |
 | `brasero` (A/F), `gparted` (A/F) | native | Apple Disk Utility and core cdrtools; no Linux block-device UI |
 | `ventoy-bin` (A) | native | Apple Disk Utility plus core image tools; no Linux/Windows Ventoy installer on macOS |
 | `ptyxis` (A), `rhythmbox` (F), `seahorse` (A/F) | native | Apple Music/Terminal/Keychain; Store restoration excluded |
