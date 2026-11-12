@@ -56,6 +56,19 @@ as presence-only or -NoUpgrade is given.
      replaces it when a newer release exists. x64 only; skipped on ARM64.
   6. Rust through rustup only: a stable default toolchain (only when none is
      configured) with rustfmt, clippy and rust-analyzer.
+  7. GooGet built from the head of google/googet with the GoLang.Go toolchain
+     (the newest prebuilt googet.exe is v2.20.0 from 2024; until google/googet
+     PRs #227 and #228 merge, a pinned jm2/googet commit carrying them,
+     checked out with Git.Git), installed to
+     %ProgramData%\GooGet the way googet's own install.ps1 does (GooGetRoot,
+     machine PATH, ACLs), except that the root is created already locked and
+     a pre-existing one is used only when nothing in it is owned or writable
+     by any account but Administrators and SYSTEM and it holds no junctions
+     or symlinks; otherwise apply stops for a person to remove it. Each run rebuilds when the source commit
+     moved.
+     googet.conf allows plain-HTTP repos and repos\game-packages.repo points
+     at crossdock's game-packages GooGet repo on enthoo. The repo file from
+     before the rename (repos\linux-packages.repo) is removed.
 
 Exit codes: 0 converged (or -DryRun), 1 error/failed install, 2 drift found by
 -Check.
@@ -66,7 +79,7 @@ core (default) or full; also accepted as -Profile. Full adds games/launchers and
 .PARAMETER Check
 Read-only state check: report CURRENT/DRIFT for OpenSSH, Hyper-V (with
 -HyperV), every package in the profile, legacy packages, the native CLIs,
-Goose Desktop, and the Rust toolchain. Exits 2 when anything drifted. Requires Windows and winget.
+Goose Desktop, the Rust toolchain, and GooGet with its repo. Exits 2 when anything drifted. Requires Windows and winget.
 
 .PARAMETER DryRun
 Offline, read-only plan: print every step and WinGet ID the profile would
@@ -74,7 +87,8 @@ apply without querying or changing anything. Runs on any PowerShell host.
 
 .PARAMETER NoUpgrade
 Install missing packages only; skip upgrade checks of installed packages,
-native CLI and Goose Desktop refreshes, and the rustup toolchain update.
+native CLI and Goose Desktop refreshes, the rustup toolchain update, and
+GooGet rebuilds.
 
 .PARAMETER HyperV
 Also enable the supported Hyper-V optional feature. Windows 11 Home is rejected;
@@ -269,6 +283,41 @@ $GooseDesktopMarkerName = '.lan-ipxe-release'
 
 # Git Bash rc files OpenCode's own install script appends its PATH line to.
 $OpenCodeRcFiles = @('.bashrc', '.bash_profile', '.profile')
+
+# GooGet: the newest prebuilt googet.exe is v2.20.0 (2024) and v3.0.0 shipped
+# none, so apply builds the default branch's head with Go (GoLang.Go, core).
+# The module path and version are read from that commit's go.mod and
+# googet.goospec, so a module rename upstream doesn't break the build.
+$GooGetGitHubRepo = 'google/googet'
+# Until google/googet PRs #227 and #228 (googet install with Provides) are
+# merged, apply builds this jm2/googet commit instead: the head of its
+# install-versioned-provides branch, which stacks both PRs on upstream master.
+# The fork keeps the github.com/google/googet module path, so the proxy can't
+# serve it; it is checked out with git (commit id verified) and built with
+# `go build -mod=readonly`, which still verifies every dependency against
+# go.sum. Once GitHub reports every listed PR merged, apply goes back to
+# upstream's head on its own; then empty these three.
+$GooGetPatchedRepo = 'jm2/googet'
+$GooGetPatchedCommit = '645ecb0cbbef3fdb459807a54e1423949dcfa3db'
+$GooGetPatchedPulls = @(227, 228)
+$GooGetMarkerName = '.lan-ipxe-build'
+# crossdock on enthoo serves game-packages' GooGet repo over plain HTTP on
+# the trusted LAN, which googet 2.11+ refuses unless googet.conf sets
+# allowunsafeurl.
+$GooGetRepoName = 'game-packages'
+$GooGetRepoUrl = 'http://192.168.1.11:8080/goo/game-packages'
+# Repo files this script wrote under earlier names, by name and URL. Apply
+# removes one only while it still holds exactly what was written, so a repo
+# someone set up by hand under the same name stays.
+$GooGetRetiredRepos = @(
+    @{ Name = 'linux-packages'; Url = 'http://192.168.1.11:8080/goo/linux-packages' }
+)
+# The only principals that may own or write anything under
+# %ProgramData%\GooGet, as well-known SIDs (account names are localized):
+# Administrators and SYSTEM. An owner keeps implicit WRITE_DAC, and googet
+# runs elevated from the machine PATH. TrustedInstaller is deliberately
+# absent: nothing there is a system file, and a hard link to one must fail.
+$GooGetAclTrustedSids = @('S-1-5-32-544', 'S-1-5-18')
 
 # Balun (core, beside jm2.Tributary). Its WinGet manifest jm2.Balun is pending
 # review, so apply prefers WinGet as soon as the ID resolves and otherwise
@@ -1481,6 +1530,435 @@ function Invoke-GooseDesktopStep {
     }
 }
 
+#--- GooGet (built from google/googet head) ---------------------------------
+function Get-GooGetRoot {
+    if ([string]::IsNullOrWhiteSpace($env:ProgramData)) { return $null }
+    return Join-Path $env:ProgramData 'GooGet'
+}
+
+# googet.exe and the commit this script last built (from the marker beside
+# it); Commit is empty for a googet installed some other way.
+function Get-GooGetInstall {
+    $root = Get-GooGetRoot
+    if (-not $root) { return $null }
+    $exe = Join-Path $root 'googet.exe'
+    if (-not (Test-Path -LiteralPath $exe)) { return $null }
+    $fields = @{}
+    $marker = Join-Path $root $GooGetMarkerName
+    if (Test-Path -LiteralPath $marker) {
+        foreach ($line in @(Get-Content -LiteralPath $marker)) {
+            if ($line -match '^(?<Key>[a-z0-9-]+)=(?<Value>.*)$') { $fields[$Matches.Key] = $Matches.Value }
+        }
+    }
+    $repo = if ($fields['repo']) { [string]$fields['repo'] } elseif ($fields['commit']) { $GooGetGitHubRepo } else { '' }
+    return [pscustomobject]@{ Exe = $exe; Commit = [string]$fields['commit']; Version = [string]$fields['version']; Repo = $repo }
+}
+
+# Pure: the build inputs from one commit's go.mod and googet.goospec.
+function Select-GooGetSource {
+    param(
+        [Parameter(Mandatory = $true)][string]$Commit,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$GoMod,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$GooSpec,
+        [string]$Repo = $GooGetGitHubRepo
+    )
+    if ($Commit -notmatch '^[0-9a-f]{40}$') { throw "unexpected $Repo commit id '$Commit'" }
+    if ($GoMod -notmatch '(?m)^module\s+(?<Module>github\.com/google/googet(/v\d+)?)\s*$') {
+        throw "go.mod at $Repo@$Commit does not declare a github.com/google/googet module"
+    }
+    $module = $Matches.Module
+    if ($GooSpec -notmatch '\$version\s*:=\s*"(?<Version>\d+\.\d+\.\d+(@\d+)?)"') {
+        throw "googet.goospec at $Repo@$Commit has no version"
+    }
+    return [pscustomobject]@{ Repo = $Repo; Commit = $Commit; Module = $module; Version = $Matches.Version }
+}
+
+# Pure: whether apply still builds the patched commit, given each listed
+# upstream PR's merged state (a missing or false value counts as unmerged).
+function Test-GooGetPatchPending {
+    param([AllowEmptyCollection()][object[]]$Merged = @())
+    if (-not $GooGetPatchedCommit -or @($GooGetPatchedPulls).Count -eq 0) { return $false }
+    if (@($Merged).Count -lt @($GooGetPatchedPulls).Count) { return $true }
+    return [bool](@($Merged | Where-Object { $_ -ne $true }).Count)
+}
+
+function Get-GooGetSource {
+    $headers = @{ 'User-Agent' = 'lan-ipxe-setup' }
+    $repo = $GooGetGitHubRepo
+    $commit = ''
+    if ($GooGetPatchedCommit) {
+        $merged = @(foreach ($number in $GooGetPatchedPulls) {
+            # A failed lookup (rate limit, network) keeps the patched build.
+            try { [bool](Invoke-RestMethod -Uri "https://api.github.com/repos/$GooGetGitHubRepo/pulls/$number" -Headers $headers).merged }
+            catch { Write-Warning "GooGet: could not read $GooGetGitHubRepo PR #$number ($($_.Exception.Message)); assuming unmerged"; $false }
+        })
+        if (Test-GooGetPatchPending -Merged $merged) {
+            $repo = $GooGetPatchedRepo
+            $commit = $GooGetPatchedCommit
+        }
+        else {
+            Write-Note "GooGet: $GooGetGitHubRepo PRs #$($GooGetPatchedPulls -join ', #') are merged; building upstream head (the `$GooGetPatched* settings can be emptied)"
+        }
+    }
+    if (-not $commit) {
+        $commit = [string](Invoke-RestMethod -Uri "https://api.github.com/repos/$GooGetGitHubRepo/commits/HEAD" -Headers $headers).sha
+    }
+    if ($commit -notmatch '^[0-9a-f]{40}$') { throw "unexpected $repo commit id '$commit'" }
+    $raw = "https://raw.githubusercontent.com/$repo/$commit"
+    $goMod = [string](Invoke-RestMethod -Uri "$raw/go.mod" -Headers $headers)
+    $gooSpec = [string](Invoke-RestMethod -Uri "$raw/googet.goospec" -Headers $headers)
+    return Select-GooGetSource -Repo $repo -Commit $commit -GoMod $goMod -GooSpec $gooSpec
+}
+
+# go.exe from PATH, or from the GoLang.Go MSI's directory when this session
+# predates the install.
+function Get-GoPath {
+    $command = Get-Command go -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($command) { return $command.Source }
+    if ($env:ProgramFiles) {
+        $candidate = Join-Path $env:ProgramFiles 'Go\bin\go.exe'
+        if (Test-Path -LiteralPath $candidate) { return $candidate }
+    }
+    return $null
+}
+
+# git.exe from PATH, or from the Git.Git installer's directory when this
+# session predates the install.
+function Get-GitPath {
+    $command = Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($command) { return $command.Source }
+    if ($env:ProgramFiles) {
+        $candidate = Join-Path $env:ProgramFiles 'Git\cmd\git.exe'
+        if (Test-Path -LiteralPath $candidate) { return $candidate }
+    }
+    return $null
+}
+
+# Builds $Source with `go install module@commit` into a temp GOBIN (or, for
+# a commit outside upstream, a git checkout verified against the commit id
+# and `go build -mod=readonly`), checks the binary reports the expected
+# version, then replaces googet.exe and writes the marker. The build pins
+# Go's default module proxy and checksum database, so a machine-wide
+# GOSUMDB=off or GOPRIVATE/GONOSUMDB override can't skip verification of the
+# downloaded source.
+function Install-GooGet {
+    param(
+        [Parameter(Mandatory = $true)]$Source,
+        [Parameter(Mandatory = $true)][string]$Go,
+        [string]$Git = ''
+    )
+    $fromCheckout = $Source.Repo -ne $GooGetGitHubRepo
+    if ($fromCheckout -and -not $Git) { throw "building $($Source.Repo) needs git" }
+    $root = Get-GooGetRoot
+    if (-not $root) { throw '%ProgramData% is not set' }
+    $dir = Join-Path ([IO.Path]::GetTempPath()) ("googet-build-{0}" -f [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $dir | Out-Null
+    $saved = @{}
+    $buildEnv = @{
+        GOBIN = $dir; CGO_ENABLED = '0'; GOTOOLCHAIN = 'auto'; GOFLAGS = ''
+        GOPROXY = 'https://proxy.golang.org'; GOSUMDB = 'sum.golang.org'
+        GOPRIVATE = ''; GONOPROXY = ''; GONOSUMDB = ''; GOINSECURE = ''
+        GIT_TERMINAL_PROMPT = '0'
+    }
+    try {
+        foreach ($name in $buildEnv.Keys) {
+            $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+            [Environment]::SetEnvironmentVariable($name, $buildEnv[$name], 'Process')
+        }
+        $ldflags = "-ldflags=-s -w -X main.version=$($Source.Version)"
+        $built = Join-Path $dir 'googet.exe'
+        if ($fromCheckout) {
+            $src = Join-Path $dir 'src'
+            & $Git init -q $src | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "git init failed (exit $LASTEXITCODE)" }
+            & $Git -C $src fetch -q --depth 1 "https://github.com/$($Source.Repo).git" $Source.Commit | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "git fetch $($Source.Repo)@$($Source.Commit) failed (exit $LASTEXITCODE)" }
+            & $Git -C $src -c advice.detachedHead=false checkout -q FETCH_HEAD | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "git checkout $($Source.Commit) failed (exit $LASTEXITCODE)" }
+            $head = [string](& $Git -C $src rev-parse HEAD)
+            if ($head.Trim() -ne $Source.Commit) { throw "checked-out commit '$head' is not $($Source.Commit)" }
+            & $Go -C $src build -mod=readonly -trimpath $ldflags -o $built . | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "go build $($Source.Repo)@$($Source.Commit) failed (exit $LASTEXITCODE)" }
+        }
+        else {
+            & $Go install -trimpath $ldflags "$($Source.Module)@$($Source.Commit)" | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "go install $($Source.Module)@$($Source.Commit) failed (exit $LASTEXITCODE)" }
+        }
+        if (-not (Test-Path -LiteralPath $built)) { throw 'the build produced no googet.exe' }
+        $reported = (@(& $built -version 2>&1) -join ' ')
+        if ($reported -notlike "*$($Source.Version)*") { throw "built googet.exe reports '$reported', expected $($Source.Version)" }
+        Initialize-GooGetRoot | Out-Null
+        try { Copy-Item -LiteralPath $built -Destination (Join-Path $root 'googet.exe') -Force }
+        catch { throw "could not replace $root\googet.exe (is googet running?): $($_.Exception.Message)" }
+        Set-Content -LiteralPath (Join-Path $root $GooGetMarkerName) -Value @(
+            'managed-by=lan-ipxe/setup-win11-workstation.ps1'
+            "version=$($Source.Version)"
+            "repo=$($Source.Repo)"
+            "commit=$($Source.Commit)"
+            "module=$($Source.Module)"
+        )
+    }
+    finally {
+        foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
+        Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# Pure: googet.conf text with allowunsafeurl set to true, other keys kept.
+function Get-GooGetConfText {
+    param([AllowEmptyString()][string]$Text = '')
+    $lines = @($Text -split "`r?`n" | Where-Object { $_ -notmatch '^\s*allowunsafeurl\s*:' })
+    while ($lines.Count -and $lines[-1] -eq '') { $lines = @($lines | Select-Object -SkipLast 1) }
+    return ((@($lines) + 'allowunsafeurl: true') -join "`n") + "`n"
+}
+
+# Pure: the repos\<name>.repo file googet's addrepo would write.
+function Get-GooGetRepoFileText {
+    return "- name: $GooGetRepoName`n  url: $GooGetRepoUrl`n"
+}
+
+# The retired repo files still present with the content this script
+# wrote, as @{ Name; Path }.
+function Get-GooGetRetiredRepoFile {
+    param([Parameter(Mandatory)][string]$Root)
+    foreach ($r in $GooGetRetiredRepos) {
+        $path = Join-Path (Join-Path $Root 'repos') "$($r.Name).repo"
+        if ([string]::Equals((Read-TextOrEmpty -Path $path), "- name: $($r.Name)`n  url: $($r.Url)`n", [StringComparison]::Ordinal)) {
+            [pscustomobject]@{ Name = $r.Name; Path = $path }
+        }
+    }
+}
+
+function Read-TextOrEmpty {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (Test-Path -LiteralPath $Path) { return [IO.File]::ReadAllText($Path) }
+    return ''
+}
+
+function Get-MachinePathEntry {
+    $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Control\Session Manager\Environment')
+    try { $raw = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) }
+    finally { $key.Close() }
+    return @($raw -split ';' | Where-Object { $_ })
+}
+
+# Every item under $Root, without descending into reparse points (junctions
+# and symlinks are reported, never followed).
+function Get-GooGetTreeItem {
+    param([Parameter(Mandatory = $true)][string]$Root)
+    $stack = New-Object System.Collections.Stack
+    $stack.Push((Get-Item -LiteralPath $Root -Force))
+    while ($stack.Count) {
+        $item = $stack.Pop()
+        $item
+        if ($item -is [IO.DirectoryInfo] -and -not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            foreach ($child in $item.GetFileSystemInfos()) { $stack.Push($child) }
+        }
+    }
+}
+
+# Pure: whether an ACE's access mask allows writing. .NET doesn't map
+# generic rights, so GENERIC_WRITE and GENERIC_ALL (common on inherit-only
+# ACEs) are checked as raw bits. FileSystemRights is an Int32 enum, so a mask
+# with GENERIC_READ (0x80000000) arrives negative and sign-extends; keeping
+# only the low 32 bits stops that from looking like every right.
+function Test-GooGetWriteRight {
+    param([Parameter(Mandatory = $true)][long]$Rights)
+    $value = $Rights -band [long]4294967295
+    $mask = [long][Security.AccessControl.FileSystemRights]'Write, Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership'
+    $mask = $mask -bor [long]1073741824 -bor [long]268435456   # GENERIC_WRITE, GENERIC_ALL
+    return (($value -band $mask) -ne 0)
+}
+
+# Read-only: why the tree under an existing $Root can't be trusted by an
+# elevated googet. Any finding means another account may have controlled part
+# of it - or edited googet.conf, a .repo file or googet.exe - so apply refuses
+# and nothing is repaired in place: in-place ACL repair can be steered through
+# a junction created after the check, and relocking doesn't vouch for content
+# written before it.
+function Get-GooGetTreeProblem {
+    param([Parameter(Mandatory = $true)][string]$Root)
+    foreach ($item in Get-GooGetTreeItem -Root $Root) {
+        $path = $item.FullName
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            "$path is a reparse point"
+            continue
+        }
+        try { $acl = Get-Acl -LiteralPath $path }
+        catch {
+            "$path has an unreadable security descriptor"
+            continue
+        }
+        $owner = [string]$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+        if ($GooGetAclTrustedSids -notcontains $owner) { "$path is owned by $owner" }
+        if ($path.TrimEnd('\') -ieq $Root.TrimEnd('\') -and -not $acl.AreAccessRulesProtected) {
+            "$path inherits permissions from its parent"
+        }
+        foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+            if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
+            if ($GooGetAclTrustedSids -contains $rule.IdentityReference.Value) { continue }
+            if (Test-GooGetWriteRight -Rights ([long]$rule.FileSystemRights)) { "$path lets $($rule.IdentityReference.Value) write" }
+        }
+    }
+}
+
+# Creates $Root with install.ps1's ACLs (inheritance off; Administrators and
+# SYSTEM full, Users read) and Administrators as owner in one call, so no
+# other user can add anything before it is locked.
+function New-GooGetRootDirectory {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([Parameter(Mandatory = $true)][string]$Root)
+    if (-not $PSCmdlet.ShouldProcess($Root, 'create with locked ACLs')) { return }
+    $security = New-Object Security.AccessControl.DirectorySecurity
+    $security.SetAccessRuleProtection($true, $false)
+    $inherit = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+    foreach ($grant in @(@('S-1-5-32-544', 'FullControl'), @('S-1-5-18', 'FullControl'), @('S-1-5-32-545', 'ReadAndExecute'))) {
+        $sid = New-Object Security.Principal.SecurityIdentifier $grant[0]
+        $security.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule $sid, $grant[1], $inherit, [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow))
+    }
+    $security.SetOwner((New-Object Security.Principal.SecurityIdentifier 'S-1-5-32-544'))
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        [IO.FileSystemAclExtensions]::Create((New-Object IO.DirectoryInfo $Root), $security)
+    }
+    else {
+        [IO.Directory]::CreateDirectory($Root, $security) | Out-Null
+    }
+}
+
+# Makes sure %ProgramData%\GooGet is safe before anything is written to it. A
+# missing root is created locked. An existing root (including one another
+# user created between the check and the creation) is used only when the
+# whole tree passes Get-GooGetTreeProblem; otherwise apply stops and a person
+# removes it, after which the next run recreates it locked. Returns 'created'
+# or 'current'.
+function Initialize-GooGetRoot {
+    $root = Get-GooGetRoot
+    if (-not $root) { throw '%ProgramData% is not set' }
+    $result = 'current'
+    if (-not (Test-Path -LiteralPath $root)) {
+        New-GooGetRootDirectory -Root $root
+        $result = 'created'
+    }
+    $problems = @(Get-GooGetTreeProblem -Root $root)
+    if ($problems.Count) {
+        throw "refusing to use $root ($(@($problems | Select-Object -First 3) -join '; ')). Another account may have controlled it; inspect it, remove it, and re-run to recreate it locked. (If this root was made by this script, check the 'Default owner for objects created by members of the Administrators group' policy: 'Object creator' makes files owned by your user, not Administrators.)"
+    }
+    return $result
+}
+
+# Read-only: what install.ps1 and this repo's config would still change.
+function Get-GooGetConfigurationDrift {
+    $root = Get-GooGetRoot
+    if (-not $root) { return @('%ProgramData% is not set') }
+    $drift = @()
+    if (-not (Test-Path -LiteralPath $root)) { $drift += 'root missing' }
+    else {
+        try {
+            $problems = @(Get-GooGetTreeProblem -Root $root)
+            if ($problems.Count) { $drift += "untrusted root, refused on apply ($(@($problems | Select-Object -First 3) -join '; '))" }
+        }
+        catch { $drift += "root permissions (not readable: $($_.Exception.Message))" }
+    }
+    if ([Environment]::GetEnvironmentVariable('GooGetRoot', 'Machine') -ne $root) { $drift += 'GooGetRoot machine variable' }
+    if ((Get-PathListWithout -Entries (Get-MachinePathEntry) -Directory $root).Count -eq (Get-MachinePathEntry).Count) { $drift += 'machine PATH entry' }
+    $conf = Read-TextOrEmpty -Path (Join-Path $root 'googet.conf')
+    if ($conf -ne (Get-GooGetConfText -Text $conf)) { $drift += 'googet.conf allowunsafeurl' }
+    $repoFile = Join-Path (Join-Path $root 'repos') "$GooGetRepoName.repo"
+    if ((Read-TextOrEmpty -Path $repoFile) -ne (Get-GooGetRepoFileText)) { $drift += "$GooGetRepoName repo" }
+    foreach ($old in @(Get-GooGetRetiredRepoFile -Root $root)) { $drift += "retired $($old.Name) repo" }
+    return $drift
+}
+
+# Applies googet's install.ps1 (ACLs on the root, GooGetRoot, machine PATH)
+# and this repo's googet.conf and repo file. The root is created locked or
+# validated first (Initialize-GooGetRoot), so it is safe before it joins
+# PATH. Files are UTF-8 without a BOM. Returns the names of the items it
+# changed.
+function Sync-GooGetConfiguration {
+    $root = Get-GooGetRoot
+    if (-not $root) { throw '%ProgramData% is not set' }
+    $changed = @()
+    $utf8 = New-Object System.Text.UTF8Encoding $false
+    $rootState = Initialize-GooGetRoot
+    if ($rootState -ne 'current') { $changed += "root $rootState" }
+    if ([Environment]::GetEnvironmentVariable('GooGetRoot', 'Machine') -ne $root) {
+        [Environment]::SetEnvironmentVariable('GooGetRoot', $root, 'Machine')
+        $changed += 'GooGetRoot'
+    }
+    $env:GooGetRoot = $root
+    $entries = Get-MachinePathEntry
+    if ((Get-PathListWithout -Entries $entries -Directory $root).Count -eq $entries.Count) {
+        $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Control\Session Manager\Environment', $true)
+        try { $key.SetValue('Path', ((@($entries) + $root) -join ';'), [Microsoft.Win32.RegistryValueKind]::ExpandString) }
+        finally { $key.Close() }
+        $env:Path = "$env:Path;$root"
+        $changed += 'machine PATH'
+    }
+    New-Item -ItemType Directory -Force -Path (Join-Path $root 'repos') | Out-Null
+    $confPath = Join-Path $root 'googet.conf'
+    $conf = Read-TextOrEmpty -Path $confPath
+    $wantConf = Get-GooGetConfText -Text $conf
+    if ($conf -ne $wantConf) { [IO.File]::WriteAllText($confPath, $wantConf, $utf8); $changed += 'googet.conf' }
+    $repoFile = Join-Path (Join-Path $root 'repos') "$GooGetRepoName.repo"
+    $wantRepo = Get-GooGetRepoFileText
+    if ((Read-TextOrEmpty -Path $repoFile) -ne $wantRepo) { [IO.File]::WriteAllText($repoFile, $wantRepo, $utf8); $changed += "$GooGetRepoName repo" }
+    foreach ($old in @(Get-GooGetRetiredRepoFile -Root $root)) {
+        Remove-Item -LiteralPath $old.Path -Force
+        $changed += "removed $($old.Name) repo"
+    }
+    return $changed
+}
+
+# Returns 'current', 'changed', 'installed', 'updated', 'deferred' or 'failed'.
+function Invoke-GooGetStep {
+    param([switch]$NoUpgrade)
+    try {
+        $existing = Get-GooGetInstall
+        $result = 'current'
+        if ($existing -and $NoUpgrade) {
+            Write-Note "GooGet $($existing.Version): present (-NoUpgrade)"
+        }
+        else {
+            $source = Get-GooGetSource
+            $short = $source.Commit.Substring(0, 12)
+            if ($existing -and $existing.Commit -eq $source.Commit) {
+                Write-Note "GooGet $($existing.Version) ($short): current"
+            }
+            else {
+                $go = Get-GoPath
+                if (-not $go) {
+                    Write-Note 'GooGet: Go is not installed yet; re-run after GoLang.Go installs'
+                    return 'deferred'
+                }
+                $git = ''
+                if ($source.Repo -ne $GooGetGitHubRepo) {
+                    $git = Get-GitPath
+                    if (-not $git) {
+                        Write-Note 'GooGet: Git is not installed yet; re-run after Git.Git installs'
+                        return 'deferred'
+                    }
+                }
+                Write-Note "GooGet: building $($source.Version) from $($source.Repo)@$short"
+                Install-GooGet -Source $source -Go $go -Git $git
+                $result = if ($existing) { 'updated' } else { 'installed' }
+            }
+        }
+        $changed = @(Sync-GooGetConfiguration)
+        if ($changed.Count) {
+            Write-Note "GooGet: set $($changed -join ', ')"
+            if ($changed -contains 'GooGetRoot' -or $changed -contains 'machine PATH') {
+                Write-Note 'GooGet: open a new shell to use googet (shells started earlier lack GooGetRoot and the PATH entry)'
+            }
+            if ($result -eq 'current') { $result = 'changed' }
+        }
+        return $result
+    }
+    catch {
+        Write-Warning "GooGet: $($_.Exception.Message)"
+        return 'failed'
+    }
+}
+
 # Mirrors enable-openssh-win11.ps1 (which -Check cannot run unelevated):
 # installing the OpenSSH.Server capability registers sshd on the inbox binary.
 function Test-InboxSshdService {
@@ -1549,6 +2027,16 @@ if ($DryRun) {
     Write-Note '    SHA-256 checked against the GitHub asset digest, unpacked to %LOCALAPPDATA%\Programs\Goose + Start menu shortcut;'
     Write-Note '    replaced when a newer release exists; skipped when present and -NoUpgrade'
     Write-Note "Rust: rustup stable default (when none set) + $($RustComponents -join ', ')"
+    if ($GooGetPatchedCommit) {
+        Write-Note "GooGet: go build of $GooGetPatchedRepo@$($GooGetPatchedCommit.Substring(0, 12)) (git checkout) until $GooGetGitHubRepo PRs #$($GooGetPatchedPulls -join ', #') merge,"
+        Write-Note "    then go install from the head of $GooGetGitHubRepo (rebuilt when the source moves; skipped when present and -NoUpgrade)"
+    }
+    else {
+        Write-Note "GooGet: go install from the head of $GooGetGitHubRepo (rebuilt when it moves; skipped when present and -NoUpgrade)"
+    }
+    Write-Note '    into %ProgramData%\GooGet with GooGetRoot, the machine PATH entry and ACLs as googet''s install.ps1 sets them;'
+    Write-Note "    googet.conf allowunsafeurl: true; repo $GooGetRepoName -> $GooGetRepoUrl"
+    foreach ($r in $GooGetRetiredRepos) { Write-Note "    removes repos\$($r.Name).repo while it still points at $($r.Url)" }
     exit 0
 }
 
@@ -1649,6 +2137,15 @@ if ($Check) {
         $missingComponents = @($RustComponents | Where-Object { $components -notcontains $_ })
         Write-State ($missingComponents.Count -eq 0) 'stable components' $(if ($missingComponents.Count) { 'missing ' + ($missingComponents -join ', ') } else { '' })
     }
+
+    Write-Step 'GooGet'
+    $googet = Get-GooGetInstall
+    $googetDetail = if (-not $googet) { 'not installed' }
+        elseif ($googet.Commit) { "$($googet.Version) ($($googet.Repo)@$($googet.Commit.Substring(0, 12)); rebuilt on apply when the source moves)" }
+        else { 'not built by this script; rebuilt from source on apply' }
+    Write-State ($null -ne $googet -and [bool]$googet.Commit) 'googet.exe' $googetDetail
+    $googetDrift = @(Get-GooGetConfigurationDrift)
+    Write-State ($googetDrift.Count -eq 0) "GooGet configuration ($GooGetRepoName repo)" $(if ($googetDrift.Count) { 'missing ' + ($googetDrift -join ', ') } else { '' })
 
     Write-Step 'Summary'
     Write-Note "$script:DriftCount drifted item(s)"
@@ -1757,6 +2254,11 @@ Write-Step 'Rust (rustup stable + components)'
 $rustResult = Initialize-RustupToolchain -NoUpgrade:$NoUpgrade
 Write-Note "rustup: $rustResult"
 
+#--- 7. GooGet (built from google/googet head) ------------------------------
+Write-Step 'GooGet (built from source) and the game-packages repo'
+$googetResult = Invoke-GooGetStep -NoUpgrade:$NoUpgrade
+Write-Note "GooGet: $googetResult"
+
 #--- Summary ----------------------------------------------------------------
 Write-Step 'Summary'
 Write-Note "winget: $($wingetResult.Installed.Count) installed now, $($wingetResult.UpdatedOrCurrent.Count) updated/current, $($wingetResult.Present.Count) presence-only, $($wingetResult.RemovedLegacy.Count) legacy removed, $($wingetResult.Deferred.Count) deferred, $($wingetResult.Failed.Count) failed"
@@ -1771,4 +2273,5 @@ if ($nativeResult.Failed.Count) { Write-Note "failed: $($nativeResult.Failed -jo
 Write-Note "OpenCode native installs: $($openCodeResult.Removed.Count) removed, $($openCodeResult.Failed.Count) failed"
 if ($openCodeResult.Failed.Count) { Write-Note "failed: $($openCodeResult.Failed -join ', ')" }
 if ($balunResult -eq 'deferred') { Write-Note 'deferred (re-run after a reboot): Balun' }
-if ($wingetResult.Failed.Count -or $openCodeResult.Failed.Count -or $nativeResult.Failed.Count -or $rustResult -eq 'failed' -or $balunResult -eq 'failed' -or $gooseDesktopResult -eq 'failed' -or $pwshResult -eq 'failed') { exit 1 }
+if ($googetResult -eq 'deferred') { Write-Note 'deferred (re-run once Go is installed): GooGet' }
+if ($wingetResult.Failed.Count -or $openCodeResult.Failed.Count -or $nativeResult.Failed.Count -or $rustResult -eq 'failed' -or $balunResult -eq 'failed' -or $gooseDesktopResult -eq 'failed' -or $pwshResult -eq 'failed' -or $googetResult -eq 'failed') { exit 1 }

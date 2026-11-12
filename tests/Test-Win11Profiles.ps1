@@ -19,7 +19,7 @@ if ($parseErrors.Count) {
 $tokens.Count | Out-Null
 
 foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetLegacyPackages', 'WingetPresenceOnlyPackages',
-                              'RustComponents', 'BalunWingetId', 'BalunRepo', 'BalunDisplayName', 'BalunInstallerArgs', 'WingetOkCodes', 'WingetRebootCodes', 'WingetDeferredCodes', 'WingetRemoveOkCodes', 'WingetLaunchAttempts', 'WingetLaunchRetrySeconds', 'WingetInstallTechMismatchCode', 'WingetUninstallWaitSeconds', 'WingetUninstallPollSeconds', 'NativeCliTools', 'WingetPackageArgs')) {
+                              'RustComponents', 'BalunWingetId', 'BalunRepo', 'BalunDisplayName', 'BalunInstallerArgs', 'WingetOkCodes', 'WingetRebootCodes', 'WingetDeferredCodes', 'WingetRemoveOkCodes', 'WingetLaunchAttempts', 'WingetLaunchRetrySeconds', 'WingetInstallTechMismatchCode', 'WingetUninstallWaitSeconds', 'WingetUninstallPollSeconds', 'NativeCliTools', 'WingetPackageArgs', 'GooGetGitHubRepo', 'GooGetPatchedRepo', 'GooGetPatchedCommit', 'GooGetPatchedPulls', 'GooGetRepoName', 'GooGetRepoUrl', 'GooGetRetiredRepos', 'GooGetAclTrustedSids')) {
     $assignmentAst = $ast.Find({
         param($node)
         $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
@@ -32,7 +32,7 @@ foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetLeg
 foreach ($functionName in @('Write-Note', 'Invoke-Winget', 'Get-WingetPackageArgument', 'Get-WingetArpEntry', 'Test-NsisExecutable', 'Remove-WingetPackageForReinstall', 'Wait-WingetPackageRemoved', 'Split-UninstallCommand', 'Invoke-UninstallCommand', 'Invoke-WingetPackageSet', 'Get-RustupStableComponent',
                             'Test-RustupDefaultToolchain', 'Initialize-RustupToolchain',
                             'Get-NativeProcessorArchitecture', 'Get-WindowsArchitectureName', 'Get-BalunRelease', 'Invoke-BalunStep',
-                            'Invoke-PowerShellMsiSwitch')) {
+                            'Invoke-PowerShellMsiSwitch', 'Select-GooGetSource', 'Test-GooGetPatchPending', 'Get-GooGetConfText', 'Get-GooGetRepoFileText', 'Get-GooGetRetiredRepoFile', 'Read-TextOrEmpty', 'Test-GooGetWriteRight')) {
     $functionAst = $ast.Find({
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $functionName
@@ -102,6 +102,10 @@ try {
         Assert-True ($text -match 'goose CLI: https://raw\.githubusercontent\.com/aaif-goose/goose/main/download_cli\.ps1 .*AMD64 only') "$profileName dry run lists the x64-only goose CLI"
         Assert-True ($text -match 'Goose Desktop \(AMD64 only; skipped elsewhere\)') "$profileName dry run lists the x64-only Goose Desktop"
         Assert-True ($text -match 'charmbracelet\.crush') "$profileName dry run lists Crush"
+        Assert-True ($text -match 'GooGet: go build of jm2/googet@645ecb0cbbef \(git checkout\) until google/googet PRs #227, #228 merge') "$profileName dry run lists the patched GooGet build"
+        Assert-True ($text -match 'then go install from the head of google/googet') "$profileName dry run lists the upstream GooGet build"
+        Assert-True ($text -match 'repo game-packages -> http://192\.168\.1\.11:8080/goo/game-packages') "$profileName dry run lists the game-packages GooGet repo"
+        Assert-True ($text -match 'removes repos\\linux-packages\.repo while it still points at http://192\.168\.1\.11:8080/goo/linux-packages') "$profileName dry run lists the retired repo removal"
         Assert-True ($text.IndexOf('SST.opencode') -gt $text.IndexOf('Legacy packages removed') -and $text -match 'SST\.OpenCodeDesktop') "$profileName dry run purges, not installs, OpenCode"
         Assert-True (($text -match 'Valve\.Steam') -eq ($profileName -eq 'full')) "Steam listed only for full ($profileName)"
     }
@@ -110,6 +114,68 @@ finally {
     foreach ($name in $mockNames) { Remove-Item -Path "function:global:$name" -ErrorAction SilentlyContinue }
 }
 Write-Output 'DRY RUN PASSED'
+
+# --- GooGet: build inputs, googet.conf and the repo file ---------------------
+$sha = '56b678a6e6249ecae2a6b89f35686e6080e85358'
+$source = Select-GooGetSource -Commit $sha -GoMod "module github.com/google/googet/v2`n`ngo 1.26.0`n" -GooSpec '{{$version := "3.4.1@0" -}}'
+Assert-True ($source.Module -eq 'github.com/google/googet/v2' -and $source.Version -eq '3.4.1@0' -and $source.Commit -eq $sha) 'GooGet source reads module and version from the commit'
+$source = Select-GooGetSource -Commit $sha -GoMod "module github.com/google/googet/v3`r`n" -GooSpec '{{$version := "4.0.0" -}}'
+Assert-True ($source.Module -eq 'github.com/google/googet/v3' -and $source.Version -eq '4.0.0') 'GooGet follows a module major-version bump'
+Assert-True ($source.Repo -eq 'google/googet') 'GooGet source defaults to upstream'
+$source = Select-GooGetSource -Repo 'jm2/googet' -Commit $sha -GoMod "module github.com/google/googet/v2`n" -GooSpec '{{$version := "3.4.2@0" -}}'
+Assert-True ($source.Repo -eq 'jm2/googet' -and $source.Module -eq 'github.com/google/googet/v2') 'a fork commit keeps the upstream module path'
+Assert-True ($GooGetPatchedCommit -match '^[0-9a-f]{40}$' -and $GooGetPatchedRepo -eq 'jm2/googet' -and @($GooGetPatchedPulls).Count -gt 0) 'the patched GooGet build is pinned to a full commit id'
+Assert-True (Test-GooGetPatchPending -Merged @($false, $false)) 'patched build while no PR is merged'
+Assert-True (Test-GooGetPatchPending -Merged @($true, $false)) 'patched build while one PR is still open'
+Assert-True (Test-GooGetPatchPending -Merged @($true)) 'patched build when a PR state is missing'
+Assert-True (-not (Test-GooGetPatchPending -Merged @($true, $true))) 'upstream head once every PR is merged'
+foreach ($case in @(
+        @{ Commit = 'main'; GoMod = 'module github.com/google/googet/v2'; GooSpec = '$version := "1.0.0"' },
+        @{ Commit = $sha; GoMod = 'module example.com/other'; GooSpec = '$version := "1.0.0"' },
+        @{ Commit = $sha; GoMod = 'module github.com/google/googet/v2'; GooSpec = 'no version here' })) {
+    $threw = $false
+    try { Select-GooGetSource @case | Out-Null } catch { $threw = $true }
+    Assert-True $threw "GooGet source rejects commit '$($case.Commit)' / '$($case.GoMod)' / '$($case.GooSpec)'"
+}
+Assert-True ((Get-GooGetConfText -Text '') -eq "allowunsafeurl: true`n") 'empty googet.conf gains allowunsafeurl'
+Assert-True ((Get-GooGetConfText -Text "proxyserver: http://p:3128`r`nallowunsafeurl: false`r`n") -eq "proxyserver: http://p:3128`nallowunsafeurl: true`n") 'googet.conf keeps other keys and flips allowunsafeurl'
+$conf = Get-GooGetConfText -Text "archs: [x86_64]`n"
+Assert-True ((Get-GooGetConfText -Text $conf) -eq $conf) 'googet.conf rewrite is idempotent'
+Assert-True ((Get-GooGetRepoFileText) -eq "- name: game-packages`n  url: http://192.168.1.11:8080/goo/game-packages`n") 'repo file matches what googet addrepo writes'
+$retiredRoot = Join-Path ([IO.Path]::GetTempPath()) ("goo-retired-{0}" -f [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path (Join-Path $retiredRoot 'repos') | Out-Null
+try {
+    $retiredFile = Join-Path (Join-Path $retiredRoot 'repos') 'linux-packages.repo'
+    Assert-True (@(Get-GooGetRetiredRepoFile -Root $retiredRoot).Count -eq 0) 'no retired repo file when none exists'
+    [IO.File]::WriteAllText($retiredFile, "- name: linux-packages`n  url: http://192.168.1.11:8080/goo/linux-packages`n")
+    $found = @(Get-GooGetRetiredRepoFile -Root $retiredRoot)
+    Assert-True ($found.Count -eq 1 -and $found[0].Name -eq 'linux-packages' -and $found[0].Path -eq $retiredFile) 'the linux-packages repo file this script wrote is found for removal'
+    [IO.File]::WriteAllText($retiredFile, "- name: linux-packages`n  url: http://example.invalid/goo`n")
+    Assert-True (@(Get-GooGetRetiredRepoFile -Root $retiredRoot).Count -eq 0) 'a hand-made linux-packages repo file is left alone'
+    [IO.File]::WriteAllText($retiredFile, "- name: linux-packages`n  url: http://192.168.1.11:8080/goo/LINUX-packages`n")
+    Assert-True (@(Get-GooGetRetiredRepoFile -Root $retiredRoot).Count -eq 0) 'a repo file differing only in case is left alone'
+}
+finally { Remove-Item -LiteralPath $retiredRoot -Recurse -Force }
+$installAst = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Install-GooGet' }, $true).Extent.Text
+Assert-True ($installAst -match 'rev-parse HEAD' -and $installAst -match 'build -mod=readonly') 'a fork checkout is verified against its commit id and built read-only'
+Assert-True ($installAst.IndexOf('Initialize-GooGetRoot') -ge 0 -and $installAst.IndexOf('Initialize-GooGetRoot') -lt $installAst.IndexOf('Copy-Item')) 'GooGet root is locked before googet.exe is copied in'
+$syncAst = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Sync-GooGetConfiguration' }, $true).Extent.Text
+Assert-True ($syncAst.IndexOf('Initialize-GooGetRoot') -ge 0 -and $syncAst.IndexOf('Initialize-GooGetRoot') -lt $syncAst.IndexOf('machine PATH')) 'GooGet root is validated before it joins the machine PATH'
+$initAst = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Initialize-GooGetRoot' }, $true).Extent.Text
+Assert-True ($initAst -match 'refusing to use') 'an untrusted GooGet root is refused'
+Assert-True ($scriptText -notmatch 'icacls') 'GooGet never repairs ACLs in place (icacls /T and /setowner follow junctions)'
+Assert-True ($GooGetAclTrustedSids.Count -eq 2 -and $GooGetAclTrustedSids -contains 'S-1-5-32-544' -and $GooGetAclTrustedSids -contains 'S-1-5-18') 'only Administrators and SYSTEM may own or write in the GooGet root'
+$walkAst = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-GooGetTreeItem' }, $true).Extent.Text
+Assert-True ($walkAst -match 'ReparsePoint') 'the GooGet tree walk does not descend into reparse points'
+foreach ($writable in @(0x40000000, 0x10000000, (0x40000000 + 0x20000), 0x2, 0x4, 0x10000, 0x40, 0x40000, 0x80000, 0x1301BF, 0x1F01FF, ([int]::MinValue + 0x40000000))) {
+    Assert-True (Test-GooGetWriteRight -Rights $writable) ("access mask 0x{0:X} counts as write" -f $writable)
+}
+# 2147483648 is GENERIC_READ; [int]::MinValue is the same bit as an Int32
+# FileSystemRights value delivers it (sign-extended when widened).
+foreach ($readOnly in @(0x1200A9, 0x120089, [long]2147483648, [int]::MinValue, ([long]2147483648 + 0x1200A9), 0x20000000, 0x100000)) {
+    Assert-True (-not (Test-GooGetWriteRight -Rights $readOnly)) ("access mask 0x{0:X} is read-only" -f $readOnly)
+}
+Write-Output 'GOOGET PASSED'
 
 # --- -NoUpgrade installs missing packages only -------------------------------
 $script:WingetCalls = @()
@@ -452,6 +518,7 @@ finally {
     Remove-Item -LiteralPath $script:PwshDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 Assert-True ($scriptText.IndexOf('$pwshResult = Invoke-PowerShellMsiSwitch') -lt $scriptText.IndexOf('#--- 4. Self-updating native CLIs')) 'PowerShell switch runs in the package phase'
-Assert-True ($scriptText -match "-or \`$pwshResult -eq 'failed'\) \{ exit 1 \}") 'a failed PowerShell switch fails the run'
+Assert-True ($scriptText -match "(?m)^if \(.*-or \`$pwshResult -eq 'failed'.*\) \{ exit 1 \}\r?$") 'a failed PowerShell switch fails the run'
+Assert-True ($scriptText -match "(?m)^if \(.*-or \`$googetResult -eq 'failed'.*\) \{ exit 1 \}\r?$") 'a failed GooGet step fails the run'
 Write-Output 'POWERSHELL MSI PASSED'
 Write-Output 'ALL WIN11 PROFILE ASSERTIONS PASSED'

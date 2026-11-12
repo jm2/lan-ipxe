@@ -22,6 +22,12 @@ if [[ -r "/usr/lib/modules/${running_kver}/pkgbase" ]]; then
     read -r running_pkgbase < "/usr/lib/modules/${running_kver}/pkgbase"
 fi
 
+# A laptop may be off the LAN: the game-packages repository is listed only
+# while crossdock answers (see setup-arch-workstation.sh).
+if [[ -x /usr/local/libexec/game-packages-repo ]]; then
+    /usr/local/libexec/game-packages-repo
+fi
+
 pacman -Syu --noconfirm
 
 # paccache retains the last 3 versions if available.

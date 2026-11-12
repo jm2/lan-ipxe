@@ -32,6 +32,13 @@
 #
 # What it does, in order:
 #   1. full only: enables [multilib] in /etc/pacman.conf (core leaves it as is)
+#      and adds the LAN's game-packages repository (crossdock on enthoo): its
+#      signing key, pinned by fingerprint and locally signed in pacman's
+#      keyring, and an `Include = /etc/pacman.d/game-packages.conf` line. That
+#      file holds the [game-packages] section only while crossdock answers;
+#      /usr/local/libexec/game-packages-repo rewrites it from a NetworkManager
+#      dispatcher hook and the daily pacman-update job, so pacman -Syu keeps
+#      working off the LAN (pacman fails a sync when any repository is down)
 #   2. pacman -Syu, replaces jre-openjdk and distro rust with jdk-openjdk and
 #      rustup, then installs the official-repo package set and the per-user
 #      rustup stable toolchain (rustfmt, clippy, rust-analyzer)
@@ -85,6 +92,12 @@ set -euo pipefail
 #--- Config -----------------------------------------------------------------
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 FILES=${SCRIPT_DIR}/files
+# crossdock's signing key for the LAN game-packages repository (full profile).
+GAME_PACKAGES_KEY=${FILES}/keys/game-packages.asc
+GAME_PACKAGES_KEY_FPR=38C92DEA894BB3E48C50D6F0B48EFCBE62AAFAB2
+GAME_PACKAGES_CONF=/etc/pacman.d/game-packages.conf
+GAME_PACKAGES_INCLUDE="Include = ${GAME_PACKAGES_CONF}"
+GAME_PACKAGES_TOGGLE=/usr/local/libexec/game-packages-repo
 YAY_AUR_URL=https://aur.archlinux.org/yay-bin.git
 YAY_VCS_DB=${XDG_CACHE_HOME:-${HOME}/.cache}/yay/vcs.json
 WAZUH_MANAGER=${WAZUH_MANAGER:-}
@@ -122,6 +135,10 @@ GOOSE_DESKTOP_VERSION=
 GOOSE_DESKTOP_URL=
 GOOSE_DESKTOP_SHA256=
 GOOSE_DESKTOP_MARKER=${XDG_STATE_HOME:-${HOME}/.local/state}/lan-ipxe/goose-desktop.release
+# Switchworks (coding-agent control plane) is not in the AUR; its GitHub
+# releases ship an Arch package, verified against the release's SHA-256.
+SWITCHWORKS_RELEASE_API=https://api.github.com/repos/jm2/switchworks/releases/latest
+SWITCHWORKS_ASSET=switchworks-x86_64.pkg.tar.zst
 RUST_TOOLCHAIN=stable-x86_64-unknown-linux-gnu
 # Arch's rust split packages all pin the rust package version, which rustup's
 # unversioned provides cannot satisfy, so they leave together; the standalone
@@ -132,7 +149,9 @@ RUST_DISTRO_PKGS=(rust rust-src rust-musl rust-wasm rust-aarch64-gnu
 # Official repositories, core profile (groups are fine: gnome, gnome-circle,
 # gnome-extra, vulkan-devel are expanded before the installed-check)
 PKGS_OFFICIAL_CORE=(
+  android-tools
   archlinux-appstream-data
+  arp-scan
   audit
   base-devel
   bash-completion
@@ -155,6 +174,7 @@ PKGS_OFFICIAL_CORE=(
   cockpit-podman
   cockpit-storaged
   colordiff
+  copr-cli
   cronie
   cups
   cups-pk-helper
@@ -171,6 +191,7 @@ PKGS_OFFICIAL_CORE=(
   gdb
   git
   github-cli
+  glslang
   gmp
   gnome
   gnome-circle
@@ -190,6 +211,7 @@ PKGS_OFFICIAL_CORE=(
   gst-plugins-ugly
   hivex
   htop
+  icoutils
   jdk-openjdk
   jq
   less
@@ -199,6 +221,12 @@ PKGS_OFFICIAL_CORE=(
   libva-intel-driver
   libva-nvidia-driver
   libva-utils
+  libxcursor
+  libxfixes
+  libxi
+  libxrandr
+  libxss
+  libxtst
   linux
   linux-firmware
   linux-headers
@@ -208,12 +236,17 @@ PKGS_OFFICIAL_CORE=(
   llvm
   lvm2
   maven
+  mesa
   mesa-utils
+  mingw-w64-gcc
   mpfr
   mpv
   nano
+  ndisc6
+  net-snmp
   net-tools
   networkmanager
+  nmap
   noto-fonts
   noto-fonts-cjk
   noto-fonts-extra
@@ -223,22 +256,29 @@ PKGS_OFFICIAL_CORE=(
   opencl-mesa
   openssh
   pacman-contrib
+  perf
+  perl
   pipewire
   pipewire-alsa
   pipewire-jack
   pipewire-pulse
   power-profiles-daemon
   ptyxis
+  python
   rpm-tools
   rsync
   ruby
   # Rust comes only from rustup; the toolchain is installed per user below.
   rustup
   screen
+  sdl3
   seahorse
+  smbclient
   sof-firmware
   sudo
+  swig
   system-config-printer
+  testssl.sh
   texinfo
   tmux
   tree
@@ -249,11 +289,16 @@ PKGS_OFFICIAL_CORE=(
   vulkan-intel
   vulkan-mesa-layers
   vulkan-radeon
+  wayland-protocols
   wget
+  which
   wireplumber
   wpa_supplicant
+  xdotool
+  xorg-server-xvfb
   yt-dlp
   zed
+  zlib-static
   zram-generator
 )
 
@@ -281,6 +326,7 @@ PKGS_OFFICIAL_FULL=(
   ollama-vulkan
   steam
   video-downloader
+  wine
 )
 
 # AUR (via yay), core profile. aide and wazuh-agent live here because neither
@@ -303,10 +349,12 @@ PKGS_AUR_CORE=(
   google-chrome
   hfsutils
   lineageos-devel
+  mingw-w64-zlib
   mstflint
   ookla-speedtest-bin
   payload-dumper-go-bin
   powershell-bin
+  qdl
   sit-git
   tributary-bin
   ventoy-bin
@@ -482,11 +530,40 @@ select_profile() {
     PKGS_AUR+=("${PKGS_AUR_FULL[@]}")
     # Steam joins the LAN zone with the full profile that installs it.
     FIREWALL_LAN_SERVICES+=(steam-streaming)
+    MANAGED_FILES+=(
+      "root|usr/local/libexec/game-packages-repo|/usr/local/libexec/game-packages-repo|0755"
+      "root|etc/NetworkManager/dispatcher.d/50-game-packages|/etc/NetworkManager/dispatcher.d/50-game-packages|0755"
+    )
   fi
 }
 select_profile "${PROFILE}"
 
 #--- Helpers ----------------------------------------------------------------
+# game_packages_key_fpr: the primary-key fingerprints in the vendored crossdock
+# key file, one per line (signing subkeys are not listed). Exactly one, the
+# pinned one, is accepted.
+game_packages_key_fpr() {
+  gpg --batch --show-keys --with-colons -- "${GAME_PACKAGES_KEY}" 2>/dev/null \
+    | awk -F: '$1 == "pub" { want = 1; next } $1 == "sub" { want = 0 } $1 == "fpr" && want { print toupper($10); want = 0 }'
+}
+
+# game_packages_key_trusted: true when pacman's keyring holds the crossdock key
+# with full validity, which a local signature (pacman-key --lsign-key) gives.
+# Read-only, so --check can run it without sudo.
+game_packages_key_trusted() {
+  gpg --homedir /etc/pacman.d/gnupg --no-permission-warning --no-auto-check-trustdb \
+      --batch --with-colons --list-keys -- "${GAME_PACKAGES_KEY_FPR}" 2>/dev/null \
+    | awk -F: '$1 == "pub" { found = 1; ok = ($2 == "f" || $2 == "u") } END { exit !(found && ok) }'
+}
+
+# pacman_conf_has_game_packages_include [file]: true when the pacman config
+# ends its repositories with the game-packages Include line. The tests pass a
+# file; the script itself checks /etc/pacman.conf.
+# shellcheck disable=SC2120
+pacman_conf_has_game_packages_include() {
+  grep -qxF -- "${GAME_PACKAGES_INCLUDE}" "${1:-/etc/pacman.conf}"
+}
+
 # put_file [-s] <src> <dst> [mode]
 # Installs <src> at <dst> (default mode 0644, parent dirs created) only when
 # content, file type, mode, or ownership differs; -s installs root:root through
@@ -1249,6 +1326,29 @@ install_goose_desktop() {
   note "goose Desktop ${GOOSE_DESKTOP_VERSION}: installed from verified official release"
 }
 
+# install_switchworks_arch: the latest Switchworks release package, verified
+# against the SHA-256 GitHub publishes for that exact asset and installed with
+# pacman -U (so pacman owns its files, units and sysusers). An installed
+# version that is the latest or newer is left alone.
+install_switchworks_arch() {
+  local installed package=${WORK_DIR}/${SWITCHWORKS_ASSET}
+  resolve_github_release_asset jm2/switchworks "${SWITCHWORKS_RELEASE_API}" "${SWITCHWORKS_ASSET}"
+  installed=$(pacman -Q switchworks 2>/dev/null) || installed=
+  installed=${installed#switchworks }
+  if [[ -n ${installed} ]] && (( $(vercmp "${installed%-*}" "${RESOLVED_VERSION}") >= 0 )); then
+    note "switchworks ${installed}: installed (latest release ${RESOLVED_VERSION})"
+    return 0
+  fi
+  curl --proto '=https' --tlsv1.2 -fL --retry 3 -o "${package}" "${RESOLVED_URL}" \
+    || die "could not download Switchworks ${RESOLVED_VERSION}"
+  printf '%s  %s\n' "${RESOLVED_SHA256}" "${package}" | sha256sum -c - >/dev/null \
+    || die "Switchworks checksum mismatch for ${SWITCHWORKS_ASSET}"
+  sudo pacman -U --noconfirm --needed -- "${package}" \
+    || die "could not install the Switchworks package"
+  pacman -Q switchworks &>/dev/null || die "switchworks is not installed after pacman -U"
+  note "switchworks ${RESOLVED_VERSION}: installed from the verified GitHub release package"
+}
+
 # Removes the pacman/AUR builds the native installs replace. The AUR
 # antigravity package owns /opt/Antigravity, so it must go before the AppImage
 # install claims that path; the CLI packages go after their native successors
@@ -1741,6 +1841,27 @@ run_check() {
   else
     report CURRENT "[multilib]: not required by the core profile"
   fi
+  if [[ ${PROFILE} == full ]]; then
+    if game_packages_key_trusted; then
+      report CURRENT "game-packages signing key: trusted in pacman's keyring"
+    else
+      report DRIFT "game-packages signing key ${GAME_PACKAGES_KEY_FPR}: not locally signed in pacman's keyring"
+    fi
+    if pacman_conf_has_game_packages_include; then
+      report CURRENT "/etc/pacman.conf: includes ${GAME_PACKAGES_CONF}"
+    else
+      report DRIFT "/etc/pacman.conf: missing '${GAME_PACKAGES_INCLUDE}'"
+    fi
+    if [[ ! -f ${GAME_PACKAGES_CONF} || -L ${GAME_PACKAGES_CONF} ]]; then
+      report DRIFT "${GAME_PACKAGES_CONF}: missing"
+    elif [[ ! -s ${GAME_PACKAGES_CONF} ]]; then
+      report CURRENT "${GAME_PACKAGES_CONF}: empty (crossdock was unreachable at the last network change)"
+    elif [[ $(cat -- "${GAME_PACKAGES_CONF}"; printf x) == "$("${FILES}/usr/local/libexec/game-packages-repo" --section; printf x)" ]]; then
+      report CURRENT "${GAME_PACKAGES_CONF}: [game-packages] enabled (crossdock reachable)"
+    else
+      report DRIFT "${GAME_PACKAGES_CONF}: neither empty nor the expected [game-packages] section"
+    fi
+  fi
 
   pacman -Q antigravity-ide &>/dev/null \
     && report DRIFT "legacy antigravity-ide: installed (will be removed)"
@@ -1773,6 +1894,11 @@ run_check() {
     report CURRENT "goose Desktop: Flatpak ${GOOSE_DESKTOP_FLATPAK}"
   else
     report DRIFT "goose Desktop: Flatpak ${GOOSE_DESKTOP_FLATPAK} not installed"
+  fi
+  if pacman -Q switchworks &>/dev/null; then
+    report CURRENT "switchworks: $(pacman -Q switchworks)"
+  else
+    report DRIFT "switchworks: not installed (GitHub release package)"
   fi
   for package in agy claude codex goose; do
     if [[ -x ${HOME}/.local/bin/${package} ]]; then
@@ -1841,6 +1967,12 @@ print_plan() {
   else
     printf 'PLAN: [multilib] not required by core; left as configured\n'
   fi
+  if [[ ${PROFILE} == full ]]; then
+    printf 'PLAN: game-packages repository: trust key %s (pacman-key --add/--lsign-key), install %s and its NetworkManager dispatcher hook, append "%s" to /etc/pacman.conf; the section is present only while http://192.168.1.11:8080 answers\n' \
+      "${GAME_PACKAGES_KEY_FPR}" "${GAME_PACKAGES_TOGGLE}" "${GAME_PACKAGES_INCLUDE}"
+  else
+    printf 'PLAN: game-packages repository not used by core; left as configured\n'
+  fi
   printf 'PLAN: remove legacy antigravity-ide / Antigravity < 2.0, vscodium-bin and OpenCode (%s; native ~/.opencode/bin, its shell PATH lines, desktop AppImage/launcher) if installed\n' \
     "${OPENCODE_PKGS[*]}"
   if (( NO_UPGRADE )); then
@@ -1904,6 +2036,7 @@ print_plan() {
   for package in "${PKGS_AUR[@]}"; do
     printf '  %s\n' "${package}"
   done
+  printf 'PLAN: Switchworks: latest jm2/switchworks release package (%s, SHA-256 verified, pacman -U)\n' "${SWITCHWORKS_ASSET}"
   printf 'PLAN: verify native Antigravity + CLI/Claude/Codex/goose and the claude code codex crush goose zed cargo rustc commands\n'
 }
 
@@ -1978,6 +2111,48 @@ else
   repo_list=$(pacman-conf --repo-list 2>/dev/null) || die "could not re-read /etc/pacman.conf"
   grep -qx multilib <<<"${repo_list}" || die "[multilib] is still disabled after installation"
   note "enabled in /etc/pacman.conf"
+fi
+
+#--- 1b. game-packages (LAN) ------------------------------------------------
+# Games and engines built from jm2/game-packages, served by crossdock on
+# enthoo. Only the full profile installs games. Core leaves an existing setup
+# alone.
+if [[ ${PROFILE} == full ]]; then
+  log "game-packages repository (LAN)"
+  [[ $(game_packages_key_fpr) == "${GAME_PACKAGES_KEY_FPR}" ]] \
+    || die "files/keys/game-packages.asc is not the pinned key ${GAME_PACKAGES_KEY_FPR}"
+  if game_packages_key_trusted; then
+    note "signing key: trusted"
+  else
+    sudo pacman-key --add "${GAME_PACKAGES_KEY}"
+    sudo pacman-key --lsign-key "${GAME_PACKAGES_KEY_FPR}"
+    game_packages_key_trusted || die "the game-packages key is still not trusted after pacman-key --lsign-key"
+    note "signing key: added and locally signed"
+  fi
+  put_file -s "${FILES}/usr/local/libexec/game-packages-repo" /usr/local/libexec/game-packages-repo 0755
+  put_file -s "${FILES}/etc/NetworkManager/dispatcher.d/50-game-packages" /etc/NetworkManager/dispatcher.d/50-game-packages 0755
+  # Write the include target first: pacman refuses a missing Include file.
+  sudo "${GAME_PACKAGES_TOGGLE}"
+  if grep -q '^\[game-packages\]' "${GAME_PACKAGES_CONF}"; then
+    note "crossdock reachable: [game-packages] enabled"
+  else
+    note "crossdock unreachable: [game-packages] stays off until the LAN answers"
+  fi
+  if pacman_conf_has_game_packages_include; then
+    note "/etc/pacman.conf: includes ${GAME_PACKAGES_CONF}"
+  else
+    cp -- /etc/pacman.conf "${WORK_DIR}/pacman.conf"
+    printf '\n# LAN game-packages repository: the included file is empty off the LAN\n# (rewritten by %s).\n%s\n' \
+      "${GAME_PACKAGES_TOGGLE}" "${GAME_PACKAGES_INCLUDE}" >>"${WORK_DIR}/pacman.conf"
+    pacman-conf --config "${WORK_DIR}/pacman.conf" --repo-list >/dev/null 2>&1 \
+      || die "the generated pacman.conf with the game-packages Include is invalid"
+    if [[ ! -e /etc/pacman.conf.pre-workstation ]]; then
+      sudo cp -a -- /etc/pacman.conf /etc/pacman.conf.pre-workstation
+      note "saved /etc/pacman.conf.pre-workstation"
+    fi
+    put_file -s "${WORK_DIR}/pacman.conf" /etc/pacman.conf
+    pacman_conf_has_game_packages_include || die "/etc/pacman.conf still lacks the game-packages Include"
+  fi
 fi
 
 # Capture boot-package state so kernel, microcode, GRUB, NVIDIA, and initramfs
@@ -2214,6 +2389,13 @@ else
   GOOSE_DESKTOP_URL=${RESOLVED_URL}
   GOOSE_DESKTOP_SHA256=${RESOLVED_SHA256}
   install_goose_desktop
+fi
+
+log "Switchworks (verified GitHub release package)"
+if (( NO_UPGRADE )) && pacman -Q switchworks &>/dev/null; then
+  note "switchworks: installed; kept at its current version (--no-upgrade)"
+else
+  install_switchworks_arch
 fi
 
 #--- 8. ClamAV ---------------------------------------------------------------

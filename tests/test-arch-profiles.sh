@@ -92,6 +92,7 @@ test_profile_selection() (
 test_managed_files_are_applied() (
   load_helpers
   local entry owner src dst mode flag
+  select_profile full
   for entry in "${MANAGED_FILES[@]}"; do
     IFS='|' read -r owner src dst mode <<<"${entry}"
     flag=''
@@ -100,7 +101,7 @@ test_managed_files_are_applied() (
     [[ ${dst} == '"${HOME}'* ]] && dst+='"'
     [[ ${mode} == 0644 ]] && mode='' || mode=" ${mode}"
     awk -v want="put_file ${flag}\"\${FILES}/${src}\" ${dst}${mode}" \
-      '{ line = $0; gsub(/  +/, " ", line) } line == want { found = 1 } END { exit !found }' \
+      '{ line = $0; sub(/^ +/, "", line); gsub(/  +/, " ", line) } line == want { found = 1 } END { exit !found }' \
       "${SCRIPT}" || fail "managed file ${src} has no matching apply-time put_file"
   done
 )
@@ -174,10 +175,16 @@ test_check_exit_codes() (
     (( goose_desktop ))
   }
   installed=' '
+  switchworks=1
   pacman() {
     case $1 in
       -Sg) return 0 ;;
-      -Q) [[ ${installed} == *" $2 "* ]] && printf '%s 2.1.0-1\n' "$2" && return 0; return 1 ;;
+      # Switchworks comes from its GitHub release, not the package lists.
+      -Q) if [[ $2 == switchworks ]]; then
+            (( switchworks )) && printf 'switchworks 0.1.7-1\n' && return 0
+            return 1
+          fi
+          [[ ${installed} == *" $2 "* ]] && printf '%s 2.1.0-1\n' "$2" && return 0; return 1 ;;
       -T) shift; local p; for p in "$@"; do [[ ${p} == steam ]] && printf '%s\n' "${p}"; done
           [[ ${missing:-0} == 1 ]] && printf 'zed\n'; return 0 ;;
     esac
@@ -186,6 +193,11 @@ test_check_exit_codes() (
   missing=0
   rc=0; output=$(run_check) || rc=$?
   [[ ${rc} == 0 ]] || fail "converged core check exited ${rc}: ${output}"
+  switchworks=0
+  rc=0; output=$(run_check) || rc=$?
+  [[ ${rc} == 2 && ${output} == *'switchworks: not installed (GitHub release package)'* ]] \
+    || fail "check did not flag a missing Switchworks (${rc})"
+  switchworks=1
   missing=1
   rc=0; output=$(run_check) || rc=$?
   [[ ${rc} == 2 && ${output} == *'DRIFT    official package zed'* ]] \
@@ -483,8 +495,66 @@ EOF
     || fail 'a missing manager did not disable an enabled wazuh-agent'
 )
 
+# The LAN game-packages repository is full-only, pinned to crossdock's key,
+# and listed in pacman only while crossdock answers.
+test_game_packages_repo() (
+  load_helpers
+  local entry found=0 conf=${TEST_ROOT}/gp/game-packages.conf served=${TEST_ROOT}/gp/served
+  local toggle=${REPO_ROOT}/files/usr/local/libexec/game-packages-repo port pid
+  export GAME_PACKAGES_LOCK=${TEST_ROOT}/gp/lock
+  for entry in "${MANAGED_FILES[@]}"; do
+    [[ ${entry} == *game-packages* ]] && found=1
+  done
+  (( ! found )) || fail 'core manages game-packages files'
+  select_profile full
+  for entry in "${MANAGED_FILES[@]}"; do
+    [[ ${entry} == *game-packages-repo* ]] && found=1
+  done
+  (( found )) || fail 'full does not manage the game-packages toggle'
+  # shellcheck disable=SC2034 # read by the sourced game_packages_key_fpr
+  GAME_PACKAGES_KEY=${REPO_ROOT}/files/keys/game-packages.asc
+  [[ $(game_packages_key_fpr) == "${GAME_PACKAGES_KEY_FPR}" ]] \
+    || fail 'files/keys/game-packages.asc is not the pinned crossdock key'
+
+  printf '[options]\n[core]\nInclude = /etc/pacman.d/mirrorlist\n' >"${TEST_ROOT}/pacman.conf"
+  ! pacman_conf_has_game_packages_include "${TEST_ROOT}/pacman.conf" || fail 'Include found where absent'
+  printf '%s\n' "${GAME_PACKAGES_INCLUDE}" >>"${TEST_ROOT}/pacman.conf"
+  pacman_conf_has_game_packages_include "${TEST_ROOT}/pacman.conf" || fail 'Include line not found'
+
+  # Unreachable: an empty file, which pacman accepts as an Include.
+  mkdir -p "${served}/arch"
+  GAME_PACKAGES_CONF=${conf} GAME_PACKAGES_BASE=http://127.0.0.1:9/arch "${toggle}"
+  [[ -f ${conf} && ! -s ${conf} ]] || fail 'unreachable crossdock did not leave an empty include file'
+  # Reachable (a local server with the database and its signature).
+  : >"${served}/arch/game-packages.db"
+  : >"${served}/arch/game-packages.db.sig"
+  port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+  python3 -m http.server -b 127.0.0.1 -d "${served}" "${port}" >/dev/null 2>&1 &
+  pid=$!
+  for _ in $(seq 50); do curl -fsI "http://127.0.0.1:${port}/arch/game-packages.db" >/dev/null 2>&1 && break; sleep 0.1; done
+  GAME_PACKAGES_CONF=${conf} GAME_PACKAGES_BASE=http://127.0.0.1:${port}/arch "${toggle}"
+  grep -qx '\[game-packages\]' "${conf}" && grep -qx 'SigLevel = Required DatabaseRequired PackageOptional' "${conf}" \
+    || { kill "${pid}"; fail 'reachable crossdock did not enable [game-packages]'; }
+  # A database without its signature counts as unreachable.
+  rm -f -- "${served}/arch/game-packages.db.sig"
+  GAME_PACKAGES_CONF=${conf} GAME_PACKAGES_BASE=http://127.0.0.1:${port}/arch "${toggle}"
+  kill "${pid}"
+  [[ ! -s ${conf} ]] || fail 'an unsigned database enabled [game-packages]'
+  [[ $("${toggle}" --section) == *'SigLevel = Required DatabaseRequired PackageOptional'* ]] \
+    || fail '--section does not print the enabled section'
+  # A second primary key in the vendored file is refused.
+  install -d -m 0700 "${TEST_ROOT}/gp/gnupg"
+  GAME_PACKAGES_KEY=${TEST_ROOT}/gp/two.asc
+  { cat "${REPO_ROOT}/files/keys/game-packages.asc"; gpg --batch --quiet --homedir "${TEST_ROOT}/gp/gnupg" --passphrase '' \
+      --quick-gen-key 'other <other@example.invalid>' ed25519 sign never >/dev/null 2>&1 \
+    && gpg --batch --homedir "${TEST_ROOT}/gp/gnupg" --armor --export other@example.invalid; } >"${GAME_PACKAGES_KEY}"
+  [[ $(game_packages_key_fpr) != "${GAME_PACKAGES_KEY_FPR}" ]] || fail 'a key file with two primary keys was accepted'
+)
+
 test_argument_parsing
 printf 'PASS Arch argument parsing and usage errors\n'
+test_game_packages_repo
+printf 'PASS Arch game-packages repository: full-only, pinned key, LAN-only include\n'
 test_profile_selection
 printf 'PASS Arch core/full package selection (games/media full-only, rustup, no r8152)\n'
 test_managed_files_are_applied

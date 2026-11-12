@@ -204,7 +204,10 @@ them `-Profile`, `-Check`, `-DryRun`, `-NoUpgrade`):
 
 Every platform installs Balun alongside Tributary in core (`balun` from the
 `jmsqrd/balun` COPR on Fedora, `balun-bin` from the AUR on Arch, release apps on macOS
-and Windows). Fedora and Arch also install Cockpit with file management, package
+and Windows). Fedora and Arch also install Switchworks, the coding-agent control plane
+(`switchworks` from the `jmsqrd/switchworks` COPR on Fedora; on Arch, the
+`switchworks-x86_64.pkg.tar.zst` asset of its latest GitHub release, verified against
+the release's published SHA-256 and installed with `pacman -U`). Fedora and Arch also install Cockpit with file management, package
 updates, Podman containers, and storage/LVM support, and start `cockpit.socket` for access at `https://localhost:9090`.
 
 - `setup-arch-workstation.sh` — run as your normal user; sudo is used for the
@@ -236,7 +239,14 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   from rustup: an installed distro `rust` (and its split packages) is replaced by
   `rustup`, and each user gets the stable toolchain with rustfmt, clippy, and
   rust-analyzer. `[multilib]` is enabled only by the full profile, which adds Steam,
-  Lutris, the lib32 graphics stack, and the AUR games. GNOME uses Vitals for sensors,
+  Lutris, the lib32 graphics stack, and the AUR games. Full also adds the LAN's
+  `[game-packages]` repository (crossdock on enthoo): crossdock's key from
+  `files/keys/game-packages.asc`, pinned by fingerprint and locally signed with
+  `pacman-key`, and `Include = /etc/pacman.d/game-packages.conf` at the end of
+  `/etc/pacman.conf`. pacman fails a whole sync when any repository is down, so that
+  file holds the section only while crossdock answers: `/usr/local/libexec/game-packages-repo`
+  rewrites it from a NetworkManager dispatcher hook and before the daily
+  `pacman-update` run, and laptops off the LAN update as usual. GNOME uses Vitals for sensors,
   Dash to Dock from the AUR, and the bundled System Monitor extension with `libgtop`.
   The security baseline (see "Workstation security layer" under the Fedora bullet)
   uses the same ClamAV/firewalld/auditd/AIDE/Wazuh pieces with Arch package and unit
@@ -245,7 +255,7 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   `aide` + `wazuh-agent` from the AUR — their privileged setup (AIDE database init,
   Wazuh enablement) runs right after the interactive AUR phase.
 - `setup-fedora-workstation.sh` — run as your normal user; Fedora 41+ (dnf5). Adds the
-  signed third-party repos (`files/etc/yum.repos.d/`, the Tributary/Balun coprs, RPM Fusion,
+  signed third-party repos (`files/etc/yum.repos.d/`, the Tributary/Balun/Switchworks coprs, RPM Fusion,
   Microsoft VS Code, Chrome, Charm (for Crush), sing-box; the PowerShell repo on x86_64, plus the Steam/Plex
   repos in the full profile), installs the dnf and flatpak sets,
   applies available DNF/Flatpak updates, and installs Zed plus native AI tools. Rust
@@ -263,6 +273,9 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   SHA-256 digests GitHub publishes, and both are skipped when the installed version is
   already current, and their services are enabled. Full also adds Lutris, Steam with its
   i686 libraries (x86_64), the io.jor.* game Flatpaks, and desktop media apps.
+  Full on x86_64 also adds the LAN's `game-packages` repo (crossdock on enthoo) with
+  `repo_gpgcheck=1` against the vendored, fingerprint-pinned key and
+  `skip_if_unavailable=True`, so dnf carries on without it off the LAN.
   Installs `dnf5-plugin-automatic` and enables `dnf5-automatic.timer` immediately,
   with the controller setup's `apply_updates = yes` and `reboot = when-needed`
   policy in `/etc/dnf/automatic.conf`.
@@ -359,7 +372,26 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   Education; Windows 11 Home is rejected. Rust comes only from `Rustlang.Rustup`
   (legacy Rust MSI packages are removed). Balun has no WinGet package yet, so it
   installs from its SHA-256-verified GitHub release (silent Inno Setup) and switches to
-  `jm2.Balun` automatically once that ID resolves. Full adds Steam, GOG Galaxy, the
+  `jm2.Balun` automatically once that ID resolves. GooGet is built from the head of
+  `google/googet` with the core Go toolchain (`go install module@commit`, with the build
+  pinned to Go's default module proxy and checksum database so local `GOSUMDB`/`GOPRIVATE`
+  overrides can't skip source verification; the newest prebuilt `googet.exe` is
+  v2.20.0 from 2024). Until `google/googet` PRs #227 and #228 (install with `Provides`)
+  merge, it instead builds a pinned `jm2/googet` commit carrying both: a git checkout
+  checked against the commit id, built with `go build -mod=readonly` so dependencies are
+  still verified; once GitHub reports both merged it returns to upstream's head by itself.
+  googet is installed to `%ProgramData%\GooGet` the way googet's own
+  `install.ps1` does, but with the root created already locked. A pre-existing root is
+  used only when nothing in it is owned or writable by any account but Administrators and
+  SYSTEM and it contains no junctions or symlinks; otherwise apply stops for you to remove
+  it (nothing is repaired in place, since googet runs elevated from the machine PATH).
+  Each run rebuilds it when the source commit moved. `googet.conf` sets
+  `allowunsafeurl: true` and `repos\game-packages.repo` points at crossdock's
+  plain-HTTP GooGet repo on the LAN (`http://192.168.1.11:8080/goo/game-packages`). The
+  `repos\linux-packages.repo` written before the rename is removed while it still holds
+  what the script wrote.
+  googet needs `GooGetRoot`, so shells opened before the first run must be reopened.
+  Full adds Steam, GOG Galaxy, the
   SuperTux games, benchmarks, Plex, iTunes, HDHomeRun, MakeMKV, and Google Drive.
 
 Missing package-set entries are installed and existing Arch/AUR packages are updated.
