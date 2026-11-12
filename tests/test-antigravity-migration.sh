@@ -95,7 +95,7 @@ test_arch_developer_catalog() (
     || fail 'Arch official package set still requests VSCodium'
   ! array_contains vscodium-bin "${PKGS_AUR[@]}" \
     || fail 'Arch AUR set still requests VSCodium'
-  grep -Fq 'for command_name in claude code codex crush goose zed' \
+  grep -Fq 'for command_name in carryout claude code codex crossdock crush goose zed' \
     "${REPO_ROOT}/setup-arch-workstation.sh" \
     || fail 'Arch does not enforce all requested developer-command postconditions'
 )
@@ -420,7 +420,7 @@ test_fedora_developer_catalog() (
     || fail 'Fedora Codex installer lacks a runnable-command postcondition'
   declare -f install_zed | grep -Fq 'zed" --version' \
     || fail 'Fedora Zed installer lacks a runnable-command postcondition'
-  grep -Fq 'for command_name in agy antigravity claude code codex crush goose zed' \
+  grep -Fq 'for command_name in agy antigravity carryout claude code codex crossdock crush goose zed' \
     "${REPO_ROOT}/setup-fedora-workstation.sh" \
     || fail 'Fedora does not enforce all requested developer-command postconditions'
 )
@@ -1098,6 +1098,40 @@ assert_native_opencode_purged() {
   [[ -z $(native_opencode_leftovers "${home}") ]] \
     || fail "${label} still reports native OpenCode leftovers"
 }
+
+# Fedora's full-profile Pangea games come from game-packages RPMs while
+# crossdock answers (their Flatpaks are then removed, as is upstream's Cro-Mag
+# Rally); off the LAN the Flatpak fallbacks install, never upstream Cro-Mag.
+test_fedora_game_repo_pkgs() (
+  load_helpers setup-fedora-workstation.sh
+  # shellcheck disable=SC2034 # read by the sourced install_game_repo_pkgs
+  GAME_REPO_PKGS=("${GAME_REPO_PKGS_FULL[@]}")
+  local calls=${TEST_ROOT}/fedora-games
+  local -A rpms=([bugdom]=1) flatpaks=([io.jor.bugdom]=1 [io.jor.cromagrally]=1)
+  rpm() { [[ $1 == -q && $2 == --quiet ]] || return 97; [[ -n ${rpms[$4]:-} ]]; }
+  flatpak() { [[ $1 == info ]] || return 97; [[ -n ${flatpaks[$3]:-} ]]; }
+  flatpak_install() { printf 'flatpak_install %s\n' "$*" >>"${calls}"; }
+  sudo() {
+    printf '%s\n' "$*" >>"${calls}"
+    case $1:$2 in
+      dnf:-y) shift 3; local p; for p in "$@"; do rpms[${p}]=1; done ;;
+      flatpak:uninstall) unset "flatpaks[$6]" ;;
+      *) fail "unexpected privileged command: $*" ;;
+    esac
+  }
+  : >"${calls}"
+  GAME_PACKAGES_REACHABLE=1
+  install_game_repo_pkgs >/dev/null
+  [[ $(cat "${calls}") == $'dnf -y install bugdom2 cro-mag-rally-net-bin mightymike nanosaur nanosaur2 ottomatic\nflatpak uninstall -y --system --noninteractive io.jor.bugdom\nflatpak uninstall -y --system --noninteractive io.jor.cromagrally' ]] \
+    || fail "Fedora did not move the games to game-packages: $(cat "${calls}")"
+
+  rpms=(); flatpaks=(); : >"${calls}"
+  # shellcheck disable=SC2034 # read by the sourced install_game_repo_pkgs
+  GAME_PACKAGES_REACHABLE=0
+  install_game_repo_pkgs >/dev/null 2>&1
+  [[ $(cat "${calls}") == 'flatpak_install io.jor.bugdom io.jor.bugdom2 io.jor.mightymike io.jor.nanosaur io.jor.nanosaur2 io.jor.ottomatic' ]] \
+    || fail "Fedora's off-LAN fallback is wrong (or installs upstream Cro-Mag Rally): $(cat "${calls}")"
+)
 
 test_fedora_opencode_purge() (
   load_helpers setup-fedora-workstation.sh
@@ -1884,6 +1918,8 @@ main() {
   test_goose_desktop_checksum_rejection setup-fedora-workstation.sh aarch64
   test_goose_desktop_checksum_rejection setup-arch-workstation.sh x86_64
   printf 'PASS Fedora/Arch corrupt goose Desktop rejection\n'
+  test_fedora_game_repo_pkgs
+  printf 'PASS Fedora game-packages games, Flatpak retirement and off-LAN fallback\n'
   test_fedora_opencode_purge
   test_arch_opencode_purge
   printf 'PASS Fedora/Arch OpenCode CLI/desktop purge convergence\n'

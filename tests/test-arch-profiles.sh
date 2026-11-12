@@ -45,7 +45,8 @@ test_profile_selection() (
   load_helpers
   local package
   local -a games=(steam lutris lib32-vulkan-radeon ollama-cuda ollama-vulkan)
-  local -a games_aur=(steamcmd bugdom nanosaur cro-mag-rally-net lgogdownloader)
+  local -a games_aur=(lgogdownloader airshipper maelstrom)
+  local -a games_repo=(steamcmd bugdom nanosaur cro-mag-rally-net-bin ottomatic)
   local -a media=(brasero video-downloader)
   [[ ${PROFILE} == core ]] || fail 'default profile is not core'
   for package in "${games[@]}" "${media[@]}"; do
@@ -60,9 +61,23 @@ test_profile_selection() (
     array_contains "${package}" "${PKGS_OFFICIAL[@]}" \
       || fail "core official set omits ${package}"
   done
-  for package in google-chrome balun-bin tributary-bin powershell-bin android-studio crush-bin; do
+  for package in google-chrome powershell-bin android-studio crush-bin; do
     array_contains "${package}" "${PKGS_AUR[@]}" \
       || fail "core AUR set omits ${package}"
+  done
+  # Packages game-packages publishes come from it (AUR only as the off-LAN
+  # fallback), never from the plain AUR list.
+  local entry repo_names=()
+  for entry in "${GAME_REPO_PKGS[@]}"; do repo_names+=("${entry%%|*}"); done
+  [[ ${repo_names[*]} == 'balun-bin carryout-bin crossdock-bin tributary-bin' ]] \
+    || fail "core game-packages set is ${repo_names[*]}"
+  for entry in "${GAME_REPO_PKGS_CORE[@]}" "${GAME_REPO_PKGS_FULL[@]}"; do
+    ! array_contains "${entry%%|*}" "${PKGS_AUR_CORE[@]}" "${PKGS_AUR_FULL[@]}" \
+      && ! array_contains "${entry#*|}" "${PKGS_AUR_CORE[@]}" "${PKGS_AUR_FULL[@]}" \
+      || fail "${entry} is still in a plain AUR list"
+  done
+  for package in "${games_repo[@]}"; do
+    ! array_contains "${package}" "${repo_names[@]}" || fail "core installs game ${package}"
   done
   array_contains flatpak "${PKGS_OFFICIAL[@]}" \
     || fail 'core official set omits flatpak (goose Desktop bundle)'
@@ -75,10 +90,17 @@ test_profile_selection() (
     array_contains "${package}" "${PKGS_OFFICIAL[@]}" \
       || fail "full official set omits ${package}"
   done
-  for package in "${games_aur[@]}" makemkv balun-bin tributary-bin; do
+  for package in "${games_aur[@]}" makemkv; do
     array_contains "${package}" "${PKGS_AUR[@]}" \
       || fail "full AUR set omits ${package}"
   done
+  repo_names=()
+  for entry in "${GAME_REPO_PKGS[@]}"; do repo_names+=("${entry%%|*}"); done
+  for package in "${games_repo[@]}" balun-bin tributary-bin crossdock-bin carryout-bin; do
+    array_contains "${package}" "${repo_names[@]}" || fail "full game-packages set omits ${package}"
+  done
+  array_contains 'cro-mag-rally-net-bin|cro-mag-rally-net' "${GAME_REPO_PKGS[@]}" \
+    || fail "Cro-Mag Rally is not jm2's fork with the AUR build as fallback"
   select_profile full
   [[ ${#PKGS_OFFICIAL[@]} == $(( ${#PKGS_OFFICIAL_CORE[@]} + ${#PKGS_OFFICIAL_FULL[@]} )) ]] \
     || fail 'select_profile is not idempotent'
@@ -176,11 +198,19 @@ test_check_exit_codes() (
   }
   installed=' '
   switchworks=1
+  # game-packages is configured (crossdock was unreachable at the last
+  # network change) and its packages are installed from it.
+  game_packages_key_trusted() { return 0; }
+  pacman_conf_has_game_packages_include() { return 0; }
+  GAME_PACKAGES_CONF=${TEST_ROOT}/check-game-packages.conf
+  : >"${GAME_PACKAGES_CONF}"
+  game_installed=' balun-bin carryout-bin crossdock-bin tributary-bin '
   pacman() {
     case $1 in
       -Sg) return 0 ;;
       # Switchworks comes from its GitHub release, not the package lists.
-      -Q) if [[ $2 == switchworks ]]; then
+      -Q) if [[ ${game_installed} == *" $2 "* ]]; then printf '%s 1.0-1\n' "$2"; return 0; fi
+          if [[ $2 == switchworks ]]; then
             (( switchworks )) && printf 'switchworks 0.1.7-1\n' && return 0
             return 1
           fi
@@ -239,7 +269,22 @@ test_check_exit_codes() (
   goose_desktop=1
   rc=0; output=$(run_check) || rc=$?
   [[ ${rc} == 0 ]] || fail "restored goose check exited ${rc}: ${output}"
+  # A package installed from neither the repository nor the AUR is drift.
+  game_installed=' balun-bin carryout-bin crossdock-bin '
+  rc=0; output=$(run_check) || rc=$?
+  [[ ${rc} == 2 && ${output} == *'DRIFT    game-packages package tributary-bin: not installed'* ]] \
+    || fail 'a missing game-packages package was not drift'
+  game_installed=' balun-bin carryout-bin crossdock-bin tributary-bin '
   PROFILE=full; select_profile full
+  # The differently named AUR build of jm2's Cro-Mag Rally is a note: a run
+  # that reaches the LAN replaces it with the repository package.
+  game_installed+='bugdom bugdom2 mightymike nanosaur nanosaur2 ottomatic steamcmd '
+  installed=' cro-mag-rally-net '
+  output=$(run_check) || true
+  [[ ${output} == *'NOTE     cro-mag-rally-net: AUR fallback for game-packages cro-mag-rally-net-bin'* \
+     && ${output} != *'DRIFT    game-packages package'* ]] \
+    || fail "the AUR Cro-Mag Rally fallback was not a note: ${output}"
+  installed=' '
   rc=0; output=$(run_check) || rc=$?
   [[ ${rc} == 2 && ${output} == *'official package steam: not installed'* ]] \
     || fail 'full check did not report missing steam'
@@ -495,7 +540,7 @@ EOF
     || fail 'a missing manager did not disable an enabled wazuh-agent'
 )
 
-# The LAN game-packages repository is full-only, pinned to crossdock's key,
+# The LAN game-packages repository is in every profile, pinned to crossdock's key,
 # and listed in pacman only while crossdock answers.
 test_game_packages_repo() (
   load_helpers
@@ -503,14 +548,9 @@ test_game_packages_repo() (
   local toggle=${REPO_ROOT}/files/usr/local/libexec/game-packages-repo port pid
   export GAME_PACKAGES_LOCK=${TEST_ROOT}/gp/lock
   for entry in "${MANAGED_FILES[@]}"; do
-    [[ ${entry} == *game-packages* ]] && found=1
-  done
-  (( ! found )) || fail 'core manages game-packages files'
-  select_profile full
-  for entry in "${MANAGED_FILES[@]}"; do
     [[ ${entry} == *game-packages-repo* ]] && found=1
   done
-  (( found )) || fail 'full does not manage the game-packages toggle'
+  (( found )) || fail 'core does not manage the game-packages toggle'
   # shellcheck disable=SC2034 # read by the sourced game_packages_key_fpr
   GAME_PACKAGES_KEY=${REPO_ROOT}/files/keys/game-packages.asc
   [[ $(game_packages_key_fpr) == "${GAME_PACKAGES_KEY_FPR}" ]] \
@@ -554,7 +594,51 @@ test_game_packages_repo() (
 test_argument_parsing
 printf 'PASS Arch argument parsing and usage errors\n'
 test_game_packages_repo
-printf 'PASS Arch game-packages repository: full-only, pinned key, LAN-only include\n'
+
+# Packages game-packages publishes install from it while crossdock answers
+# (replacing a differently named AUR build), and fall back to the AUR off it.
+test_game_repo_install() (
+  load_helpers
+  select_profile full
+  local calls=${TEST_ROOT}/game-repo-calls synced=1
+  local -A have=([balun-bin]=1 [cro-mag-rally-net]=1)
+  game_packages_repo_synced() { (( synced )); }
+  pacman() { [[ $1 == -Q ]] || return 97; [[ -n ${have[$2]:-} ]]; }
+  sudo() {
+    printf '%s\n' "$*" >>"${calls}"
+    [[ $1 == pacman ]] || fail "unexpected privileged command: $*"
+    case $2 in
+      -Rns) shift 3; local p; for p in "$@"; do unset "have[${p}]"; done ;;
+      -S) shift 4; local p; for p in "$@"; do have[${p}]=1; done ;;
+    esac
+  }
+  : >"${calls}"
+  install_game_repo_pkgs >/dev/null
+  [[ $(sed -n 1p "${calls}") == 'pacman -Rns --noconfirm cro-mag-rally-net' ]] \
+    || fail "the AUR Cro-Mag Rally was not removed for its repository successor: $(cat "${calls}")"
+  [[ $(sed -n 2p "${calls}") == 'pacman -S --needed --noconfirm balun-bin carryout-bin crossdock-bin tributary-bin bugdom bugdom2 cro-mag-rally-net-bin mightymike nanosaur nanosaur2 ottomatic steamcmd' ]] \
+    || fail "game-packages packages were not installed from the repository: $(cat "${calls}")"
+  (( ${#GAME_REPO_AUR_FALLBACK[@]} == 0 )) || fail 'a reachable repository left AUR fallbacks'
+
+  # Off the LAN: nothing privileged; every package not yet installed from the
+  # repository falls back to its AUR name.
+  synced=0; have=([balun-bin]=1 [cro-mag-rally-net]=1); : >"${calls}"
+  install_game_repo_pkgs >/dev/null
+  [[ ! -s ${calls} ]] || fail "an unreachable repository ran: $(cat "${calls}")"
+  [[ ${GAME_REPO_AUR_FALLBACK[*]} == 'carryout-bin crossdock-bin tributary-bin bugdom bugdom2 cro-mag-rally-net mightymike nanosaur nanosaur2 ottomatic steamcmd' ]] \
+    || fail "unexpected AUR fallbacks: ${GAME_REPO_AUR_FALLBACK[*]}"
+
+  # --no-upgrade installs only what neither source has installed.
+  # shellcheck disable=SC2034 # read by the sourced install_game_repo_pkgs
+  NO_UPGRADE=1
+  synced=1; have=([balun-bin]=1 [cro-mag-rally-net]=1 [bugdom]=1); : >"${calls}"
+  install_game_repo_pkgs >/dev/null
+  [[ $(cat "${calls}") == 'pacman -S --needed --noconfirm carryout-bin crossdock-bin tributary-bin bugdom2 mightymike nanosaur nanosaur2 ottomatic steamcmd' ]] \
+    || fail "--no-upgrade touched installed packages: $(cat "${calls}")"
+)
+test_game_repo_install
+printf 'PASS Arch game-packages installs, AUR replacement and off-LAN AUR fallback\n'
+printf 'PASS Arch game-packages repository: every profile, pinned key, LAN-only include\n'
 test_profile_selection
 printf 'PASS Arch core/full package selection (games/media full-only, rustup, no r8152)\n'
 test_managed_files_are_applied

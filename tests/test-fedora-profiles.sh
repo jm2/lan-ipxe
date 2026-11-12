@@ -68,7 +68,7 @@ test_argument_parsing() {
 }
 
 test_profile_selection() {
-  local arch profile out pkgs flatpaks services repos tools item
+  local arch profile out pkgs flatpaks services repos tools item games
   for arch in x86_64 aarch64; do
     for profile in core full; do
       out=$(run_script "${arch}" --profile "${profile}" --dry-run)
@@ -116,9 +116,14 @@ test_profile_selection() {
       has_line crush "${pkgs}" || fail "${arch}/${profile}: omits the Crush package"
       grep -Fq 'files/etc/yum.repos.d/charm.repo -> /etc/yum.repos.d/charm.repo' <<<"${out}" \
         || fail "${arch}/${profile}: plan omits Charm's repository file"
+      for item in carryout crossdock; do
+        has_line "${item}" "${pkgs}" || fail "${arch}/${profile}: omits the jm2 ${item} package"
+      done
       for item in copr:copr.fedorainfracloud.org:jmsqrd:balun \
           copr:copr.fedorainfracloud.org:jmsqrd:tributary \
-          copr:copr.fedorainfracloud.org:jmsqrd:switchworks charm; do
+          copr:copr.fedorainfracloud.org:jmsqrd:switchworks \
+          copr:copr.fedorainfracloud.org:jmsqrd:crossdock \
+          copr:copr.fedorainfracloud.org:jmsqrd:carryout charm; do
         has_line "${item}" "${repos}" || fail "${arch}/${profile}: omits core repo ${item}"
       done
       for item in antigravity agy goose goose-desktop claude codex zed speedtest; do
@@ -147,7 +152,15 @@ test_profile_selection() {
         for item in lutris rhythmbox brasero transmission-gtk transmission-daemon; do
           has_line "${item}" "${pkgs}" || fail "${arch}/full: omits ${item}"
         done
-        has_line io.jor.bugdom "${flatpaks}" || fail "${arch}/full: omits game Flatpaks"
+        # The Pangea games come from game-packages (Flatpaks only as the
+        # off-LAN fallback); Cro-Mag Rally is jm2's fork, never upstream's.
+        ! grep -q '^io\.jor\.' <<<"${flatpaks}" || fail "${arch}/full: installs game Flatpaks directly"
+        games=$(plan_section 'game-packages RPMs' "${out}")
+        for item in 'bugdom (fallback io.jor.bugdom)' 'ottomatic (fallback io.jor.ottomatic)' \
+            'cro-mag-rally-net-bin (fallback none: jm2 fork, LAN only)'; do
+          has_line "${item}" "${games}" || fail "${arch}/full: game-packages plan omits ${item}"
+        done
+        ! grep -q 'cromagrally' <<<"${games}${flatpaks}" || fail "${arch}/full: still installs upstream Cro-Mag Rally"
         for item in navidrome owntone; do
           has_line "${item}" "${tools}" || fail "${arch}/full: omits ${item}"
           has_line "${item}.service" "${services}" || fail "${arch}/full: omits ${item}.service"
@@ -481,17 +494,20 @@ test_game_packages_repo() {
     || fail 'game-packages.repo does not use the vendored key'
   [[ $(gpg --batch --show-keys --with-colons "${REPO_ROOT}/files/keys/game-packages.asc" | awk -F: '$1 == "fpr" { print $10; exit }') \
      == 38C92DEA894BB3E48C50D6F0B48EFCBE62AAFAB2 ]] || fail 'files/keys/game-packages.asc is not the pinned crossdock key'
-  out=$(run_script x86_64 --profile full --dry-run)
-  plan_section 'repositories' "${out}" | grep -qx 'game-packages' || fail 'full x86_64 does not enable game-packages'
-  out=$(run_script x86_64 --profile core --dry-run)
-  ! plan_section 'repositories' "${out}" | grep -qx 'game-packages' || fail 'core enables game-packages'
+  local arch
+  for arch in x86_64 aarch64; do
+    out=$(run_script "${arch}" --profile full --dry-run)
+    plan_section 'repositories' "${out}" | grep -qx 'game-packages' || fail "full ${arch} does not enable game-packages"
+    out=$(run_script "${arch}" --profile core --dry-run)
+    ! plan_section 'repositories' "${out}" | grep -qx 'game-packages' || fail "core ${arch} enables game-packages"
+  done
 }
 
 test_argument_parsing
 printf 'PASS Fedora profile/mode argument parsing and core default\n'
 test_profile_selection
 test_game_packages_repo
-printf 'PASS Fedora game-packages repository: full x86_64 only, pinned key, skipped off the LAN\n'
+printf 'PASS Fedora game-packages repository: full (x86_64 + aarch64), pinned key, skipped off the LAN\n'
 printf 'PASS Fedora core/full package, Flatpak, service and repo selection (x86_64 + aarch64)\n'
 test_managed_files_are_applied
 printf 'PASS Fedora managed-file list matches apply-time put_file calls\n'

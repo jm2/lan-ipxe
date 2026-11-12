@@ -28,7 +28,8 @@
 #
 # What it does, in order:
 #   1. signed third-party repos: VS Code, the jmsqrd/tributary,
-#      jmsqrd/balun and jmsqrd/switchworks coprs, RPM Fusion free+nonfree,
+#      jmsqrd/balun, jmsqrd/switchworks, jmsqrd/crossdock and jmsqrd/carryout
+#      coprs, RPM Fusion free+nonfree,
 #      Chrome, Charm (Crush),
 #      sing-box; on
 #      x86_64 also Microsoft (PowerShell), plus (full) the RPM Fusion steam
@@ -94,7 +95,7 @@ FILES=${SCRIPT_DIR}/files
 ARCH=$(uname -m)
 FEDORA_MIN_VERSION=41
 
-COPRS=(jmsqrd/tributary jmsqrd/balun jmsqrd/switchworks)
+COPRS=(jmsqrd/tributary jmsqrd/balun jmsqrd/switchworks jmsqrd/crossdock jmsqrd/carryout)
 # Completed with the release number after preflight; no rpm call at load time
 # keeps --dry-run usable on non-Fedora hosts.
 RPMFUSION_FREE_URL_BASE=https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-
@@ -193,6 +194,7 @@ PKGS=(
   bluez-tools
   boost-devel
   bzip2
+  carryout
   ccache
   chromium
   chrony
@@ -215,6 +217,7 @@ PKGS=(
   colordiff
   copr-cli
   cronie
+  crossdock
   crush
   cups
   cups-pk-helper
@@ -430,15 +433,23 @@ FLATPAKS_X86_64=(
   org.getoutline.OutlineClient
   org.getoutline.OutlineManager
 )
-FLATPAKS_FULL=(
-  io.jor.bugdom
-  io.jor.bugdom2
-  io.jor.cromagrally
-  io.jor.nanosaur
-  io.jor.nanosaur2
-  io.jor.ottomatic
-  io.jor.mightymike
+FLATPAKS_FULL=()
+# Games the LAN's game-packages repository (crossdock on enthoo) publishes, as
+# "RPM|Flatpak fallback". They install from the repository whenever crossdock
+# answers, and the Flatpak is then removed; off the LAN the Flatpak installs
+# instead. Cro-Mag Rally is jm2's LAN-multiplayer fork, which only the
+# repository carries: it has no fallback (never upstream's Flatpak), and
+# upstream's Flatpak is removed once the fork is installed.
+GAME_REPO_PKGS_FULL=(
+  "bugdom|io.jor.bugdom"
+  "bugdom2|io.jor.bugdom2"
+  "cro-mag-rally-net-bin|"
+  "mightymike|io.jor.mightymike"
+  "nanosaur|io.jor.nanosaur"
+  "nanosaur2|io.jor.nanosaur2"
+  "ottomatic|io.jor.ottomatic"
 )
+GAME_REPO_RETIRED_FLATPAKS=(io.jor.cromagrally)
 
 SERVICES=(
   bluetooth.service
@@ -1916,6 +1927,47 @@ install_zed() {
   note "Zed ${ZED_VERSION}: installed from verified official release archive"
 }
 
+# install_game_repo_pkgs: with crossdock reachable, installs the missing
+# GAME_REPO_PKGS RPMs (dnf upgrade already refreshed installed ones) and
+# removes each one's Flatpak fallback and the retired upstream Cro-Mag Rally
+# Flatpak; off the LAN, installs the Flatpak fallback of each missing RPM.
+install_game_repo_pkgs() {
+  local entry rpm flatpak missing=() fallbacks=() retired=()
+  (( ${#GAME_REPO_PKGS[@]} )) || return 0
+  for entry in "${GAME_REPO_PKGS[@]}"; do
+    rpm=${entry%%|*} flatpak=${entry#*|}
+    rpm -q --quiet -- "${rpm}" 2>/dev/null && continue
+    missing+=("${rpm}")
+    [[ -z ${flatpak} ]] || fallbacks+=("${flatpak}")
+  done
+  if (( ! GAME_PACKAGES_REACHABLE )); then
+    if (( ${#fallbacks[@]} )); then
+      note "game-packages unreachable: Flatpak fallbacks for ${missing[*]}"
+      flatpak_install "${fallbacks[@]}"
+    fi
+    [[ " ${missing[*]} " != *' cro-mag-rally-net-bin '* ]] \
+      || warn "Cro-Mag Rally (jm2's fork) installs from game-packages once crossdock answers"
+    return 0
+  fi
+  if (( ${#missing[@]} )); then
+    sudo dnf -y install "${missing[@]}" || die "could not install from game-packages: ${missing[*]}"
+  fi
+  for entry in "${GAME_REPO_PKGS[@]}"; do
+    rpm=${entry%%|*} flatpak=${entry#*|}
+    rpm -q --quiet -- "${rpm}" || die "${rpm} is not installed after installing it from game-packages"
+    [[ -z ${flatpak} ]] || retired+=("${flatpak}")
+  done
+  retired+=("${GAME_REPO_RETIRED_FLATPAKS[@]}")
+  for flatpak in "${retired[@]}"; do
+    if flatpak info --system "${flatpak}" >/dev/null 2>&1; then
+      sudo flatpak uninstall -y --system --noninteractive "${flatpak}" \
+        || die "could not remove the Flatpak ${flatpak} (replaced by game-packages)"
+      note "${flatpak}: removed (replaced by its game-packages RPM)"
+    fi
+  done
+  note "game-packages: ${#GAME_REPO_PKGS[@]} game(s) from the LAN repository"
+}
+
 # keep_installed <command|rpm:name>: with --no-upgrade, succeed (and skip the
 # installer) when the tool is already present; otherwise fail so it runs.
 tool_present() {
@@ -1998,6 +2050,7 @@ SELECTED_FLATPAKS=()
 SELECTED_SERVICES=()
 SELECTED_REPOS=()
 SELECTED_TOOLS=()
+GAME_REPO_PKGS=()
 FIREWALL_LAN_SERVICES=()
 MANAGED_FILES=()
 RUST_COMPONENTS=(rustfmt clippy rust-analyzer)
@@ -2077,21 +2130,26 @@ select_profile() {
     SELECTED_FLATPAKS+=("${FLATPAKS_FULL[@]}")
     SELECTED_SERVICES+=("${SERVICES_FULL[@]}")
     SELECTED_TOOLS+=(navidrome owntone)
+    GAME_REPO_PKGS=("${GAME_REPO_PKGS_FULL[@]}")
+    # The game RPMs are built for x86_64 and aarch64.
+    SELECTED_REPOS+=(game-packages)
+    MANAGED_FILES+=(
+      "etc/yum.repos.d/game-packages.repo|/etc/yum.repos.d/game-packages.repo"
+      "keys/game-packages.asc|${GAME_PACKAGES_KEY_FILE}"
+    )
     # Media servers join the LAN zone with the profile that installs them;
     # transmission-daemon's RPC/peer ports are full-profile only as well.
     FIREWALL_LAN_SERVICES+=(navidrome owntone transmission)
     if (( IS_X86_64 )); then
       SELECTED_PKGS+=("${PKGS_FULL_X86_64[@]}")
       SELECTED_SERVICES+=("${SERVICES_FULL_X86_64[@]}")
-      SELECTED_REPOS+=(rpmfusion-nonfree-steam PlexTv game-packages)
+      SELECTED_REPOS+=(rpmfusion-nonfree-steam PlexTv)
       # Plex publishes x86_64 RPMs only; Steam's i686 stack is x86_64-only,
       # and so is its in-home streaming surface.
       FIREWALL_LAN_SERVICES+=(plexmediaserver steam-streaming)
       MANAGED_FILES+=(
         "etc/yum.repos.d/rpmfusion-nonfree-steam.repo|/etc/yum.repos.d/rpmfusion-nonfree-steam.repo"
         "etc/yum.repos.d/plex.repo|/etc/yum.repos.d/plex.repo"
-        "etc/yum.repos.d/game-packages.repo|/etc/yum.repos.d/game-packages.repo"
-        "keys/game-packages.asc|${GAME_PACKAGES_KEY_FILE}"
       )
     fi
   fi
@@ -2114,6 +2172,13 @@ print_plan() {
   printf '  %s\n' "${SELECTED_TOOLS[@]}"
   printf 'PLAN: rustup stable toolchain (minimal) + %s; purge installed distro rust packages\n' \
     "${RUST_COMPONENTS[*]}"
+  if (( ${#GAME_REPO_PKGS[@]} )); then
+    printf 'PLAN: game-packages RPMs (LAN; Flatpak fallback off the LAN) (%d):\n' "${#GAME_REPO_PKGS[@]}"
+    for entry in "${GAME_REPO_PKGS[@]}"; do
+      fallback=${entry#*|}
+      printf '  %s (fallback %s)\n' "${entry%%|*}" "${fallback:-none: jm2 fork, LAN only}"
+    done
+  fi
   printf 'PLAN: flathub + %d flatpaks:\n' "${#SELECTED_FLATPAKS[@]}"
   printf '  %s\n' "${SELECTED_FLATPAKS[@]}"
   printf 'PLAN: managed files:\n'
@@ -2295,6 +2360,23 @@ check_state() {
       check_report DRIFT "flatpak ${id}"
     fi
   done
+  for entry in "${GAME_REPO_PKGS[@]}"; do
+    pkg=${entry%%|*} id=${entry#*|}
+    if rpm -q --quiet -- "${pkg}" 2>/dev/null; then
+      check_report CURRENT "package ${pkg} (game-packages)"
+      [[ -z ${id} ]] || ! flatpak info --system "${id}" >/dev/null 2>&1 \
+        || check_report DRIFT "flatpak ${id}: still installed beside its game-packages RPM"
+    elif [[ -n ${id} ]] && flatpak info --system "${id}" >/dev/null 2>&1; then
+      check_report NOTE "flatpak ${id}: fallback for game-packages ${pkg} (replaced on a run that reaches the LAN)"
+    else
+      check_report DRIFT "package ${pkg} (game-packages): not installed"
+    fi
+  done
+  for id in "${GAME_REPO_RETIRED_FLATPAKS[@]}"; do
+    (( ${#GAME_REPO_PKGS[@]} )) || break
+    ! flatpak info --system "${id}" >/dev/null 2>&1 \
+      || check_report DRIFT "flatpak ${id}: upstream build, replaced by jm2's fork from game-packages"
+  done
   for entry in "${MANAGED_FILES[@]}"; do
     src=${FILES}/${entry%%|*} dst=${entry#*|}
     if cmp -s -- "${src}" "${dst}"; then
@@ -2471,6 +2553,9 @@ if (( IS_X86_64 )) && [[ ${PROFILE} == full ]]; then
     "${PLEX_KEY_FINGERPRINT}" "${PLEX_KEY_FILE}"
   put_file -s "${FILES}/etc/yum.repos.d/plex.repo" /etc/yum.repos.d/plex.repo
   dnf_repo_enabled PlexTv || die "the Plex Media Server repository is not enabled"
+fi
+GAME_PACKAGES_REACHABLE=0
+if [[ ${PROFILE} == full ]]; then
   # Games and engines built from jm2/game-packages, served by crossdock on the
   # LAN. The key ships in files/ (the repo is plain HTTP); dnf skips the repo
   # when the LAN is out of reach (skip_if_unavailable).
@@ -2491,6 +2576,7 @@ if (( IS_X86_64 )) && [[ ${PROFILE} == full ]]; then
     # skip_if_unavailable would let a failed fetch or signature check pass, and
     # without --refresh unexpired cached metadata would be reused.
     if sudo dnf -y -q makecache --refresh --repo game-packages --setopt=game-packages.skip_if_unavailable=False; then
+      GAME_PACKAGES_REACHABLE=1
       note "game-packages: metadata key imported, cache refreshed"
     else
       warn "game-packages: crossdock answered but its metadata could not be fetched or verified"
@@ -2602,7 +2688,7 @@ remove_legacy_claude_rpm
 log "Zed (verified official native release)"
 keep_installed zed || install_zed
 
-for command_name in agy antigravity claude code codex crush goose zed; do
+for command_name in agy antigravity carryout claude code codex crossdock crush goose zed; do
   PATH="${HOME}/.local/bin:${PATH}" command -v "${command_name}" >/dev/null \
     || die "expected workstation command is unavailable: ${command_name}"
 done
@@ -2656,6 +2742,11 @@ if (( NO_UPGRADE )); then
 else
   sudo flatpak update -y --system --noninteractive
   note "all installed system Flatpaks checked for updates"
+fi
+
+if [[ ${PROFILE} == full ]]; then
+  log "Games from game-packages (LAN; Flatpak fallback off the LAN)"
+  install_game_repo_pkgs
 fi
 
 #--- 8. Dotfiles and system config ------------------------------------------

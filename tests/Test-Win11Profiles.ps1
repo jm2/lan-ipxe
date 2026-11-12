@@ -19,7 +19,7 @@ if ($parseErrors.Count) {
 $tokens.Count | Out-Null
 
 foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetLegacyPackages', 'WingetPresenceOnlyPackages',
-                              'RustComponents', 'BalunWingetId', 'BalunRepo', 'BalunDisplayName', 'BalunInstallerArgs', 'WingetOkCodes', 'WingetRebootCodes', 'WingetDeferredCodes', 'WingetRemoveOkCodes', 'WingetLaunchAttempts', 'WingetLaunchRetrySeconds', 'WingetInstallTechMismatchCode', 'WingetUninstallWaitSeconds', 'WingetUninstallPollSeconds', 'NativeCliTools', 'WingetPackageArgs', 'GooGetGitHubRepo', 'GooGetPatchedRepo', 'GooGetPatchedCommit', 'GooGetPatchedPulls', 'GooGetRepoName', 'GooGetRepoUrl', 'GooGetRetiredRepos', 'GooGetAclTrustedSids')) {
+                              'RustComponents', 'BalunWingetId', 'BalunRepo', 'BalunDisplayName', 'BalunInstallerArgs', 'WingetOkCodes', 'WingetRebootCodes', 'WingetDeferredCodes', 'WingetRemoveOkCodes', 'WingetLaunchAttempts', 'WingetLaunchRetrySeconds', 'WingetInstallTechMismatchCode', 'WingetUninstallWaitSeconds', 'WingetUninstallPollSeconds', 'NativeCliTools', 'WingetPackageArgs', 'GooGetGitHubRepo', 'GooGetPatchedRepo', 'GooGetPatchedCommit', 'GooGetPatchedPulls', 'GooGetRepoName', 'GooGetRepoUrl', 'GooGetRetiredRepos', 'GooGetAclTrustedSids', 'GooGetPackages', 'GooGetFullPackages', 'GooGetProbeTimeoutSeconds')) {
     $assignmentAst = $ast.Find({
         param($node)
         $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
@@ -32,7 +32,8 @@ foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetLeg
 foreach ($functionName in @('Write-Note', 'Invoke-Winget', 'Get-WingetPackageArgument', 'Get-WingetArpEntry', 'Test-NsisExecutable', 'Remove-WingetPackageForReinstall', 'Wait-WingetPackageRemoved', 'Split-UninstallCommand', 'Invoke-UninstallCommand', 'Invoke-WingetPackageSet', 'Get-RustupStableComponent',
                             'Test-RustupDefaultToolchain', 'Initialize-RustupToolchain',
                             'Get-NativeProcessorArchitecture', 'Get-WindowsArchitectureName', 'Get-BalunRelease', 'Invoke-BalunStep',
-                            'Invoke-PowerShellMsiSwitch', 'Select-GooGetSource', 'Test-GooGetPatchPending', 'Get-GooGetConfText', 'Get-GooGetRepoFileText', 'Get-GooGetRetiredRepoFile', 'Read-TextOrEmpty', 'Test-GooGetWriteRight')) {
+                            'Invoke-PowerShellMsiSwitch', 'Select-GooGetSource', 'Test-GooGetPatchPending', 'Get-GooGetConfText', 'Get-GooGetRepoFileText', 'Get-GooGetRetiredRepoFile', 'Read-TextOrEmpty', 'Test-GooGetWriteRight',
+                            'Get-GooGetInstalledName', 'Get-GooGetInstalledPackage', 'Invoke-GooGetPackageSet')) {
     $functionAst = $ast.Find({
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $functionName
@@ -108,6 +109,10 @@ try {
         Assert-True ($text -match 'removes repos\\linux-packages\.repo while it still points at http://192\.168\.1\.11:8080/goo/linux-packages') "$profileName dry run lists the retired repo removal"
         Assert-True ($text.IndexOf('SST.opencode') -gt $text.IndexOf('Legacy packages removed') -and $text -match 'SST\.OpenCodeDesktop') "$profileName dry run purges, not installs, OpenCode"
         Assert-True (($text -match 'Valve\.Steam') -eq ($profileName -eq 'full')) "Steam listed only for full ($profileName)"
+        $gooPlan = @($output | Select-Object -Skip ([Array]::FindIndex([string[]]$output, [Predicate[string]]{ param($l) $l -match 'game-packages GooGet packages' }) + 1) |
+            ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^[a-z0-9-]+$' })
+        $expectedGoo = if ($profileName -eq 'full') { 'crossdock,carryout,bugdom,bugdom2,cro-mag-rally-net,mightymike,nanosaur,nanosaur2,ottomatic' } else { 'crossdock,carryout' }
+        Assert-True (($gooPlan -join ',') -eq $expectedGoo) "$profileName dry run lists the game-packages GooGet set (got $($gooPlan -join ','))"
     }
 }
 finally {
@@ -521,4 +526,90 @@ Assert-True ($scriptText.IndexOf('$pwshResult = Invoke-PowerShellMsiSwitch') -lt
 Assert-True ($scriptText -match "(?m)^if \(.*-or \`$pwshResult -eq 'failed'.*\) \{ exit 1 \}\r?$") 'a failed PowerShell switch fails the run'
 Assert-True ($scriptText -match "(?m)^if \(.*-or \`$googetResult -eq 'failed'.*\) \{ exit 1 \}\r?$") 'a failed GooGet step fails the run'
 Write-Output 'POWERSHELL MSI PASSED'
+
+# --- game-packages GooGet packages -------------------------------------------
+Assert-True (($GooGetPackages -join ',') -eq 'crossdock,carryout') 'core installs the jm2 tools without a WinGet package from game-packages'
+Assert-True (($GooGetFullPackages -join ',') -eq 'bugdom,bugdom2,cro-mag-rally-net,mightymike,nanosaur,nanosaur2,ottomatic') 'full adds the Linux full-profile game set'
+foreach ($id in @($WingetPackages) + @($WingetFullPackages)) {
+    Assert-True ($id -notmatch '(?i)bugdom|nanosaur|ottomatic|mightymike|cromag|cro-mag|crossdock|carryout') "no second source for a game-packages package ($id)"
+}
+Assert-True ((@(Get-GooGetInstalledName -Lines @('Installed packages:', '  crossdock.x86_64 0.2.3@1', '  cro-mag-rally-net.arm64 3.2.0@2', '  bugdom.noarch 1.3.4@1', 'garbage')) -join ',') -eq 'crossdock,cro-mag-rally-net,bugdom') 'googet installed output is parsed to package names'
+
+$script:GooRoot = Join-Path ([IO.Path]::GetTempPath()) ("goo-pkg-test-{0}" -f [Guid]::NewGuid().ToString('N'))
+$script:GooCalls = @(); $script:GooInstalled = @(); $script:GooReachable = $true; $script:GooInstallExit = 0; $script:GooInstallsAll = $true
+$script:GooExe = Join-Path $script:GooRoot 'googet.exe'
+function Get-GooGetRoot { $script:GooRoot }
+function Get-GooGetInstall { if ($script:GooExe) { [pscustomobject]@{ Exe = $script:GooExe; Commit = 'c'; Version = '3.4.1'; Repo = 'jm2/googet' } } }
+function Test-GooGetRepoReachable { $script:GooReachable }
+function Invoke-GooGetCommand {
+    param([string]$Exe, [string]$Root, [string[]]$Arguments)
+    $script:GooCalls += "$Exe|-root|$Root|$($Arguments -join '|')"
+    if ($Arguments[0] -eq 'installed') {
+        'Installed packages:'
+        foreach ($name in $script:GooInstalled) { "  $name.noarch 1.0.0@1" }
+        $global:LASTEXITCODE = if ($script:GooInstalled.Count) { 0 } else { 1 }
+        return
+    }
+    if ($script:GooInstallsAll) { $script:GooInstalled = @(@($script:GooInstalled) + @($Arguments | Select-Object -Skip 2) | Select-Object -Unique) }
+    $global:LASTEXITCODE = $script:GooInstallExit
+}
+$set = @('crossdock', 'carryout', 'bugdom')
+$installPrefix = "$script:GooExe|-root|$script:GooRoot|-noconfirm|install"
+
+$r = Invoke-GooGetPackageSet -Packages $set 6>$null
+Assert-True ((@($script:GooCalls | Where-Object { $_ -like '*|install|*' }) -join "`n") -eq "$installPrefix|crossdock|carryout|bugdom") 'nothing installed (googet installed exits 1): every package installs, non-interactively, with -root'
+Assert-True (($r.Installed -join ',') -eq 'crossdock,carryout,bugdom' -and $r.Failed.Count -eq 0 -and $r.Deferred.Count -eq 0) 'fresh install reports every package installed'
+
+$script:GooCalls = @(); $script:GooInstalled = @('crossdock', 'carryout')
+$r = Invoke-GooGetPackageSet -Packages $set 6>$null
+Assert-True ((@($script:GooCalls | Where-Object { $_ -like '*|install|*' }) -join "`n") -eq "$installPrefix|crossdock|carryout|bugdom") 'installed packages are passed to googet install too, which updates them to the latest'
+Assert-True (($r.Installed -join ',') -eq 'bugdom' -and ($r.Current -join ',') -eq 'crossdock,carryout') 'only the missing package counts as installed now'
+
+$script:GooCalls = @(); $script:GooInstalled = @('crossdock', 'carryout')
+$r = Invoke-GooGetPackageSet -Packages $set -NoUpgrade 6>$null
+Assert-True ((@($script:GooCalls | Where-Object { $_ -like '*|install|*' }) -join "`n") -eq "$installPrefix|bugdom") '-NoUpgrade installs only the missing package'
+$script:GooCalls = @()
+$r = Invoke-GooGetPackageSet -Packages $set -NoUpgrade 6>$null
+Assert-True (@($script:GooCalls | Where-Object { $_ -like '*|install|*' }).Count -eq 0 -and ($r.Current -join ',') -eq 'crossdock,carryout,bugdom') '-NoUpgrade with everything present runs no install'
+
+$script:GooCalls = @(); $script:GooReachable = $false
+$r = Invoke-GooGetPackageSet -Packages $set 6>$null
+Assert-True ($script:GooCalls.Count -eq 0 -and ($r.Deferred -join ',') -eq 'crossdock,carryout,bugdom' -and $r.Failed.Count -eq 0) 'an unreachable enthoo defers every package without calling googet'
+$script:GooReachable = $true
+
+$savedExe = $script:GooExe; $script:GooExe = $null
+$r = Invoke-GooGetPackageSet -Packages $set 6>$null
+Assert-True (($r.Deferred -join ',') -eq 'crossdock,carryout,bugdom' -and $r.Failed.Count -eq 0) 'packages wait for googet to be built'
+$script:GooExe = $savedExe
+
+$script:GooInstalled = @('crossdock'); $script:GooInstallsAll = $false; $script:GooInstallExit = 1
+$r = Invoke-GooGetPackageSet -Packages $set 6>$null 3>$null
+Assert-True (($r.Failed -join ',') -eq 'carryout,bugdom' -and ($r.Current -join ',') -eq 'crossdock' -and $r.Installed.Count -eq 0) 'a failed googet install reports the packages still missing'
+$script:GooInstalled = @('crossdock', 'carryout', 'bugdom')
+$r = Invoke-GooGetPackageSet -Packages $set 6>$null 3>$null
+Assert-True (($r.Failed -join ',') -eq 'crossdock,carryout,bugdom') 'a non-zero googet install exit with nothing missing is still a failure'
+$script:GooInstallsAll = $true; $script:GooInstallExit = 0
+
+function Invoke-GooGetCommand { param([string]$Exe, [string]$Root, [string[]]$Arguments) $script:GooCalls += "$Exe|$Root|$($Arguments -join '|')"; 'Error: database is locked'; $global:LASTEXITCODE = 1 }
+$r = Invoke-GooGetPackageSet -Packages $set 6>$null 3>$null
+Assert-True (($r.Failed -join ',') -eq 'crossdock,carryout,bugdom') 'a failing googet installed query fails the set'
+foreach ($name in @('Get-GooGetRoot', 'Get-GooGetInstall', 'Test-GooGetRepoReachable', 'Invoke-GooGetCommand')) {
+    Remove-Item -Path "function:$name" -ErrorAction SilentlyContinue
+}
+# The probe reads the index googet itself uses: index.gz, then index.
+. ([scriptblock]::Create($ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Test-GooGetRepoReachable' }, $true).Extent.Text))
+$script:ProbeUrls = @(); $script:ProbeOk = @()
+Set-Item -Path function:Invoke-WebRequest -Value {
+    param([string]$Uri, [switch]$UseBasicParsing, [int]$TimeoutSec)
+    if (-not $UseBasicParsing) { throw 'the probe must use basic parsing (no IE engine on Server Core)' }
+    $script:ProbeUrls += "$Uri|$TimeoutSec"
+    if ($script:ProbeOk -notcontains $Uri) { throw 'unreachable' }
+}
+Assert-True (-not (Test-GooGetRepoReachable)) 'an unreachable repo fails the probe'
+Assert-True (($script:ProbeUrls -join ',') -eq "$GooGetRepoUrl/index.gz|5,$GooGetRepoUrl/index|5") 'the probe tries index.gz then index with a short timeout'
+$script:ProbeOk = @("$GooGetRepoUrl/index")
+Assert-True (Test-GooGetRepoReachable) 'an uncompressed index counts as reachable'
+Remove-Item -Path function:Invoke-WebRequest, function:Test-GooGetRepoReachable -ErrorAction SilentlyContinue
+Write-Output 'GAME-PACKAGES GOOGET PASSED'
+
 Write-Output 'ALL WIN11 PROFILE ASSERTIONS PASSED'

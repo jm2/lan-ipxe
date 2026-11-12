@@ -203,8 +203,24 @@ them `-Profile`, `-Check`, `-DryRun`, `-NoUpgrade`):
   disabled: no manager exists yet, and an agent newer than its manager cannot connect.
 
 Every platform installs Balun alongside Tributary in core (`balun` from the
-`jmsqrd/balun` COPR on Fedora, `balun-bin` from the AUR on Arch, release apps on macOS
-and Windows). Fedora and Arch also install Switchworks, the coding-agent control plane
+`jmsqrd/balun` COPR on Fedora, `balun-bin` on Arch, release apps on macOS
+and Windows). Fedora, Arch and Windows also install jm2's crossdock and carryout in
+core (the `jmsqrd/crossdock` and `jmsqrd/carryout` COPRs on Fedora, `crossdock-bin` and
+`carryout-bin` on Arch, the `crossdock` and `carryout` GooGet packages on Windows).
+
+Anything the LAN's game-packages repository (crossdock on enthoo, built from
+jm2/game-packages) publishes comes from it in place of the AUR, Flathub or nothing: on
+Arch `balun-bin`, `tributary-bin`, `crossdock-bin`, `carryout-bin` and, in full,
+`bugdom`, `bugdom2`, `cro-mag-rally-net-bin`, `mightymike`, `nanosaur`, `nanosaur2`,
+`ottomatic` and `steamcmd`; on Fedora's full profile the same Pangea games as RPMs
+(x86_64 and aarch64) instead of the `io.jor.*` Flatpaks; on Windows `crossdock` and
+`carryout`, plus that game set in full, through GooGet. Cro-Mag Rally is always jm2's
+LAN-multiplayer fork (`cro-mag-rally-net`), never upstream's build, which Fedora now
+removes. Off the LAN the scripts carry on: Arch installs the AUR builds and Fedora the
+Flatpaks (no fallback for the Cro-Mag Rally fork), Windows defers its GooGet packages,
+and a later run on the LAN moves each to the repository build. COPR and vendor WinGet
+packages stay where they are: game-packages deliberately builds no Fedora package
+for software with its own COPR. Fedora and Arch also install Switchworks, the coding-agent control plane
 (`switchworks` from the `jmsqrd/switchworks` COPR on Fedora; on Arch, the
 `switchworks-x86_64.pkg.tar.zst` asset of its latest GitHub release, verified against
 the release's published SHA-256 and installed with `pacman -U`). Fedora and Arch also install Cockpit with file management, package
@@ -391,6 +407,12 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   `repos\linux-packages.repo` written before the rename is removed while it still holds
   what the script wrote.
   googet needs `GooGetRoot`, so shells opened before the first run must be reopened.
+  From that repo, core installs `crossdock` and `carryout` (jm2 tools with no WinGet
+  package) and full adds the Linux full profile's games: `bugdom`, `bugdom2`,
+  `cro-mag-rally-net` (jm2's LAN-multiplayer Cro-Mag Rally), `mightymike`, `nanosaur`,
+  `nanosaur2` and `ottomatic`. Each run installs what is missing and runs `googet
+  install` over the rest so they move to the repo's latest (missing only with
+  `-NoUpgrade`); while enthoo does not answer they are reported as deferred, not failed.
   Full adds Steam, GOG Galaxy, the
   SuperTux games, benchmarks, Plex, iTunes, HDHomeRun, MakeMKV, and Google Drive.
 

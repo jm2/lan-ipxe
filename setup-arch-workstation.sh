@@ -31,8 +31,8 @@
 # upgrade, so use it only for short offline-ish reruns.
 #
 # What it does, in order:
-#   1. full only: enables [multilib] in /etc/pacman.conf (core leaves it as is)
-#      and adds the LAN's game-packages repository (crossdock on enthoo): its
+#   1. full only: enables [multilib] in /etc/pacman.conf (core leaves it as is);
+#      every profile adds the LAN's game-packages repository (crossdock on enthoo): its
 #      signing key, pinned by fingerprint and locally signed in pacman's
 #      keyring, and an `Include = /etc/pacman.d/game-packages.conf` line. That
 #      file holds the [game-packages] section only while crossdock answers;
@@ -40,8 +40,11 @@
 #      dispatcher hook and the daily pacman-update job, so pacman -Syu keeps
 #      working off the LAN (pacman fails a sync when any repository is down)
 #   2. pacman -Syu, replaces jre-openjdk and distro rust with jdk-openjdk and
-#      rustup, then installs the official-repo package set and the per-user
-#      rustup stable toolchain (rustfmt, clippy, rust-analyzer)
+#      rustup, then installs the official-repo package set, the packages
+#      game-packages publishes (balun, tributary, crossdock, carryout; full adds
+#      the Pangea games including jm2's Cro-Mag Rally fork, and steamcmd) from
+#      that repository while crossdock answers (their AUR builds otherwise),
+#      and the per-user rustup stable toolchain (rustfmt, clippy, rust-analyzer)
 #   3. installs dotfiles (~/.bashrc, ~/.vimrc) and system config from files/:
 #      /etc/default/grub (+ grub-mkconfig), /etc/bash.bashrc, /etc/locale.conf,
 #      locale generation, the inotify sysctl limit, zram, the daily
@@ -339,7 +342,6 @@ PKGS_AUR_CORE=(
   android-sdk-cmdline-tools-latest
   android-sdk-platform-tools
   android-studio
-  balun-bin
   # Charm's own AUR package (published by its release pipeline).
   crush-bin
   downgrade
@@ -356,7 +358,6 @@ PKGS_AUR_CORE=(
   powershell-bin
   qdl
   sit-git
-  tributary-bin
   ventoy-bin
   wazuh-agent
 )
@@ -365,24 +366,40 @@ PKGS_AUR_CORE=(
 # and desktop media
 PKGS_AUR_FULL=(
   airshipper
-  bugdom
-  bugdom2
-  cro-mag-rally-net
   dxvk-bin
   lgogdownloader
   luxtorpeda-bin
   maelstrom
   makemkv
   maniadrive
-  mightymike
-  nanosaur
-  nanosaur2
   openarena
-  ottomatic
-  steamcmd
   tremulous-grangerhub-bin
   tuxracer
   unigine-heaven
+)
+
+# Packages the LAN's game-packages repository (crossdock on enthoo) publishes,
+# as "repository package|AUR fallback". They install from the repository
+# whenever crossdock answers, which also replaces an AUR build installed
+# earlier: a same-named one is upgraded from the repository by the next sync,
+# a differently named one is removed for its repository successor. Off the
+# LAN, the AUR fallback installs in the AUR phase instead.
+GAME_REPO_PKGS_CORE=(
+  "balun-bin|balun-bin"
+  "carryout-bin|carryout-bin"
+  "crossdock-bin|crossdock-bin"
+  "tributary-bin|tributary-bin"
+)
+GAME_REPO_PKGS_FULL=(
+  "bugdom|bugdom"
+  "bugdom2|bugdom2"
+  # jm2's LAN-multiplayer fork; replaces the source-built AUR package.
+  "cro-mag-rally-net-bin|cro-mag-rally-net"
+  "mightymike|mightymike"
+  "nanosaur|nanosaur"
+  "nanosaur2|nanosaur2"
+  "ottomatic|ottomatic"
+  "steamcmd|steamcmd"
 )
 
 SERVICES=(
@@ -432,6 +449,8 @@ MANAGED_FILES=(
   "root|usr/local/libexec/clamav-media-scan|/usr/local/libexec/clamav-media-scan|0755"
   "root|etc/systemd/system/aide-check.service|/etc/systemd/system/aide-check.service|0644"
   "root|etc/systemd/system/aide-check.timer|/etc/systemd/system/aide-check.timer|0644"
+  "root|usr/local/libexec/game-packages-repo|/usr/local/libexec/game-packages-repo|0755"
+  "root|etc/NetworkManager/dispatcher.d/50-game-packages|/etc/NetworkManager/dispatcher.d/50-game-packages|0755"
 )
 
 log()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
@@ -501,10 +520,11 @@ if [[ -n ${WAZUH_MANAGER} && ! ${WAZUH_MANAGER} =~ ^[A-Za-z0-9._:-]+$ ]]; then
   die "--wazuh-manager must be a host name or address: ${WAZUH_MANAGER}"
 fi
 
-# select_profile <core|full>: rebuild PKGS_OFFICIAL and PKGS_AUR from the core
+# select_profile <core|full>: rebuild PKGS_OFFICIAL, PKGS_AUR and GAME_REPO_PKGS from the core
 # lists plus, for full, the game/media extras. Safe to call repeatedly.
 PKGS_OFFICIAL=()
 PKGS_AUR=()
+GAME_REPO_PKGS=()
 FIREWALL_LAN_SERVICES=()
 select_profile() {
   case $1 in
@@ -513,6 +533,7 @@ select_profile() {
   esac
   PKGS_OFFICIAL=("${PKGS_OFFICIAL_CORE[@]}")
   PKGS_AUR=("${PKGS_AUR_CORE[@]}")
+  GAME_REPO_PKGS=("${GAME_REPO_PKGS_CORE[@]}")
   # LAN-reachable services for the source-bound workstation-lan zone. SSH is
   # listed too: firewalld puts each packet in exactly one zone, so LAN peers
   # never fall through to the default workstation zone (where SSH stays
@@ -528,12 +549,9 @@ select_profile() {
   if [[ $1 == full ]]; then
     PKGS_OFFICIAL+=("${PKGS_OFFICIAL_FULL[@]}")
     PKGS_AUR+=("${PKGS_AUR_FULL[@]}")
+    GAME_REPO_PKGS+=("${GAME_REPO_PKGS_FULL[@]}")
     # Steam joins the LAN zone with the full profile that installs it.
     FIREWALL_LAN_SERVICES+=(steam-streaming)
-    MANAGED_FILES+=(
-      "root|usr/local/libexec/game-packages-repo|/usr/local/libexec/game-packages-repo|0755"
-      "root|etc/NetworkManager/dispatcher.d/50-game-packages|/etc/NetworkManager/dispatcher.d/50-game-packages|0755"
-    )
   fi
 }
 select_profile "${PROFILE}"
@@ -554,6 +572,54 @@ game_packages_key_trusted() {
   gpg --homedir /etc/pacman.d/gnupg --no-permission-warning --no-auto-check-trustdb \
       --batch --with-colons --list-keys -- "${GAME_PACKAGES_KEY_FPR}" 2>/dev/null \
     | awk -F: '$1 == "pub" { found = 1; ok = ($2 == "f" || $2 == "u") } END { exit !(found && ok) }'
+}
+
+# game_packages_repo_synced: true when pacman has [game-packages] (crossdock
+# answered at the last network change) and its sync database is present.
+game_packages_repo_synced() {
+  pacman-conf --repo-list 2>/dev/null | grep -qx game-packages \
+    && pacman -Sl game-packages &>/dev/null
+}
+
+# install_game_repo_pkgs: installs GAME_REPO_PKGS from game-packages when it is
+# reachable (replacing differently named AUR builds) and otherwise leaves each
+# missing one's AUR fallback in GAME_REPO_AUR_FALLBACK for the AUR phase.
+GAME_REPO_AUR_FALLBACK=()
+install_game_repo_pkgs() {
+  local entry repo aur want=() replace=()
+  GAME_REPO_AUR_FALLBACK=()
+  if ! game_packages_repo_synced; then
+    for entry in "${GAME_REPO_PKGS[@]}"; do
+      repo=${entry%%|*} aur=${entry#*|}
+      pacman -Q "${repo}" &>/dev/null || GAME_REPO_AUR_FALLBACK+=("${aur}")
+    done
+    note "game-packages unreachable: ${GAME_REPO_AUR_FALLBACK[*]:-nothing} from the AUR instead this run"
+    return 0
+  fi
+  for entry in "${GAME_REPO_PKGS[@]}"; do
+    repo=${entry%%|*} aur=${entry#*|}
+    pacman -Q "${repo}" &>/dev/null && (( NO_UPGRADE )) && continue
+    if [[ ${aur} != "${repo}" ]] && pacman -Q "${aur}" &>/dev/null; then
+      (( NO_UPGRADE )) && continue
+      replace+=("${aur}")
+    elif (( NO_UPGRADE )) && pacman -Q "${aur}" &>/dev/null; then
+      continue
+    fi
+    want+=("${repo}")
+  done
+  if (( ${#replace[@]} )); then
+    sudo pacman -Rns --noconfirm "${replace[@]}" \
+      || die "could not remove AUR builds replaced by game-packages: ${replace[*]}"
+    note "removed AUR builds replaced by game-packages: ${replace[*]}"
+  fi
+  if (( ${#want[@]} )); then
+    sudo pacman -S --needed --noconfirm "${want[@]}" \
+      || die "could not install from game-packages: ${want[*]}"
+    for repo in "${want[@]}"; do
+      pacman -Q "${repo}" &>/dev/null || die "${repo} is not installed after installing it from game-packages"
+    done
+  fi
+  note "game-packages: ${#GAME_REPO_PKGS[@]} package(s) from the LAN repository"
 }
 
 # pacman_conf_has_game_packages_include [file]: true when the pacman config
@@ -1841,26 +1907,24 @@ run_check() {
   else
     report CURRENT "[multilib]: not required by the core profile"
   fi
-  if [[ ${PROFILE} == full ]]; then
-    if game_packages_key_trusted; then
-      report CURRENT "game-packages signing key: trusted in pacman's keyring"
-    else
-      report DRIFT "game-packages signing key ${GAME_PACKAGES_KEY_FPR}: not locally signed in pacman's keyring"
-    fi
-    if pacman_conf_has_game_packages_include; then
-      report CURRENT "/etc/pacman.conf: includes ${GAME_PACKAGES_CONF}"
-    else
-      report DRIFT "/etc/pacman.conf: missing '${GAME_PACKAGES_INCLUDE}'"
-    fi
-    if [[ ! -f ${GAME_PACKAGES_CONF} || -L ${GAME_PACKAGES_CONF} ]]; then
-      report DRIFT "${GAME_PACKAGES_CONF}: missing"
-    elif [[ ! -s ${GAME_PACKAGES_CONF} ]]; then
-      report CURRENT "${GAME_PACKAGES_CONF}: empty (crossdock was unreachable at the last network change)"
-    elif [[ $(cat -- "${GAME_PACKAGES_CONF}"; printf x) == "$("${FILES}/usr/local/libexec/game-packages-repo" --section; printf x)" ]]; then
-      report CURRENT "${GAME_PACKAGES_CONF}: [game-packages] enabled (crossdock reachable)"
-    else
-      report DRIFT "${GAME_PACKAGES_CONF}: neither empty nor the expected [game-packages] section"
-    fi
+  if game_packages_key_trusted; then
+    report CURRENT "game-packages signing key: trusted in pacman's keyring"
+  else
+    report DRIFT "game-packages signing key ${GAME_PACKAGES_KEY_FPR}: not locally signed in pacman's keyring"
+  fi
+  if pacman_conf_has_game_packages_include; then
+    report CURRENT "/etc/pacman.conf: includes ${GAME_PACKAGES_CONF}"
+  else
+    report DRIFT "/etc/pacman.conf: missing '${GAME_PACKAGES_INCLUDE}'"
+  fi
+  if [[ ! -f ${GAME_PACKAGES_CONF} || -L ${GAME_PACKAGES_CONF} ]]; then
+    report DRIFT "${GAME_PACKAGES_CONF}: missing"
+  elif [[ ! -s ${GAME_PACKAGES_CONF} ]]; then
+    report CURRENT "${GAME_PACKAGES_CONF}: empty (crossdock was unreachable at the last network change)"
+  elif [[ $(cat -- "${GAME_PACKAGES_CONF}"; printf x) == "$("${FILES}/usr/local/libexec/game-packages-repo" --section; printf x)" ]]; then
+    report CURRENT "${GAME_PACKAGES_CONF}: [game-packages] enabled (crossdock reachable)"
+  else
+    report DRIFT "${GAME_PACKAGES_CONF}: neither empty nor the expected [game-packages] section"
   fi
 
   pacman -Q antigravity-ide &>/dev/null \
@@ -1923,6 +1987,15 @@ run_check() {
   done <<<"${group_output}"
   check_packages official "${PKGS_OFFICIAL[@]}"
   check_packages AUR "${PKGS_AUR[@]}"
+  for entry in "${GAME_REPO_PKGS[@]}"; do
+    if pacman -Q "${entry%%|*}" &>/dev/null; then
+      report CURRENT "game-packages package ${entry%%|*}"
+    elif pacman -Q "${entry#*|}" &>/dev/null; then
+      report NOTE "${entry#*|}: AUR fallback for game-packages ${entry%%|*} (replaced on a run that reaches the LAN)"
+    else
+      report DRIFT "game-packages package ${entry%%|*}: not installed (nor its AUR fallback ${entry#*|})"
+    fi
+  done
 
   rustup_state
   if (( RUSTUP_TOOLCHAIN_PRESENT && RUSTUP_DEFAULT_SET && ! ${#RUSTUP_MISSING_COMPONENTS[@]} )); then
@@ -2032,6 +2105,10 @@ print_plan() {
   else
     printf 'PLAN: yay -Sua --devel (interactive review)\n'
   fi
+  printf 'PLAN: game-packages repository (LAN; AUR fallback off the LAN) (%s):\n' "${#GAME_REPO_PKGS[@]}"
+  for package in "${GAME_REPO_PKGS[@]}"; do
+    printf '  %s (AUR fallback %s)\n' "${package%%|*}" "${package#*|}"
+  done
   printf 'PLAN: install missing AUR packages (%s):\n' "${#PKGS_AUR[@]}"
   for package in "${PKGS_AUR[@]}"; do
     printf '  %s\n' "${package}"
@@ -2114,45 +2191,43 @@ else
 fi
 
 #--- 1b. game-packages (LAN) ------------------------------------------------
-# Games and engines built from jm2/game-packages, served by crossdock on
-# enthoo. Only the full profile installs games. Core leaves an existing setup
-# alone.
-if [[ ${PROFILE} == full ]]; then
-  log "game-packages repository (LAN)"
-  [[ $(game_packages_key_fpr) == "${GAME_PACKAGES_KEY_FPR}" ]] \
-    || die "files/keys/game-packages.asc is not the pinned key ${GAME_PACKAGES_KEY_FPR}"
-  if game_packages_key_trusted; then
-    note "signing key: trusted"
-  else
-    sudo pacman-key --add "${GAME_PACKAGES_KEY}"
-    sudo pacman-key --lsign-key "${GAME_PACKAGES_KEY_FPR}"
-    game_packages_key_trusted || die "the game-packages key is still not trusted after pacman-key --lsign-key"
-    note "signing key: added and locally signed"
+# Games, engines and jm2 tools built from jm2/game-packages, served by
+# crossdock on enthoo. Every profile uses it (GAME_REPO_PKGS); the full
+# profile adds the games.
+log "game-packages repository (LAN)"
+[[ $(game_packages_key_fpr) == "${GAME_PACKAGES_KEY_FPR}" ]] \
+  || die "files/keys/game-packages.asc is not the pinned key ${GAME_PACKAGES_KEY_FPR}"
+if game_packages_key_trusted; then
+  note "signing key: trusted"
+else
+  sudo pacman-key --add "${GAME_PACKAGES_KEY}"
+  sudo pacman-key --lsign-key "${GAME_PACKAGES_KEY_FPR}"
+  game_packages_key_trusted || die "the game-packages key is still not trusted after pacman-key --lsign-key"
+  note "signing key: added and locally signed"
+fi
+put_file -s "${FILES}/usr/local/libexec/game-packages-repo" /usr/local/libexec/game-packages-repo 0755
+put_file -s "${FILES}/etc/NetworkManager/dispatcher.d/50-game-packages" /etc/NetworkManager/dispatcher.d/50-game-packages 0755
+# Write the include target first: pacman refuses a missing Include file.
+sudo "${GAME_PACKAGES_TOGGLE}"
+if grep -q '^\[game-packages\]' "${GAME_PACKAGES_CONF}"; then
+  note "crossdock reachable: [game-packages] enabled"
+else
+  note "crossdock unreachable: [game-packages] stays off until the LAN answers"
+fi
+if pacman_conf_has_game_packages_include; then
+  note "/etc/pacman.conf: includes ${GAME_PACKAGES_CONF}"
+else
+  cp -- /etc/pacman.conf "${WORK_DIR}/pacman.conf"
+  printf '\n# LAN game-packages repository: the included file is empty off the LAN\n# (rewritten by %s).\n%s\n' \
+    "${GAME_PACKAGES_TOGGLE}" "${GAME_PACKAGES_INCLUDE}" >>"${WORK_DIR}/pacman.conf"
+  pacman-conf --config "${WORK_DIR}/pacman.conf" --repo-list >/dev/null 2>&1 \
+    || die "the generated pacman.conf with the game-packages Include is invalid"
+  if [[ ! -e /etc/pacman.conf.pre-workstation ]]; then
+    sudo cp -a -- /etc/pacman.conf /etc/pacman.conf.pre-workstation
+    note "saved /etc/pacman.conf.pre-workstation"
   fi
-  put_file -s "${FILES}/usr/local/libexec/game-packages-repo" /usr/local/libexec/game-packages-repo 0755
-  put_file -s "${FILES}/etc/NetworkManager/dispatcher.d/50-game-packages" /etc/NetworkManager/dispatcher.d/50-game-packages 0755
-  # Write the include target first: pacman refuses a missing Include file.
-  sudo "${GAME_PACKAGES_TOGGLE}"
-  if grep -q '^\[game-packages\]' "${GAME_PACKAGES_CONF}"; then
-    note "crossdock reachable: [game-packages] enabled"
-  else
-    note "crossdock unreachable: [game-packages] stays off until the LAN answers"
-  fi
-  if pacman_conf_has_game_packages_include; then
-    note "/etc/pacman.conf: includes ${GAME_PACKAGES_CONF}"
-  else
-    cp -- /etc/pacman.conf "${WORK_DIR}/pacman.conf"
-    printf '\n# LAN game-packages repository: the included file is empty off the LAN\n# (rewritten by %s).\n%s\n' \
-      "${GAME_PACKAGES_TOGGLE}" "${GAME_PACKAGES_INCLUDE}" >>"${WORK_DIR}/pacman.conf"
-    pacman-conf --config "${WORK_DIR}/pacman.conf" --repo-list >/dev/null 2>&1 \
-      || die "the generated pacman.conf with the game-packages Include is invalid"
-    if [[ ! -e /etc/pacman.conf.pre-workstation ]]; then
-      sudo cp -a -- /etc/pacman.conf /etc/pacman.conf.pre-workstation
-      note "saved /etc/pacman.conf.pre-workstation"
-    fi
-    put_file -s "${WORK_DIR}/pacman.conf" /etc/pacman.conf
-    pacman_conf_has_game_packages_include || die "/etc/pacman.conf still lacks the game-packages Include"
-  fi
+  put_file -s "${WORK_DIR}/pacman.conf" /etc/pacman.conf
+  pacman_conf_has_game_packages_include || die "/etc/pacman.conf still lacks the game-packages Include"
 fi
 
 # Capture boot-package state so kernel, microcode, GRUB, NVIDIA, and initramfs
@@ -2196,6 +2271,9 @@ if (( ${#MISSING_PKGS[@]} )); then
 else
   note "all ${#WANTED_PKGS[@]} packages present"
 fi
+
+log "game-packages packages (${#GAME_REPO_PKGS[@]}; AUR fallback off the LAN)"
+install_game_repo_pkgs
 
 log "Rust (rustup stable toolchain)"
 configure_rustup_toolchain
@@ -2628,6 +2706,7 @@ else
   yay -Sua --devel
 fi
 
+PKGS_AUR+=("${GAME_REPO_AUR_FALLBACK[@]}")
 log "AUR package set (${#PKGS_AUR[@]} entries)"
 find_missing_pkgs "${PKGS_AUR[@]}"
 if (( ${#MISSING_PKGS[@]} )); then
@@ -2638,7 +2717,7 @@ else
 fi
 
 verify_native_ai_tools_arch
-for command_name in claude code codex crush goose zed; do
+for command_name in carryout claude code codex crossdock crush goose zed; do
   PATH="${HOME}/.local/bin:${PATH}" command -v "${command_name}" >/dev/null \
     || die "expected workstation command is unavailable: ${command_name}"
 done

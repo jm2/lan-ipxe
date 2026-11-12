@@ -68,7 +68,12 @@ as presence-only or -NoUpgrade is given.
      moved.
      googet.conf allows plain-HTTP repos and repos\game-packages.repo points
      at crossdock's game-packages GooGet repo on enthoo. The repo file from
-     before the rename (repos\linux-packages.repo) is removed.
+     before the rename (repos\linux-packages.repo) is removed. From that repo,
+     core installs crossdock and carryout and full adds the Linux full
+     profile's games (bugdom, bugdom2, cro-mag-rally-net, mightymike,
+     nanosaur, nanosaur2, ottomatic): missing ones are installed, installed
+     ones updated to the repo's latest (missing only with -NoUpgrade), and
+     everything is deferred while enthoo is unreachable.
 
 Exit codes: 0 converged (or -DryRun), 1 error/failed install, 2 drift found by
 -Check.
@@ -309,6 +314,15 @@ $GooGetRepoUrl = 'http://192.168.1.11:8080/goo/game-packages'
 # Repo files this script wrote under earlier names, by name and URL. Apply
 # removes one only while it still holds exactly what was written, so a repo
 # someone set up by hand under the same name stays.
+# Packages installed from the game-packages GooGet repo. Core: jm2 tools with
+# no WinGet package (Tributary and Balun stay on their vendor WinGet sources).
+# Full adds the game set the Linux full profiles install: the Pangea ports,
+# with Cro-Mag Rally as jm2's LAN-multiplayer fork. Real package names only:
+# googet 3.4.1 cannot install a dependency that only a Provides satisfies.
+$GooGetPackages = @('crossdock', 'carryout')
+$GooGetFullPackages = @('bugdom', 'bugdom2', 'cro-mag-rally-net', 'mightymike', 'nanosaur', 'nanosaur2', 'ottomatic')
+# The repo is LAN-only; a short probe keeps an off-LAN run from waiting on it.
+$GooGetProbeTimeoutSeconds = 5
 $GooGetRetiredRepos = @(
     @{ Name = 'linux-packages'; Url = 'http://192.168.1.11:8080/goo/linux-packages' }
 )
@@ -1959,6 +1973,98 @@ function Invoke-GooGetStep {
     }
 }
 
+#--- game-packages GooGet packages -----------------------------------------
+# googet with the root passed explicitly: shells started before GooGetRoot
+# was set machine-wide do not have it. Output and $LASTEXITCODE pass through.
+function Invoke-GooGetCommand {
+    param(
+        [Parameter(Mandatory = $true)][string]$Exe,
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string[]]$Arguments
+    )
+    & $Exe -root $Root @Arguments
+}
+
+# Pure: package names from `googet installed` output ("  <name>.<arch> <ver>").
+function Get-GooGetInstalledName {
+    param([AllowEmptyCollection()][string[]]$Lines = @())
+    foreach ($line in $Lines) {
+        if ([string]$line -match '^\s+(?<Name>\S+)\.(?<Arch>noarch|x86_64|x86_32|arm64)\s+\S+\s*$') { $Matches.Name }
+    }
+}
+
+# Installed package names. `googet installed` exits 1 when nothing is
+# installed, which is not an error.
+function Get-GooGetInstalledPackage {
+    param([Parameter(Mandatory = $true)][string]$Exe, [Parameter(Mandatory = $true)][string]$Root)
+    $output = @(Invoke-GooGetCommand -Exe $Exe -Root $Root -Arguments @('installed') 2>&1 | ForEach-Object { [string]$_ })
+    if ($LASTEXITCODE -ne 0 -and -not ($output -match '^Installed packages:')) {
+        throw "googet installed exited with $LASTEXITCODE`: $($output -join ' ')"
+    }
+    return @(Get-GooGetInstalledName -Lines $output)
+}
+
+# googet reads <repo>/index.gz, falling back to <repo>/index.
+function Test-GooGetRepoReachable {
+    foreach ($index in @('index.gz', 'index')) {
+        try {
+            Invoke-WebRequest -Uri "$GooGetRepoUrl/$index" -UseBasicParsing -TimeoutSec $GooGetProbeTimeoutSeconds | Out-Null
+            return $true
+        }
+        catch {
+            Write-Verbose "game-packages probe $index`: $($_.Exception.Message)"
+        }
+    }
+    return $false
+}
+
+# Installs the missing packages and, unless -NoUpgrade, brings installed ones
+# to the repo's latest (googet install upgrades an older installed version
+# and skips a current one). Off the LAN, or before googet exists, everything
+# is deferred to a later run rather than failed.
+function Invoke-GooGetPackageSet {
+    param([Parameter(Mandatory = $true)][string[]]$Packages, [switch]$NoUpgrade)
+    $result = [pscustomobject]@{ Current = @(); Installed = @(); Deferred = @(); Failed = @() }
+    $googet = Get-GooGetInstall
+    if (-not $googet) {
+        Write-Note 'game-packages: googet is not built yet; these install on a later run'
+        $result.Deferred = @($Packages)
+        return $result
+    }
+    if (-not (Test-GooGetRepoReachable)) {
+        Write-Note "game-packages: $GooGetRepoUrl is unreachable; $($Packages -join ', ') install from it once enthoo answers"
+        $result.Deferred = @($Packages)
+        return $result
+    }
+    $root = Get-GooGetRoot
+    try {
+        $before = @(Get-GooGetInstalledPackage -Exe $googet.Exe -Root $root)
+        $missing = @($Packages | Where-Object { $before -notcontains $_ })
+        $targets = if ($NoUpgrade) { $missing } else { @($Packages) }
+        if ($targets.Count) {
+            Write-Note "game-packages: googet install $($targets -join ' ')"
+            Invoke-GooGetCommand -Exe $googet.Exe -Root $root -Arguments (@('-noconfirm', 'install') + $targets) | Out-Host
+            $code = $LASTEXITCODE
+            $after = @(Get-GooGetInstalledPackage -Exe $googet.Exe -Root $root)
+            $result.Failed = @($Packages | Where-Object { $after -notcontains $_ })
+            if ($code -ne 0 -and -not $result.Failed.Count) {
+                Write-Warning "game-packages: googet install exited with $code"
+                $result.Failed = @($targets)
+            }
+        }
+        $result.Installed = @($missing | Where-Object { $result.Failed -notcontains $_ })
+        $result.Current = @($Packages | Where-Object { $missing -notcontains $_ -and $result.Failed -notcontains $_ })
+    }
+    catch {
+        Write-Warning "game-packages: $($_.Exception.Message)"
+        $result.Failed = @($Packages)
+        $result.Installed = @()
+        $result.Current = @()
+    }
+    foreach ($name in $result.Failed) { Write-Warning "game-packages: $name is not installed" }
+    return $result
+}
+
 # Mirrors enable-openssh-win11.ps1 (which -Check cannot run unelevated):
 # installing the OpenSSH.Server capability registers sshd on the inbox binary.
 function Test-InboxSshdService {
@@ -1987,6 +2093,7 @@ if ($Check -and $DryRun) {
 $mode = if ($DryRun) { 'dry-run' } elseif ($Check) { 'check' } else { 'apply' }
 if ($WorkstationProfile -eq 'full') {
     $WingetPackages += $WingetFullPackages
+    $GooGetPackages += $GooGetFullPackages
 }
 Write-Step "Profile: $WorkstationProfile; mode: $mode"
 
@@ -2037,6 +2144,9 @@ if ($DryRun) {
     Write-Note '    into %ProgramData%\GooGet with GooGetRoot, the machine PATH entry and ACLs as googet''s install.ps1 sets them;'
     Write-Note "    googet.conf allowunsafeurl: true; repo $GooGetRepoName -> $GooGetRepoUrl"
     foreach ($r in $GooGetRetiredRepos) { Write-Note "    removes repos\$($r.Name).repo while it still points at $($r.Url)" }
+    $gooPolicy = if ($NoUpgrade) { 'install if missing (-NoUpgrade)' } else { 'install if missing, otherwise update to the repo''s latest' }
+    Write-Note "game-packages GooGet packages ($gooPolicy; deferred while enthoo is unreachable):"
+    foreach ($name in $GooGetPackages) { Write-Note "    $name" }
     exit 0
 }
 
@@ -2146,6 +2256,20 @@ if ($Check) {
     Write-State ($null -ne $googet -and [bool]$googet.Commit) 'googet.exe' $googetDetail
     $googetDrift = @(Get-GooGetConfigurationDrift)
     Write-State ($googetDrift.Count -eq 0) "GooGet configuration ($GooGetRepoName repo)" $(if ($googetDrift.Count) { 'missing ' + ($googetDrift -join ', ') } else { '' })
+    if ($googet) {
+        try {
+            $gooInstalled = @(Get-GooGetInstalledPackage -Exe $googet.Exe -Root (Get-GooGetRoot))
+            foreach ($name in $GooGetPackages) {
+                Write-State ($gooInstalled -contains $name) "$name (game-packages)" $(if ($gooInstalled -contains $name) { '' } else { 'not installed' })
+            }
+        }
+        catch {
+            Write-Note "NOTE    game-packages packages: not queried ($($_.Exception.Message))"
+        }
+    }
+    else {
+        Write-Note "NOTE    game-packages packages ($($GooGetPackages -join ', ')): googet is not installed; they install after it"
+    }
 
     Write-Step 'Summary'
     Write-Note "$script:DriftCount drifted item(s)"
@@ -2259,6 +2383,9 @@ Write-Step 'GooGet (built from source) and the game-packages repo'
 $googetResult = Invoke-GooGetStep -NoUpgrade:$NoUpgrade
 Write-Note "GooGet: $googetResult"
 
+Write-Step "game-packages GooGet packages ($($GooGetPackages.Count) entries)"
+$gooResult = Invoke-GooGetPackageSet -Packages $GooGetPackages -NoUpgrade:$NoUpgrade
+
 #--- Summary ----------------------------------------------------------------
 Write-Step 'Summary'
 Write-Note "winget: $($wingetResult.Installed.Count) installed now, $($wingetResult.UpdatedOrCurrent.Count) updated/current, $($wingetResult.Present.Count) presence-only, $($wingetResult.RemovedLegacy.Count) legacy removed, $($wingetResult.Deferred.Count) deferred, $($wingetResult.Failed.Count) failed"
@@ -2274,4 +2401,7 @@ Write-Note "OpenCode native installs: $($openCodeResult.Removed.Count) removed, 
 if ($openCodeResult.Failed.Count) { Write-Note "failed: $($openCodeResult.Failed -join ', ')" }
 if ($balunResult -eq 'deferred') { Write-Note 'deferred (re-run after a reboot): Balun' }
 if ($googetResult -eq 'deferred') { Write-Note 'deferred (re-run once Go is installed): GooGet' }
-if ($wingetResult.Failed.Count -or $openCodeResult.Failed.Count -or $nativeResult.Failed.Count -or $rustResult -eq 'failed' -or $balunResult -eq 'failed' -or $gooseDesktopResult -eq 'failed' -or $pwshResult -eq 'failed' -or $googetResult -eq 'failed') { exit 1 }
+Write-Note "game-packages: $($gooResult.Installed.Count) installed now, $($gooResult.Current.Count) current, $($gooResult.Deferred.Count) deferred, $($gooResult.Failed.Count) failed"
+if ($gooResult.Deferred.Count) { Write-Note "deferred (install once enthoo answers): $($gooResult.Deferred -join ', ')" }
+if ($gooResult.Failed.Count) { Write-Note "failed: $($gooResult.Failed -join ', ')" }
+if ($wingetResult.Failed.Count -or $openCodeResult.Failed.Count -or $nativeResult.Failed.Count -or $rustResult -eq 'failed' -or $balunResult -eq 'failed' -or $gooseDesktopResult -eq 'failed' -or $pwshResult -eq 'failed' -or $googetResult -eq 'failed' -or $gooResult.Failed.Count) { exit 1 }
