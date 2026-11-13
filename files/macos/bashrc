@@ -3,8 +3,15 @@
 case $- in *i*) ;; *) return ;; esac
 [ -z "${_WORKSTATION_BASH_LOADED-}" ] || return
 _WORKSTATION_BASH_LOADED=1
-# Apple invokes /etc/bashrc from its system login profile. Non-login Bash needs it.
-if ! shopt -q login_shell && [ -r /etc/bashrc ]; then . /etc/bashrc; fi
+# Apple invokes /etc/bashrc from its system login profile. Non-login Bash needs it,
+# and Apple's /etc/bashrc expands an unguarded $TERM_PROGRAM.
+if ! shopt -q login_shell && [ -r /etc/bashrc ]; then
+    _workstation_nounset=0
+    case $- in *u*) _workstation_nounset=1; set +u ;; esac
+    . /etc/bashrc
+    [ "$_workstation_nounset" = 0 ] || set -u
+    unset _workstation_nounset
+fi
 if [ -r "$HOME/.config/lan-ipxe/environment.sh" ]; then
     . "$HOME/.config/lan-ipxe/environment.sh"
 fi

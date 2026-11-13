@@ -790,6 +790,102 @@ Available packages:
         self.assertEqual(disabled_statuses.get('com.openssh.sshd'), 'DRIFT')
         self.assertEqual(disabled_statuses.get('com.apple.screensharing'), 'DRIFT')
 
+    def test_preferences_accept_cfnumber_floats_and_replace_cf_equal_booleans(self):
+        domains = {
+            '.GlobalPreferences': {'InitialKeyRepeat': 15.0},
+            'com.apple.dock': {'tilesize': 64.0},
+            'com.apple.finder': {'ShowPathbar': 1},
+        }
+        calls = []
+
+        def parse_written(tail):
+            if tail[0] == '-bool':
+                return tail[1] == 'true'
+            if tail[0] == '-int':
+                return int(tail[1])
+            if tail[0] == '-float':
+                return float(tail[1])
+            if tail[0] == '-string':
+                return tail[1]
+            xml = '<?xml version="1.0"?><plist version="1.0">' + tail[0] + '</plist>'
+            return plistlib.loads(xml.encode())
+
+        def command(argv, **kwargs):
+            calls.append(argv)
+            action, domain, key = argv[1], argv[2], argv[3]
+            if action == 'delete':
+                domains[domain].pop(key, None)
+            elif action == 'write':
+                parsed = parse_written(argv[4:])
+                # Simulate cfprefsd dropping writes where CFEqual(old, new) is true.
+                if key not in domains[domain] or not w.cf_equal(domains[domain][key], parsed):
+                    domains[domain][key] = parsed
+            return subprocess.CompletedProcess(argv, 0, '', '')
+
+        self.obj.command = command
+        self.obj.preferences = lambda domain: domains[domain].copy()
+
+        # Float 15.0 satisfies desired int 15 without drift or defaults calls.
+        self.obj.preview = True
+        self.assertFalse(self.obj.preference('.GlobalPreferences', 'InitialKeyRepeat', 15, domains['.GlobalPreferences'].copy()))
+        self.assertEqual(self.obj.events, [])
+        self.obj.preview = False
+        self.assertFalse(self.obj.preference('.GlobalPreferences', 'InitialKeyRepeat', 15, domains['.GlobalPreferences'].copy()))
+        self.assertEqual(calls, [])
+
+        # Numeric mismatch (64.0 vs 128) writes -int 128 directly without delete,
+        # and accepts 128.0 on readback while rejecting an unchanged 64.0.
+        self.assertTrue(self.obj.preference('com.apple.dock', 'tilesize', 128, domains['com.apple.dock'].copy()))
+        self.assertEqual(calls, [['/usr/bin/defaults', 'write', 'com.apple.dock', 'tilesize', '-int', '128']])
+        self.assertEqual(domains['com.apple.dock']['tilesize'], 128)
+        calls.clear()
+        domains['com.apple.dock']['tilesize'] = 64.0
+        self.obj.preferences = lambda domain: {'tilesize': 128.0} if domain == 'com.apple.dock' else domains[domain].copy()
+        self.assertTrue(self.obj.preference('com.apple.dock', 'tilesize', 128, {'tilesize': 64.0}))
+        self.obj.preferences = lambda domain: {'tilesize': 64.0} if domain == 'com.apple.dock' else domains[domain].copy()
+        with self.assertRaisesRegex(RuntimeError, 'Preference verification failed: com.apple.dock tilesize'):
+            self.obj.preference('com.apple.dock', 'tilesize', 128, {'tilesize': 64.0})
+
+        # Int 1 vs bool True: preview detects drift, apply deletes before writing -bool true.
+        self.obj.preferences = lambda domain: domains[domain].copy()
+        calls.clear()
+        self.obj.events = []
+        self.obj.preview = True
+        self.assertTrue(self.obj.preference('com.apple.finder', 'ShowPathbar', True, domains['com.apple.finder'].copy()))
+        self.assertEqual(self.obj.events[-1]['status'], 'DRIFT')
+        self.assertEqual(calls, [])
+        self.obj.preview = False
+        self.assertTrue(self.obj.preference('com.apple.finder', 'ShowPathbar', True, domains['com.apple.finder'].copy()))
+        self.assertEqual(calls, [
+            ['/usr/bin/defaults', 'delete', 'com.apple.finder', 'ShowPathbar'],
+            ['/usr/bin/defaults', 'write', 'com.apple.finder', 'ShowPathbar', '-bool', 'true'],
+        ])
+        self.assertIs(domains['com.apple.finder']['ShowPathbar'], True)
+
+    def test_read_plist_handles_apple_xml_comments_and_corrupt_xml(self):
+        broken = self.obj.applications / 'Broken.app/Contents/Info.plist'
+        broken.parent.mkdir(parents=True)
+        broken.write_text('<?xml version="1.0"?><plist><broken>')
+        commented = self.obj.applications / 'Commented.app/Contents/Info.plist'
+        commented.parent.mkdir(parents=True)
+        commented.write_text(
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+            '<plist version="1.0">\n'
+            '<dict>\n'
+            '  <!-- flag --swk example -->\n'
+            '  <key>CFBundleIdentifier</key><string>io.example.Commented</string>\n'
+            '</dict>\n'
+            '</plist>\n'
+        )
+        with self.assertRaises(plistlib.InvalidFileException):
+            w.read_plist(broken)
+        apps = self.obj.scan_apps()
+        ids = {app['id'] for app in apps}
+        self.assertNotIn('io.example.Broken', ids)
+        if Path('/usr/bin/plutil').is_file():
+            self.assertIn('io.example.Commented', ids)
+
 
 class BootstrapTests(unittest.TestCase):
     def test_missing_brew_clt_preview_and_python_discovery(self):

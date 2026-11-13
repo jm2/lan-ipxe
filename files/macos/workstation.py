@@ -24,6 +24,7 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
+import xml.parsers.expat
 import zipfile
 
 PAYLOAD = Path(__file__).resolve().parent
@@ -68,11 +69,26 @@ def read_json(path, default=None):
 
 
 def read_plist(path):
+    path = Path(path)
     try:
-        with Path(path).open('rb') as stream:
+        with path.open('rb') as stream:
             return plistlib.load(stream)
     except FileNotFoundError:
         return {}
+    except xml.parsers.expat.ExpatError as exc:
+        # CFPropertyList/plutil accepts XML comments (such as "--" in flag
+        # examples) that Python's strict expat parser rejects.
+        plutil = Path('/usr/bin/plutil')
+        if plutil.is_file():
+            try:
+                result = subprocess.run([str(plutil), '-convert', 'binary1', '-o', '-', '--', str(path)],
+                                        stdin=subprocess.DEVNULL, capture_output=True, check=False, timeout=10)
+                if result.returncode == 0:
+                    return plistlib.loads(result.stdout)
+            except (OSError, subprocess.SubprocessError, ValueError, plistlib.InvalidFileException,
+                    xml.parsers.expat.ExpatError):
+                pass
+        raise plistlib.InvalidFileException(str(exc)) from exc
 
 
 def merge_dict(old, desired):
@@ -80,6 +96,30 @@ def merge_dict(old, desired):
     for key, value in desired.items():
         result[key] = merge_dict(result.get(key, {}), value) if isinstance(value, dict) else value
     return result
+
+
+def plist_equal(left, right):
+    """Match CFPreferences numeric equality while keeping CFBoolean distinct from CFNumber."""
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is type(right) and left == right
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return left == right
+    if isinstance(left, dict) and isinstance(right, dict):
+        return left.keys() == right.keys() and all(plist_equal(left[key], right[key]) for key in left)
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(plist_equal(a, b) for a, b in zip(left, right))
+    return type(left) is type(right) and left == right
+
+
+def cf_equal(left, right):
+    """True when CoreFoundation's CFEqual treats two plist values as equal (including bool vs 0/1)."""
+    if isinstance(left, (bool, int, float)) and isinstance(right, (bool, int, float)):
+        return left == right
+    if isinstance(left, dict) and isinstance(right, dict):
+        return left.keys() == right.keys() and all(cf_equal(left[key], right[key]) for key in left)
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(cf_equal(a, b) for a, b in zip(left, right))
+    return type(left) is type(right) and left == right
 
 
 def managed_block(text, name, body):
@@ -758,7 +798,7 @@ class Workstation:
             self.emit('CURRENT' if existing else 'DRIFT', name, 'native CLI; no execution in preview')
         elif existing and self.args.no_upgrade:
             self.emit('CURRENT', name, 'existing owner retained')
-        elif existing and not str(existing.resolve()).startswith(str(self.home / releases) + '/'):
+        elif existing and not str(existing.resolve()).startswith(str((self.home / releases).resolve()) + '/'):
             self.emit('CURRENT', name, 'other installer owner retained')
         else:
             self.native_install(name, url, shell, path)
@@ -1231,7 +1271,7 @@ class Workstation:
     def preference(self, domain, key, desired, current):
         old = current.get(key)
         value = merge_dict(old or {}, desired) if isinstance(desired, dict) else desired
-        if type(old) is type(value) and old == value:
+        if plist_equal(old, value):
             return False
         if self.preview:
             self.emit('DRIFT', domain + ' ' + key, repr(value) if not isinstance(value, (dict, list)) else 'merge structured preference')
@@ -1248,9 +1288,12 @@ class Workstation:
         else:
             xml = plistlib.dumps(value).decode()
             tail = [xml[xml.index('<plist version="1.0">') + 21:xml.rindex('</plist>')].strip()]
+        if old is not None and cf_equal(old, value):
+            # cfprefsd drops writes when CFEqual(old, new) is true (such as int 1 vs bool True).
+            self.command(['/usr/bin/defaults', 'delete', domain, key], mutate=True, check=False)
         self.command(['/usr/bin/defaults', 'write', domain, key] + tail, mutate=True)
         verified = self.preferences(domain).get(key)
-        if verified != value or type(verified) is not type(value):
+        if not plist_equal(verified, value):
             raise RuntimeError('Preference verification failed: ' + domain + ' ' + key)
         current[key] = value
         if domain in ('com.apple.dock', 'com.apple.finder'):

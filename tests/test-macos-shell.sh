@@ -49,13 +49,15 @@ case "$MAKEFLAGS" in -j[0-9]*) ;; *) exit 1 ;; esac
 '
 
 # Original prompt hooks still see failure status; double-source never duplicates.
-HOME="$TEST_HOME" TERM=dumb BASH_SILENCE_DEPRECATION_WARNING=1 /bin/bash --noprofile --norc -ic '
+HOME="$TEST_HOME" TERM=dumb BASH_SILENCE_DEPRECATION_WARNING=1 BASHRC_ERR="$TEMP/bash-nounset-errors" \
+    /bin/bash --noprofile --norc -ic '
 set -u
+unset TERM_PROGRAM
 original_hook() { seen=$?; }
 PROMPT_COMMAND=original_hook
-. "$ROOT/files/macos/bashrc"
+. "$ROOT/files/macos/bashrc" 2> "$BASHRC_ERR"
 first=$PROMPT_COMMAND
-. "$ROOT/files/macos/bashrc"
+. "$ROOT/files/macos/bashrc" 2>> "$BASHRC_ERR"
 [ "$PROMPT_COMMAND" = "$first" ] || exit 11
 # bash-preexec defers hook installation until the first real prompt.
 eval "$PROMPT_COMMAND"
@@ -71,6 +73,7 @@ shopt -q histappend && shopt -q checkwinsize || exit 16
 alias ls | command grep -q "ls -G" || exit 18
 alias dir | command grep -q "ls -CGb" || exit 19
 '
+[ ! -s "$TEMP/bash-nounset-errors" ] || { cat "$TEMP/bash-nounset-errors" >&2; exit 1; }
 
 # Explicitly source the installed login fragment in login and non-login modes.
 # The real login/non-login distinction is exercised without touching host profiles.
