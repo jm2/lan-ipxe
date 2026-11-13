@@ -259,6 +259,11 @@ def installed_sdk_versions(root):
     return result
 
 
+def app_ids(app):
+    """Primary and alternative bundle IDs in normalized lowercase form."""
+    return {value.lower() for value in [app['id']] + app.get('alternatives', [])}
+
+
 def dock_items(existing, apps):
     """Retain every unrelated tile and existing order; append missing selected apps."""
     result = list(existing)
@@ -526,7 +531,7 @@ class Workstation:
         return result
 
     def app_for(self, app):
-        ids = {value.lower() for value in [app['id']] + app.get('alternatives', [])}
+        ids = app_ids(app)
         matches = [a for a in self.apps if a['id'].lower() in ids]
         if len(matches) > 1:
             raise Deferred('Multiple apps share bundle ID ' + app['id'])
@@ -541,6 +546,17 @@ class Workstation:
         return any(root.exists() and (list(root.glob('*/INSTALL_RECEIPT.json')) or
                                      (root / 'INSTALL_RECEIPT.json').is_file()) for root in roots)
 
+    def tap_installed(self, tap):
+        user, repo = tap.split('/', 1)
+        return (self.prefix / 'Library/Taps' / user / ('homebrew-' + repo.removeprefix('homebrew-'))).is_dir()
+
+    def trust_package(self, name, kind):
+        # Homebrew 7+ refuses `brew info`/`outdated` on untrusted vendor taps;
+        # trust only the exact manifest-approved formula or cask.
+        result = self.command([self.brew, 'trust', '--' + kind, name], mutate=True, check=False)
+        if result.returncode and 'Unknown command: brew trust' not in (result.stderr or ''):
+            raise RuntimeError(f'{self.brew.name} failed with exit {result.returncode}')
+
     def prepare_brew(self):
         if self.preview:
             self.emit('CURRENT' if self.brew.exists() else 'DRIFT', 'Homebrew', 'offline installed-state inspection; upstream versions are not checked')
@@ -551,6 +567,15 @@ class Workstation:
         self.file(self.state / 'snapshots' / (self.run_id + '.json'), snapshot, 0o600)
         if not self.args.no_upgrade:
             self.command([self.brew, 'update'], mutate=True, capture=False)
+            formulae = self.manifest['formulae']['core'] + (
+                self.manifest['formulae']['full'] if self.args.profile == 'full' else [])
+            casks = [app['cask'] for app in self.selected_apps() if '/' in app.get('cask', '')]
+            if self.args.profile == 'full':
+                casks.append('android/tap/android-cli')
+            for kind, names in (('formula', formulae), ('cask', casks)):
+                for name in names:
+                    if '/' in name and self.tap_installed(name.rsplit('/', 1)[0]):
+                        self.trust_package(name, kind)
             data = json.loads(self.command([self.brew, 'outdated', '--json=v2']).stdout)
             self.outdated = {item.get('name', item.get('token')) for group in data.values() for item in group}
         self.updated = True
@@ -559,19 +584,23 @@ class Workstation:
         # A tapped cask (user/tap/name) installs under its short name.
         return (self.prefix / 'Caskroom' / name.rsplit('/', 1)[-1] / '.metadata').is_dir()
 
-    def package(self, name, kind='formula'):
+    def package(self, name, kind='formula', *, present=True):
         installed = self.formula_installed(name) if kind == 'formula' else self.cask_installed(name)
+        ready = installed and present
         if self.preview:
-            self.emit('CURRENT' if installed else 'DRIFT', kind + ' ' + name)
+            self.emit('CURRENT' if ready else 'DRIFT', kind + ' ' + name)
             return
         if not self.updated:
             raise Deferred('Package metadata preparation failed')
         canonical = self.manifest['aliases'].get(name, name)
-        if installed and (self.args.no_upgrade or not {name, canonical} & self.outdated):
+        if ready and (self.args.no_upgrade or not {name, canonical} & self.outdated):
             self.emit('CURRENT', kind + ' ' + name); return
-        if '/' in name and not installed:
-            # Vendor taps are not tapped implicitly by every brew command.
-            self.command([self.brew, 'tap', name.rsplit('/', 1)[0]], mutate=True, capture=False)
+        if '/' in name:
+            tap = name.rsplit('/', 1)[0]
+            if not installed or not self.tap_installed(tap):
+                # Vendor taps are not tapped implicitly by every brew command.
+                self.command([self.brew, 'tap', tap], mutate=True, capture=False)
+            self.trust_package(name, kind)
         data = json.loads(self.command([self.brew, 'info', '--json=v2', '--' + kind, name]).stdout)
         info = data['formulae' if kind == 'formula' else 'casks'][0]
         if info.get('disabled') or info.get('deprecated'):
@@ -581,11 +610,11 @@ class Workstation:
             bottles = info.get('bottle', {}).get('stable', {}).get('files', {})
             if not any(key == 'all' or key.startswith('arm64_') and key != 'arm64_linux' for key in bottles):
                 raise Deferred('No validated Apple Silicon bottle for ' + name)
-        if kind == 'cask' and installed and info.get('auto_updates'):
+        if kind == 'cask' and ready and info.get('auto_updates'):
             self.emit('CURRENT', name, 'native app updater retained'); return
         if kind == 'cask' and 'Rosetta' in (info.get('caveats') or ''):
             self.rosetta()
-        operation = 'upgrade' if installed else 'install'
+        operation = 'reinstall' if installed and not present else ('upgrade' if installed else 'install')
         self.command([self.brew, operation, '--no-ask', '--' + kind, name], mutate=True, capture=False)
         okay = self.formula_installed(name) if kind == 'formula' else self.cask_installed(name)
         if not okay:
@@ -601,7 +630,7 @@ class Workstation:
 
     def validate_app(self, path, app, signed=False, allow_intel=False):
         info = read_plist(path / 'Contents/Info.plist')
-        if info.get('CFBundleIdentifier', '').lower() != app['id'].lower():
+        if info.get('CFBundleIdentifier', '').lower() not in app_ids(app):
             raise RuntimeError('Unexpected bundle identity for ' + app['name'])
         executable = path / 'Contents/MacOS' / info.get('CFBundleExecutable', '')
         if not executable.is_file() or not os.access(executable, os.X_OK):
@@ -678,7 +707,8 @@ class Workstation:
                 tag, checksum, url = 'vendor-current', None, app['url']
             digest = self.download_verified(url, checksum, image)
             with self.mounted(image) as mount:
-                candidates = [p for p in mount.glob('*.app') if read_plist(p / 'Contents/Info.plist').get('CFBundleIdentifier', '').lower() == app['id'].lower()]
+                ids = app_ids(app)
+                candidates = [p for p in mount.glob('*.app') if read_plist(p / 'Contents/Info.plist').get('CFBundleIdentifier', '').lower() in ids]
                 if len(candidates) != 1:
                     raise RuntimeError('Expected one matching app in ' + app['name'] + ' release')
                 source = candidates[0]
@@ -724,7 +754,7 @@ class Workstation:
                 raise Deferred('Conflicting app bundle at ' + str(destination))
             if app['cask'] == 'battle-net' and not current:
                 raise Deferred('Run the official Battle.net installer interactively: https://www.blizzard.com/apps/battle.net/desktop')
-            self.package(app['cask'], 'cask')
+            self.package(app['cask'], 'cask') if current else self.package(app['cask'], 'cask', present=False)
             if not self.preview:
                 self.apps = self.scan_apps()
                 current = self.app_for(app)
@@ -1145,8 +1175,11 @@ class Workstation:
         # Google deprecated sdkmanager for the Android CLI's `android sdk`. Its
         # official Homebrew tap ships an unversioned cask (never "outdated"), so
         # the CLI's own `android update` keeps it current.
-        self.package('android/tap/android-cli', 'cask')
         cli = self.prefix / 'bin/android'
+        if self.preview or os.access(cli, os.X_OK):
+            self.package('android/tap/android-cli', 'cask')
+        else:
+            self.package('android/tap/android-cli', 'cask', present=False)
         if self.preview:
             return cli
         if not os.access(cli, os.X_OK):
@@ -1313,9 +1346,12 @@ class Workstation:
         for key in ('Default Window Settings', 'Startup Window Settings'):
             self.preference(domain, key, 'Clear Dark', current)
         dock = self.preferences('com.apple.dock')
-        managed_ids = [app['id'].lower() for app in self.selected_apps()]
-        candidates = [app for app in self.apps if app['id'].lower() in managed_ids and not app['store']]
-        candidates.sort(key=lambda a: managed_ids.index(a['id'].lower()))
+        order = {}
+        for index, spec in enumerate(self.selected_apps()):
+            for identifier in app_ids(spec):
+                order.setdefault(identifier, index)
+        candidates = [app for app in self.apps if app['id'].lower() in order and not app['store']]
+        candidates.sort(key=lambda a: order[a['id'].lower()])
         self.preference('com.apple.dock', 'persistent-apps', dock_items(dock.get('persistent-apps', []), candidates), dock)
         self.emit('NOTE', 'Desktop preferences', 'Some global changes take effect in new apps or after logout; no logout/reboot is initiated')
 

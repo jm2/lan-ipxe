@@ -279,20 +279,21 @@
       "id": "io.github.jm2.Balun",
       "profile": "core",
       "repo": "jm2/balun",
-      "tag": "v0.1.1",
+      "tag": "v0.2.2",
       "asset": "balun-macos-aarch64.dmg",
-      "sha256": "ec05187b2db4dc524626949218ef8016c0ec12fa0a96c8087589b4ffe4864e51",
+      "sha256": "1a6cf4d1287013e32b2e51c26dd7bd8eaf190125fea7303e119e043fa454419b",
       "strict_source": false
     },
     {
       "name": "Tributary",
       "app": "Tributary.app",
-      "id": "io.github.tributary.Tributary",
+      "id": "io.github.jm2.tributary",
+      "alternatives": ["io.github.tributary.Tributary"],
       "profile": "core",
       "repo": "jm2/tributary",
-      "tag": "v0.6.2",
+      "tag": "v0.7.3",
       "asset": "tributary-macos-aarch64.dmg",
-      "sha256": "b046eb7e64dcc1ba66e6d1efca1e53f7f8e23570cc390692837a58b2e6d4c466",
+      "sha256": "3d49ddd88092828ba0434e86b56fee2d886fdfbc7af0b881eac45e02385e30e5",
       "strict_source": false
     },
     {

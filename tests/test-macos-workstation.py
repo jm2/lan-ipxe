@@ -368,11 +368,16 @@ class ConfigurationTests(unittest.TestCase):
         self.obj.args = w.arguments([])
         self.obj.updated = True
         calls = []
+        trusted = set()
         def command(argv, **kwargs):
             calls.append([str(a) for a in argv[1:]])
-            if argv[1] == 'info':
+            if argv[1] == 'trust':
+                trusted.add(argv[-1])
+            elif argv[1] == 'info':
+                if argv[-1] not in trusted:
+                    raise RuntimeError('brew failed with exit 1')
                 return subprocess.CompletedProcess(argv, 0, json.dumps({'formulae': [{'bottle': {}}]}), '')
-            if argv[1] == 'install':
+            elif argv[1] == 'install':
                 receipt = self.obj.prefix / 'Cellar/crush/0.98.1/INSTALL_RECEIPT.json'
                 receipt.parent.mkdir(parents=True); receipt.write_text('{}')
             return subprocess.CompletedProcess(argv, 0, '', '')
@@ -380,6 +385,7 @@ class ConfigurationTests(unittest.TestCase):
             self.obj.package('charmbracelet/tap/crush')
             self.obj.package('charmbracelet/tap/crush')
         self.assertEqual(calls, [['tap', 'charmbracelet/tap'],
+                                 ['trust', '--formula', 'charmbracelet/tap/crush'],
                                  ['info', '--json=v2', '--formula', 'charmbracelet/tap/crush'],
                                  ['install', '--no-ask', '--formula', 'charmbracelet/tap/crush']])
         self.assertEqual(self.obj.events[-1]['status'], 'CURRENT')
@@ -711,16 +717,22 @@ Available packages:
         self.obj.updated = True
         self.obj.outdated = set()
         calls = []
+        trusted = set()
         def command(argv, **kwargs):
             calls.append([str(a) for a in argv][1:])
-            if argv[1] == 'info':
+            if argv[1] == 'trust':
+                trusted.add(argv[-1])
+            elif argv[1] == 'info':
+                if argv[-1] not in trusted:
+                    raise RuntimeError('brew failed with exit 1')
                 return subprocess.CompletedProcess(argv, 0, json.dumps({'casks': [{}]}), '')
-            if argv[1] == 'install':
+            elif argv[1] == 'install':
                 (self.obj.prefix / 'Caskroom/android-cli/.metadata').mkdir(parents=True)
             return subprocess.CompletedProcess(argv, 0, '', '')
         with patch.object(self.obj, 'command', side_effect=command):
             self.obj.package('android/tap/android-cli', 'cask')
-            self.assertEqual(calls[0], ['tap', 'android/tap'])
+            self.assertEqual(calls[:2], [['tap', 'android/tap'],
+                                         ['trust', '--cask', 'android/tap/android-cli']])
             self.assertEqual(calls[-1], ['install', '--no-ask', '--cask', 'android/tap/android-cli'])
             calls.clear()
             self.obj.package('android/tap/android-cli', 'cask')
@@ -885,6 +897,144 @@ Available packages:
         self.assertNotIn('io.example.Broken', ids)
         if Path('/usr/bin/plutil').is_file():
             self.assertIn('io.example.Commented', ids)
+
+    def test_prepare_brew_trusts_existing_vendor_taps_and_tolerates_pre_v7_brew(self):
+        self.obj.args = w.arguments(['--profile', 'full'])
+        self.obj.brew.parent.mkdir(parents=True, exist_ok=True)
+        self.obj.brew.write_text('#!/bin/sh\n')
+        (self.obj.prefix / 'Library/Taps/charmbracelet/homebrew-tap').mkdir(parents=True)
+        (self.obj.prefix / 'Library/Taps/android/homebrew-tap').mkdir(parents=True)
+        calls = []
+        def command(argv, **kwargs):
+            args = [str(a) for a in argv[1:]]
+            calls.append(args)
+            if args[:2] == ['info', '--json=v2']:
+                return subprocess.CompletedProcess(argv, 0, '{}', '')
+            if args[:2] == ['outdated', '--json=v2']:
+                return subprocess.CompletedProcess(argv, 0, json.dumps({'formulae': [], 'casks': []}), '')
+            return subprocess.CompletedProcess(argv, 0, '', '')
+        with patch.object(self.obj, 'command', side_effect=command):
+            self.obj.prepare_brew()
+        update_idx = calls.index(['update'])
+        crush_idx = calls.index(['trust', '--formula', 'charmbracelet/tap/crush'])
+        android_idx = calls.index(['trust', '--cask', 'android/tap/android-cli'])
+        outdated_idx = calls.index(['outdated', '--json=v2'])
+        self.assertLess(update_idx, crush_idx)
+        self.assertLess(crush_idx, android_idx)
+        self.assertLess(android_idx, outdated_idx)
+
+        with patch.object(self.obj, 'command',
+                          return_value=subprocess.CompletedProcess(['brew'], 1, '', 'Error: Unknown command: brew trust\n')):
+            self.obj.trust_package('charmbracelet/tap/crush', 'formula')
+        with patch.object(self.obj, 'command',
+                          return_value=subprocess.CompletedProcess(['brew'], 1, '', 'Error: invalid trust target\n')):
+            with self.assertRaisesRegex(RuntimeError, 'brew failed with exit 1'):
+                self.obj.trust_package('charmbracelet/tap/crush', 'formula')
+
+    def test_cask_with_missing_app_bundle_reports_drift_and_reinstalls(self):
+        app = next(a for a in self.obj.manifest['apps'] if a['name'] == 'Wireshark')
+        (self.obj.prefix / 'Caskroom/wireshark-app/.metadata').mkdir(parents=True)
+        self.obj.apps = []
+        self.obj.updated = True
+        self.obj.outdated = set()
+        self.obj.preview = True
+        with patch.object(self.obj, 'command', side_effect=AssertionError('preview ran')):
+            self.obj.application(app)
+        self.assertEqual([(e['status'], e['item']) for e in self.obj.events], [('DRIFT', 'cask wireshark-app')])
+
+        self.obj.preview = False
+        self.obj.events = []
+        calls = []
+        def command(argv, **kwargs):
+            if Path(argv[0]).name == 'file':
+                return subprocess.CompletedProcess(argv, 0, 'Mach-O 64-bit executable arm64\n', '')
+            args = [str(a) for a in argv[1:]]
+            calls.append(args)
+            if args[:2] == ['info', '--json=v2']:
+                return subprocess.CompletedProcess(argv, 0, json.dumps({'casks': [{'auto_updates': True}]}), '')
+            if args[0] == 'reinstall':
+                bundle = self.obj.applications / 'Wireshark.app'
+                self.write_app(bundle, 'org.wireshark.Wireshark')
+                exe = bundle / 'Contents/MacOS/Wireshark'
+                exe.parent.mkdir(parents=True)
+                exe.write_text('#!/bin/sh\n'); exe.chmod(0o755)
+                with (bundle / 'Contents/Info.plist').open('wb') as stream:
+                    plistlib.dump({'CFBundleIdentifier': 'org.wireshark.Wireshark',
+                                   'CFBundleExecutable': 'Wireshark',
+                                   'CFBundleShortVersionString': '4.6.9'}, stream)
+            return subprocess.CompletedProcess(argv, 0, '', '')
+        with patch.object(self.obj, 'command', side_effect=command):
+            self.obj.application(app)
+            self.assertEqual(calls, [
+                ['info', '--json=v2', '--cask', 'wireshark-app'],
+                ['reinstall', '--no-ask', '--cask', 'wireshark-app'],
+            ])
+            calls.clear()
+            self.obj.application(app)
+        self.assertEqual(calls, [])
+        self.assertEqual(self.obj.events[-1]['status'], 'CURRENT')
+
+    def test_tributary_bundle_id_and_alternative_app_identities(self):
+        app = next(a for a in self.obj.manifest['apps'] if a['name'] == 'Tributary')
+        self.assertEqual(app['id'], 'io.github.jm2.tributary')
+        self.assertIn('io.github.tributary.Tributary', app.get('alternatives', []))
+
+        legacy_path = self.obj.applications / 'Tributary.app'
+        exe = legacy_path / 'Contents/MacOS/Tributary'
+        exe.parent.mkdir(parents=True)
+        exe.write_text('#!/bin/sh\n'); exe.chmod(0o755)
+        with (legacy_path / 'Contents/Info.plist').open('wb') as stream:
+            plistlib.dump({'CFBundleIdentifier': 'io.github.tributary.Tributary',
+                           'CFBundleExecutable': 'Tributary',
+                           'CFBundleShortVersionString': '0.6.2'}, stream)
+        self.obj.apps = self.obj.scan_apps()
+        found = self.obj.app_for(app)
+        self.assertIsNotNone(found)
+        self.assertEqual(found['id'], 'io.github.tributary.Tributary')
+        with patch.object(self.obj, 'command', return_value=subprocess.CompletedProcess(['file'], 0, 'Mach-O 64-bit executable arm64\n', '')):
+            self.obj.validate_app(legacy_path, app)
+
+        # Unrelated bundle ID is still rejected.
+        with (legacy_path / 'Contents/Info.plist').open('wb') as stream:
+            plistlib.dump({'CFBundleIdentifier': 'io.example.Unrelated',
+                           'CFBundleExecutable': 'Tributary'}, stream)
+        with self.assertRaisesRegex(RuntimeError, 'Unexpected bundle identity for Tributary'):
+            self.obj.validate_app(legacy_path, app)
+
+        # direct_app DMG scan and desktop Dock ordering honor both primary id and alternatives.
+        self.obj.apps = [{'id': 'io.github.tributary.Tributary', 'path': legacy_path, 'store': False}]
+        dock = []
+        dmg_mount = self.root / 'mount'
+        bundled = dmg_mount / 'Tributary.app'
+        (bundled / 'Contents/MacOS').mkdir(parents=True)
+        (bundled / 'Contents/MacOS/Tributary').write_text('#!/bin/sh\n')
+        (bundled / 'Contents/MacOS/Tributary').chmod(0o755)
+        with (bundled / 'Contents/Info.plist').open('wb') as stream:
+            plistlib.dump({'CFBundleIdentifier': 'io.github.jm2.tributary',
+                           'CFBundleExecutable': 'Tributary'}, stream)
+        @contextlib.contextmanager
+        def fake_mounted(_):
+            yield dmg_mount
+        self.obj.args = w.arguments(['--no-upgrade'])
+        self.obj.fetch = lambda url, dest: Path(dest).write_bytes(b'dmg')
+        self.obj.applications = self.root / 'FreshApps'
+        self.obj.applications.mkdir()
+        (self.obj.applications / '.lan-ipxe-fake').mkdir(exist_ok=True)
+        with patch.object(self.obj, 'download_verified', return_value='sha'), \
+                patch.object(self.obj, 'mounted', side_effect=fake_mounted), \
+                patch.object(self.obj, 'validate_app', return_value={'CFBundleExecutable': 'Tributary'}), \
+                patch.object(self.obj, 'command', side_effect=lambda argv, **kw: (
+                    w.shutil.copytree(bundled, Path(argv[2])) if Path(argv[0]).name == 'ditto'
+                    else w.shutil.move(str(argv[2]), str(argv[3])) if Path(argv[0]).name == 'mv'
+                    else None) or subprocess.CompletedProcess(argv, 0, '', '')):
+            self.obj.direct_app(app, None)
+        installed_path = self.obj.applications / 'Tributary.app'
+        self.assertTrue(installed_path.is_dir())
+        with patch.object(self.obj, 'preferences', side_effect=lambda d: {'persistent-apps': dock} if d == 'com.apple.dock' else {}), \
+                patch.object(self.obj, 'preference') as mock_pref:
+            self.obj.desktop()
+        dock_call = next(c for c in mock_pref.call_args_list if c.args[:2] == ('com.apple.dock', 'persistent-apps'))
+        self.assertEqual(dock_call.args[2][0]['tile-data']['bundle-identifier'], 'io.github.jm2.tributary')
 
 
 class BootstrapTests(unittest.TestCase):
