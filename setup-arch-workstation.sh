@@ -13,7 +13,12 @@
 # Profiles: core (the default) is the full developer workstation - every
 # toolchain, editor, agent, browser and admin tool. full adds games (Steam,
 # Lutris, the lib32 graphics stack and [multilib], game AUR packages) and
-# desktop media extras (Brasero, Video Downloader, MakeMKV).
+# desktop media extras (Brasero, Video Downloader, MakeMKV). games stands
+# alone - it is not added on top of core or full and touches nothing else:
+# it enables [multilib] and the LAN game-packages repository, then installs
+# every game that repository publishes (see lib/select-games.awk: GOG builds
+# before Steam before other sources, and the largest are left out when the
+# set would leave less than 20% of the /opt filesystem free).
 #
 # Modes: --dry-run prints the selected plan offline (no sudo, network, pacman
 # or writes; works on any host). --check reports CURRENT/DRIFT read-only, no
@@ -101,6 +106,14 @@ GAME_PACKAGES_KEY_FPR=38C92DEA894BB3E48C50D6F0B48EFCBE62AAFAB2
 GAME_PACKAGES_CONF=/etc/pacman.d/game-packages.conf
 GAME_PACKAGES_INCLUDE="Include = ${GAME_PACKAGES_CONF}"
 GAME_PACKAGES_TOGGLE=/usr/local/libexec/game-packages-repo
+# The games profile: lib/select-games.awk picks from everything game-packages
+# publishes except these whole names (jm2 tools, servers, libraries and
+# runtimes: the games depend on what they need), keeping
+# GAMES_RESERVE_PERCENT of the filesystem holding GAMES_TARGET free.
+SELECT_GAMES_AWK=${SCRIPT_DIR}/lib/select-games.awk
+GAMES_EXCLUDE='(balun|carryout|crossdock|switchworks|tributary)(-bin)?|netatalk-appletalk|owntone-server|geysermc-bin|knockoutcity-server|agelanserver(-companion)?-bin|gamelaunch|gbe-fork-bin|xlln-bin|wine-ipv6only|umu-launcher|steamcmd|gconf|gtk2|openssl-1[.]0|xf86miscproto|lib[a-z0-9_.+-]*'
+GAMES_TARGET=/opt
+GAMES_RESERVE_PERCENT=20
 YAY_AUR_URL=https://aur.archlinux.org/yay-bin.git
 YAY_VCS_DB=${XDG_CACHE_HOME:-${HOME}/.cache}/yay/vcs.json
 WAZUH_MANAGER=${WAZUH_MANAGER:-}
@@ -460,7 +473,7 @@ die()  { printf '\033[1;31m==> ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() {
   cat <<USAGE
-Usage: ${0##*/} [--profile core|full] [--check | --dry-run] [--no-upgrade]
+Usage: ${0##*/} [--profile core|full|games] [--check | --dry-run] [--no-upgrade]
        [--wazuh-manager HOST]
        ${0##*/} -h|--help
 
@@ -472,6 +485,10 @@ safe to re-run at any time.
   --profile core   developer workstation: every toolchain, editor, agent,
                    browser and admin tool (default)
   --profile full   core plus games, [multilib]/lib32 and desktop media extras
+  --profile games  on its own (not on top of core/full): [multilib], the LAN
+                   game-packages repository and every game it publishes
+                   (GOG before Steam before other sources), leaving at
+                   least ${GAMES_RESERVE_PERCENT}% of the ${GAMES_TARGET} filesystem free
   --dry-run        print the selected plan offline and exit 0; no sudo,
                    network, pacman or writes
   --check          report CURRENT/DRIFT read-only without sudo or network;
@@ -495,10 +512,10 @@ while (( $# )); do
   case $1 in
     -h|--help) usage; exit 0 ;;
     --profile)
-      (( $# >= 2 )) || { usage >&2; die "--profile requires core or full"; }
+      (( $# >= 2 )) || { usage >&2; die "--profile requires core, full or games"; }
       case $2 in
-        core|full) PROFILE=$2 ;;
-        *) usage >&2; die "Invalid profile: $2 (expected core or full)" ;;
+        core|full|games) PROFILE=$2 ;;
+        *) usage >&2; die "Invalid profile: $2 (expected core, full or games)" ;;
       esac
       shift
       ;;
@@ -554,7 +571,8 @@ select_profile() {
     FIREWALL_LAN_SERVICES+=(steam-streaming)
   fi
 }
-select_profile "${PROFILE}"
+# The games profile has no package lists of its own: select_games decides.
+[[ ${PROFILE} == games ]] || select_profile "${PROFILE}"
 
 #--- Helpers ----------------------------------------------------------------
 # game_packages_key_fpr: the primary-key fingerprints in the vendored crossdock
@@ -620,6 +638,293 @@ install_game_repo_pkgs() {
     done
   fi
   note "game-packages: ${#GAME_REPO_PKGS[@]} package(s) from the LAN repository"
+}
+
+# ensure_multilib <required>: enables [multilib] (needed before any lib32-* or
+# steam package can be installed) when <required> is 1 (full and games); with
+# 0 (core) an already-enabled repository is left alone.
+ensure_multilib() {
+  local required=$1 repo_list
+  log "[multilib] repository"
+  repo_list=$(pacman-conf --repo-list 2>/dev/null) || die "could not read /etc/pacman.conf"
+  if grep -qx multilib <<<"${repo_list}"; then
+    note "enabled"
+  elif (( ! required )); then
+    note "not required by the core profile; left disabled"
+  else
+    cp -- /etc/pacman.conf "${WORK_DIR}/pacman.conf"
+    sed -Ei \
+      -e 's/^[[:space:]]*#[[:space:]]*\[multilib\][[:space:]]*$/[multilib]/' \
+      -e '/^\[multilib\][[:space:]]*$/,/^\[/{s/^[[:space:]]*#[[:space:]]*(Include[[:space:]]*=)/\1/}' \
+      "${WORK_DIR}/pacman.conf"
+    repo_list=$(pacman-conf --config "${WORK_DIR}/pacman.conf" --repo-list 2>/dev/null) \
+      || die "the generated pacman.conf is invalid"
+    grep -qx multilib <<<"${repo_list}" \
+      || die "could not enable [multilib] in a validated temporary pacman.conf"
+    if [[ ! -e /etc/pacman.conf.pre-workstation ]]; then
+      sudo cp -a -- /etc/pacman.conf /etc/pacman.conf.pre-workstation
+      note "saved /etc/pacman.conf.pre-workstation"
+    fi
+    put_file -s "${WORK_DIR}/pacman.conf" /etc/pacman.conf
+    repo_list=$(pacman-conf --repo-list 2>/dev/null) || die "could not re-read /etc/pacman.conf"
+    grep -qx multilib <<<"${repo_list}" || die "[multilib] is still disabled after installation"
+    note "enabled in /etc/pacman.conf"
+  fi
+}
+
+# ensure_game_packages_repo: trusts crossdock's pinned key, installs the
+# reachability toggle and its NetworkManager hook, writes the include target
+# and adds the Include line to /etc/pacman.conf. Every profile uses it.
+ensure_game_packages_repo() {
+  log "game-packages repository (LAN)"
+  [[ $(game_packages_key_fpr) == "${GAME_PACKAGES_KEY_FPR}" ]] \
+    || die "files/keys/game-packages.asc is not the pinned key ${GAME_PACKAGES_KEY_FPR}"
+  if game_packages_key_trusted; then
+    note "signing key: trusted"
+  else
+    sudo pacman-key --add "${GAME_PACKAGES_KEY}"
+    sudo pacman-key --lsign-key "${GAME_PACKAGES_KEY_FPR}"
+    game_packages_key_trusted || die "the game-packages key is still not trusted after pacman-key --lsign-key"
+    note "signing key: added and locally signed"
+  fi
+  put_file -s "${FILES}/usr/local/libexec/game-packages-repo" /usr/local/libexec/game-packages-repo 0755
+  put_file -s "${FILES}/etc/NetworkManager/dispatcher.d/50-game-packages" /etc/NetworkManager/dispatcher.d/50-game-packages 0755
+  # Write the include target first: pacman refuses a missing Include file.
+  sudo "${GAME_PACKAGES_TOGGLE}"
+  if grep -q '^\[game-packages\]' "${GAME_PACKAGES_CONF}"; then
+    note "crossdock reachable: [game-packages] enabled"
+  else
+    note "crossdock unreachable: [game-packages] stays off until the LAN answers"
+  fi
+  if pacman_conf_has_game_packages_include; then
+    note "/etc/pacman.conf: includes ${GAME_PACKAGES_CONF}"
+  else
+    cp -- /etc/pacman.conf "${WORK_DIR}/pacman.conf"
+    printf '\n# LAN game-packages repository: the included file is empty off the LAN\n# (rewritten by %s).\n%s\n' \
+      "${GAME_PACKAGES_TOGGLE}" "${GAME_PACKAGES_INCLUDE}" >>"${WORK_DIR}/pacman.conf"
+    pacman-conf --config "${WORK_DIR}/pacman.conf" --repo-list >/dev/null 2>&1 \
+      || die "the generated pacman.conf with the game-packages Include is invalid"
+    if [[ ! -e /etc/pacman.conf.pre-workstation ]]; then
+      sudo cp -a -- /etc/pacman.conf /etc/pacman.conf.pre-workstation
+      note "saved /etc/pacman.conf.pre-workstation"
+    fi
+    put_file -s "${WORK_DIR}/pacman.conf" /etc/pacman.conf
+    pacman_conf_has_game_packages_include || die "/etc/pacman.conf still lacks the game-packages Include"
+  fi
+}
+
+#--- games profile -----------------------------------------------------------
+# game_records_arch <sync-db> [local-db-dir]: lib/select-games.awk input from
+# pacman's game-packages sync database (R records) and the local database (I
+# records). Both are world-readable, so --check needs no sudo or network.
+game_records_arch() {
+  local sync_db=$1 local_db=${2:-/var/lib/pacman/local}
+  local -a local_descs=("${local_db}"/*/desc)
+  # shellcheck disable=SC2016 # awk program, not shell expansions
+  local desc_awk='
+    function flush() {
+      if (name == "") return
+      if (kind == "R") printf "R\t%s\t%s\t%s\t%s\t%s\n", name, size, prov, conf, deps
+      else printf "I\t%s\t%s\t%s\n", name, prov, conf
+      name = ""; size = 0; prov = ""; conf = ""; deps = ""
+    }
+    /^%[A-Z0-9]+%$/ { field = $0; if (field == "%NAME%") flush(); next }
+    /^$/ { field = ""; next }
+    {
+      v = $0; sub(/[<>=:].*/, "", v)
+      if (field == "%NAME%") name = v
+      else if (field == "%ISIZE%") size = $0 + 0
+      else if (field == "%PROVIDES%") prov = prov (prov == "" ? "" : " ") v
+      else if (field == "%CONFLICTS%") conf = conf (conf == "" ? "" : " ") v
+      else if (field == "%DEPENDS%") deps = deps (deps == "" ? "" : " ") v
+    }
+    END { flush() }'
+  bsdtar -xOf "${sync_db}" --include='*/desc' | awk -v kind=R "${desc_awk}" || return 1
+  [[ -e ${local_descs[0]} ]] || return 0
+  awk -v kind=I "${desc_awk}" "${local_descs[@]}"
+}
+
+# games_target_dir: GAMES_TARGET, or its nearest existing parent before the
+# first game creates it.
+games_target_dir() {
+  local dir=${GAMES_TARGET}
+  while [[ ! -d ${dir} ]]; do dir=$(dirname -- "${dir}"); done
+  printf '%s\n' "${dir}"
+}
+
+# select_games <records-command...>: runs lib/select-games.awk on the
+# command's output against the free space of GAMES_TARGET's filesystem and
+# fills GAMES_KEEP, GAMES_INSTALL (dependency order), GAMES_NEEDS (per game,
+# the games in GAMES_INSTALL it depends on), GAMES_SKIP ("name reason") and
+# GAMES_SPACE ("need avail total kept-free" in bytes).
+GAMES_KEEP=()
+GAMES_INSTALL=()
+GAMES_SKIP=()
+GAMES_SPACE=
+declare -A GAMES_NEEDS=()
+select_games() {
+  local df_line total avail records output kind name rest
+  df_line=$(df -B1 --output=size,avail -- "$(games_target_dir)" | tail -n 1) \
+    || die "could not read the free space of ${GAMES_TARGET}"
+  read -r total avail <<<"${df_line}"
+  records=$("$@") || die "could not read the game-packages metadata"
+  grep -q '^R' <<<"${records}" || die "the game-packages metadata lists no packages"
+  output=$(awk -v exclude="${GAMES_EXCLUDE}" -v avail="${avail}" -v total="${total}" \
+    -v reserve="${GAMES_RESERVE_PERCENT}" -f "${SELECT_GAMES_AWK}" <<<"${records}") \
+    || die "could not select the games from the game-packages repository"
+  GAMES_KEEP=() GAMES_INSTALL=() GAMES_SKIP=() GAMES_SPACE='' GAMES_NEEDS=()
+  while read -r kind name rest; do
+    case ${kind} in
+      keep) GAMES_KEEP+=("${name}") ;;
+      install)
+        GAMES_INSTALL+=("${name}")
+        read -r _ GAMES_NEEDS["${name}"] <<<"${rest}"
+        ;;
+      skip) GAMES_SKIP+=("${name} ${rest}") ;;
+      space) GAMES_SPACE="${name} ${rest}" ;;
+    esac
+  done <<<"${output}"
+}
+
+# games_space_summary: one line from GAMES_SPACE.
+games_space_summary() {
+  local need avail total keep
+  read -r need avail total keep <<<"${GAMES_SPACE}"
+  printf '%s to install, %s free of %s on %s; %s (%s%%) stays free\n' \
+    "$(numfmt --to=iec "${need}")" "$(numfmt --to=iec "${avail}")" "$(numfmt --to=iec "${total}")" \
+    "${GAMES_TARGET}" "$(numfmt --to=iec "${keep}")" "${GAMES_RESERVE_PERCENT}"
+}
+
+# print_games_plan: the offline --dry-run plan of the games profile. The game
+# list depends on the repository and the disk, so it is decided at apply time.
+print_games_plan() {
+  printf 'Profile: games; mode: dry-run (offline, nothing is changed)\n'
+  printf 'PLAN: standalone; nothing from the core or full profiles is installed or configured\n'
+  printf 'PLAN: enable [multilib] in /etc/pacman.conf if disabled (backup /etc/pacman.conf.pre-workstation)\n'
+  printf 'PLAN: game-packages repository: trust key %s (pacman-key --add/--lsign-key), install %s and its NetworkManager dispatcher hook, append "%s" to /etc/pacman.conf\n' \
+    "${GAME_PACKAGES_KEY_FPR}" "${GAME_PACKAGES_TOGGLE}" "${GAME_PACKAGES_INCLUDE}"
+  printf 'PLAN: stop unless http://192.168.1.11:8080 answers (the games come only from the LAN repository)\n'
+  printf 'PLAN: %s\n' "$( (( NO_UPGRADE )) && echo 'no pacman -Syu (--no-upgrade): install against the existing sync databases' || echo 'pacman -Syu')"
+  printf 'PLAN: every game game-packages publishes except tools, servers, libraries and runtimes (%s),\n' "${GAMES_EXCLUDE}"
+  printf '      one alternative per game (installed first, then GOG, Steam, other sources), dropping the largest\n'
+  printf '      until at least %s%% of the %s filesystem stays free; installed one at a time through a\n' "${GAMES_RESERVE_PERCENT}" "${GAMES_TARGET}"
+  printf '      download cache on that filesystem, emptied after each\n'
+}
+
+# run_games_check: read-only state of the games profile against the existing
+# sync database (no sudo or network). Exit 0 converged, 2 drift.
+run_games_check() {
+  local sync_db name repo_list
+  CHECK_DRIFT=0
+  CHECK_CURRENT=0
+  printf 'Profile: games; mode: check (read-only)\n'
+  repo_list=$(pacman-conf --repo-list 2>/dev/null) || die "could not read /etc/pacman.conf"
+  if grep -qx multilib <<<"${repo_list}"; then
+    report CURRENT "[multilib]: enabled"
+  else
+    report DRIFT "[multilib]: disabled (required by the games profile)"
+  fi
+  if game_packages_key_trusted; then
+    report CURRENT "game-packages signing key: trusted in pacman's keyring"
+  else
+    report DRIFT "game-packages signing key ${GAME_PACKAGES_KEY_FPR}: not locally signed in pacman's keyring"
+  fi
+  if pacman_conf_has_game_packages_include; then
+    report CURRENT "/etc/pacman.conf: includes ${GAME_PACKAGES_CONF}"
+  else
+    report DRIFT "/etc/pacman.conf: missing '${GAME_PACKAGES_INCLUDE}'"
+  fi
+  sync_db=$(pacman-conf DBPath 2>/dev/null) || sync_db=/var/lib/pacman/
+  sync_db=${sync_db%/}/sync/game-packages.db
+  if [[ ! -s ${sync_db} ]]; then
+    report DRIFT "game-packages sync database: missing (apply syncs it on the LAN)"
+  else
+    select_games game_records_arch "${sync_db}"
+    for name in "${GAMES_KEEP[@]}"; do report CURRENT "game ${name}"; done
+    for name in "${GAMES_INSTALL[@]}"; do report DRIFT "game ${name}: not installed"; done
+    for name in "${GAMES_SKIP[@]}"; do report NOTE "game ${name%% *}: skipped, ${name#* }"; done
+    report NOTE "space: $(games_space_summary)"
+  fi
+  printf '\nSummary: %d current, %d drift\n' "${CHECK_CURRENT}" "${CHECK_DRIFT}"
+  (( CHECK_DRIFT == 0 )) || return 2
+}
+
+# games_repo_reachable: crossdock still answers with the game-packages database.
+games_repo_reachable() {
+  curl -fsI --max-time 5 -o /dev/null http://192.168.1.11:8080/arch/game-packages/x86_64/game-packages.db
+}
+
+# run_games_apply: the games profile. Every download, the -Syu that updates
+# installed games included, goes through a cache on the games' filesystem that
+# is emptied after each transaction, so neither / nor the space check has to
+# hold the downloads. Each game installs from game-packages in its own pacman
+# transaction; the run stops if crossdock drops off the network.
+run_games_apply() {
+  local sync_db cache name need dep failed=()
+  log "Profile: games$( (( NO_UPGRADE )) && printf ' (--no-upgrade)' )"
+  log "Authenticating sudo"
+  sudo -v || die "sudo authentication failed"
+  ensure_multilib 1
+  ensure_game_packages_repo
+  grep -q '^\[game-packages\]' "${GAME_PACKAGES_CONF}" \
+    || die "crossdock (http://192.168.1.11:8080) is unreachable; the games profile installs only from the LAN game-packages repository"
+
+  sudo install -d -m 0755 -- "${GAMES_TARGET}"
+  cache=$(sudo mktemp -d -- "${GAMES_TARGET}/.game-packages-cache.XXXXXX") \
+    || die "could not create a download cache under ${GAMES_TARGET}"
+  # pacman downloads as its unprivileged DownloadUser, which must reach it.
+  sudo chmod 0755 -- "${cache}"
+  # shellcheck disable=SC2064 # expand ${cache} now, while it is set
+  trap "sudo rm -rf -- '${cache}'; cleanup" EXIT
+
+  if (( NO_UPGRADE )); then
+    sync_dbs_present \
+      || die "--no-upgrade needs an existing sync database for every enabled repository; rerun without --no-upgrade"
+    warn "--no-upgrade: skipping pacman -Syu (a partial upgrade if the sync databases are stale)"
+  else
+    log "Syncing databases and applying updates (pacman -Syu, downloads through ${cache})"
+    sudo pacman -Syu --noconfirm --cachedir "${cache}"
+    sudo find "${cache}" -mindepth 1 -delete
+  fi
+  sync_db=$(pacman-conf DBPath 2>/dev/null) || sync_db=/var/lib/pacman/
+  sync_db=${sync_db%/}/sync/game-packages.db
+  [[ -s ${sync_db} ]] || die "the game-packages sync database is missing after syncing"
+
+  log "Selecting games"
+  select_games game_records_arch "${sync_db}"
+  note "${#GAMES_KEEP[@]} installed, ${#GAMES_INSTALL[@]} to install, ${#GAMES_SKIP[@]} skipped"
+  note "$(games_space_summary)"
+  for name in "${GAMES_SKIP[@]}"; do note "skipped ${name%% *}: ${name#* }"; done
+
+  (( ! ${#GAMES_INSTALL[@]} )) || log "Installing ${#GAMES_INSTALL[@]} game(s)"
+  for name in "${GAMES_INSTALL[@]}"; do
+    note "${name}"
+    need=
+    for dep in ${GAMES_NEEDS[${name}]:-}; do
+      [[ " ${failed[*]} " == *" ${dep} "* ]] && { need=${dep}; break; }
+    done
+    if [[ -n ${need} ]]; then
+      warn "${name}: skipped, it needs ${need}, which failed (pacman would pick another alternative)"
+      failed+=("${name}")
+      continue
+    fi
+    # Repository-qualified: an earlier repository with the same name would
+    # otherwise win, and selection measured the game-packages package.
+    if ! sudo pacman -S --needed --noconfirm --cachedir "${cache}" -- "game-packages/${name}"; then
+      failed+=("${name}")
+      sudo find "${cache}" -mindepth 1 -delete
+      games_repo_reachable \
+        || die "crossdock stopped answering; not installed: ${failed[*]} and the rest of the selection"
+      warn "${name}: pacman failed; continuing with the next game"
+      continue
+    fi
+    sudo find "${cache}" -mindepth 1 -delete
+  done
+  sudo rm -rf -- "${cache}"
+  trap cleanup EXIT
+
+  log "Done: $(( ${#GAMES_INSTALL[@]} - ${#failed[@]} )) installed now, ${#GAMES_KEEP[@]} already installed, ${#GAMES_SKIP[@]} skipped, ${#failed[@]} failed"
+  (( ! ${#failed[@]} )) || die "not installed: ${failed[*]}"
 }
 
 # pacman_conf_has_game_packages_include [file]: true when the pacman config
@@ -2119,7 +2424,7 @@ print_plan() {
 
 #--- Preflight --------------------------------------------------------------
 if [[ ${MODE} == dry-run ]]; then
-  print_plan
+  if [[ ${PROFILE} == games ]]; then print_games_plan; else print_plan; fi
   exit 0
 fi
 
@@ -2131,6 +2436,22 @@ command -v pacman-conf >/dev/null || die "pacman-conf is required."
 command -v cmp >/dev/null || die "cmp (diffutils) is required."
 pacman -Q pacman &>/dev/null || die "the local pacman database is not readable."
 [[ -f /etc/pacman.conf ]] || die "/etc/pacman.conf is missing."
+if [[ ${PROFILE} == games ]]; then
+  [[ -r ${SELECT_GAMES_AWK} ]] || die "Game selector not found: ${SELECT_GAMES_AWK}"
+  command -v bsdtar >/dev/null || die "bsdtar (libarchive) is required."
+  WORK_DIR=$(mktemp -d)
+  cleanup() {
+    rm -rf "${WORK_DIR}"
+  }
+  trap cleanup EXIT
+  if [[ ${MODE} == check ]]; then
+    run_games_check
+    exit 0
+  fi
+  command -v sudo >/dev/null || die "sudo is required."
+  run_games_apply
+  exit 0
+fi
 [[ -d /boot/grub ]] || die "This setup targets an existing GRUB installation; /boot/grub is missing."
 
 MICROCODE=$(microcode_package)
@@ -2162,73 +2483,15 @@ purge_replaced_editor_arch
 purge_opencode_arch
 
 #--- 1. [multilib] ----------------------------------------------------------
-# Must be enabled before any lib32-* / steam package can be installed. Only the
-# full profile needs it; core leaves an already-enabled repository alone.
-log "[multilib] repository"
-repo_list=$(pacman-conf --repo-list 2>/dev/null) || die "could not read /etc/pacman.conf"
-if grep -qx multilib <<<"${repo_list}"; then
-  note "enabled"
-elif [[ ${PROFILE} != full ]]; then
-  note "not required by the core profile; left disabled"
-else
-  cp -- /etc/pacman.conf "${WORK_DIR}/pacman.conf"
-  sed -Ei \
-    -e 's/^[[:space:]]*#[[:space:]]*\[multilib\][[:space:]]*$/[multilib]/' \
-    -e '/^\[multilib\][[:space:]]*$/,/^\[/{s/^[[:space:]]*#[[:space:]]*(Include[[:space:]]*=)/\1/}' \
-    "${WORK_DIR}/pacman.conf"
-  repo_list=$(pacman-conf --config "${WORK_DIR}/pacman.conf" --repo-list 2>/dev/null) \
-    || die "the generated pacman.conf is invalid"
-  grep -qx multilib <<<"${repo_list}" \
-    || die "could not enable [multilib] in a validated temporary pacman.conf"
-  if [[ ! -e /etc/pacman.conf.pre-workstation ]]; then
-    sudo cp -a -- /etc/pacman.conf /etc/pacman.conf.pre-workstation
-    note "saved /etc/pacman.conf.pre-workstation"
-  fi
-  put_file -s "${WORK_DIR}/pacman.conf" /etc/pacman.conf
-  repo_list=$(pacman-conf --repo-list 2>/dev/null) || die "could not re-read /etc/pacman.conf"
-  grep -qx multilib <<<"${repo_list}" || die "[multilib] is still disabled after installation"
-  note "enabled in /etc/pacman.conf"
-fi
+# Only the full profile needs it; core leaves an already-enabled repository
+# alone.
+ensure_multilib "$( [[ ${PROFILE} == full ]] && echo 1 || echo 0 )"
 
 #--- 1b. game-packages (LAN) ------------------------------------------------
 # Games, engines and jm2 tools built from jm2/game-packages, served by
 # crossdock on enthoo. Every profile uses it (GAME_REPO_PKGS); the full
 # profile adds the games.
-log "game-packages repository (LAN)"
-[[ $(game_packages_key_fpr) == "${GAME_PACKAGES_KEY_FPR}" ]] \
-  || die "files/keys/game-packages.asc is not the pinned key ${GAME_PACKAGES_KEY_FPR}"
-if game_packages_key_trusted; then
-  note "signing key: trusted"
-else
-  sudo pacman-key --add "${GAME_PACKAGES_KEY}"
-  sudo pacman-key --lsign-key "${GAME_PACKAGES_KEY_FPR}"
-  game_packages_key_trusted || die "the game-packages key is still not trusted after pacman-key --lsign-key"
-  note "signing key: added and locally signed"
-fi
-put_file -s "${FILES}/usr/local/libexec/game-packages-repo" /usr/local/libexec/game-packages-repo 0755
-put_file -s "${FILES}/etc/NetworkManager/dispatcher.d/50-game-packages" /etc/NetworkManager/dispatcher.d/50-game-packages 0755
-# Write the include target first: pacman refuses a missing Include file.
-sudo "${GAME_PACKAGES_TOGGLE}"
-if grep -q '^\[game-packages\]' "${GAME_PACKAGES_CONF}"; then
-  note "crossdock reachable: [game-packages] enabled"
-else
-  note "crossdock unreachable: [game-packages] stays off until the LAN answers"
-fi
-if pacman_conf_has_game_packages_include; then
-  note "/etc/pacman.conf: includes ${GAME_PACKAGES_CONF}"
-else
-  cp -- /etc/pacman.conf "${WORK_DIR}/pacman.conf"
-  printf '\n# LAN game-packages repository: the included file is empty off the LAN\n# (rewritten by %s).\n%s\n' \
-    "${GAME_PACKAGES_TOGGLE}" "${GAME_PACKAGES_INCLUDE}" >>"${WORK_DIR}/pacman.conf"
-  pacman-conf --config "${WORK_DIR}/pacman.conf" --repo-list >/dev/null 2>&1 \
-    || die "the generated pacman.conf with the game-packages Include is invalid"
-  if [[ ! -e /etc/pacman.conf.pre-workstation ]]; then
-    sudo cp -a -- /etc/pacman.conf /etc/pacman.conf.pre-workstation
-    note "saved /etc/pacman.conf.pre-workstation"
-  fi
-  put_file -s "${WORK_DIR}/pacman.conf" /etc/pacman.conf
-  pacman_conf_has_game_packages_include || die "/etc/pacman.conf still lacks the game-packages Include"
-fi
+ensure_game_packages_repo
 
 # Capture boot-package state so kernel, microcode, GRUB, NVIDIA, and initramfs
 # changes can trigger the follow-ups they require.

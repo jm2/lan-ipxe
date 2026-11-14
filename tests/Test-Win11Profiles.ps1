@@ -19,7 +19,8 @@ if ($parseErrors.Count) {
 $tokens.Count | Out-Null
 
 foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetLegacyPackages', 'WingetPresenceOnlyPackages',
-                              'RustComponents', 'BalunWingetId', 'BalunRepo', 'BalunDisplayName', 'BalunInstallerArgs', 'WingetOkCodes', 'WingetRebootCodes', 'WingetDeferredCodes', 'WingetRemoveOkCodes', 'WingetLaunchAttempts', 'WingetLaunchRetrySeconds', 'WingetInstallTechMismatchCode', 'WingetUninstallWaitSeconds', 'WingetUninstallPollSeconds', 'NativeCliTools', 'WingetPackageArgs', 'GooGetGitHubRepo', 'GooGetPatchedRepo', 'GooGetPatchedCommit', 'GooGetPatchedPulls', 'GooGetRepoName', 'GooGetRepoUrl', 'GooGetRetiredRepos', 'GooGetAclTrustedSids', 'GooGetPackages', 'GooGetFullPackages', 'GooGetProbeTimeoutSeconds')) {
+                              'RustComponents', 'BalunWingetId', 'BalunRepo', 'BalunDisplayName', 'BalunInstallerArgs', 'WingetOkCodes', 'WingetRebootCodes', 'WingetDeferredCodes', 'WingetRemoveOkCodes', 'WingetLaunchAttempts', 'WingetLaunchRetrySeconds', 'WingetInstallTechMismatchCode', 'WingetUninstallWaitSeconds', 'WingetUninstallPollSeconds', 'NativeCliTools', 'WingetPackageArgs', 'GooGetGitHubRepo', 'GooGetPatchedRepo', 'GooGetPatchedCommit', 'GooGetPatchedPulls', 'GooGetRepoName', 'GooGetRepoUrl', 'GooGetRetiredRepos', 'GooGetAclTrustedSids', 'GooGetPackages', 'GooGetFullPackages', 'GooGetProbeTimeoutSeconds',
+                              'GamesExcludePattern', 'GamesReservePercent', 'GamesSizeFactor', 'GamesBootstrapWingetPackages')) {
     $assignmentAst = $ast.Find({
         param($node)
         $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
@@ -33,7 +34,8 @@ foreach ($functionName in @('Write-Note', 'Invoke-Winget', 'Get-WingetPackageArg
                             'Test-RustupDefaultToolchain', 'Initialize-RustupToolchain',
                             'Get-NativeProcessorArchitecture', 'Get-WindowsArchitectureName', 'Get-BalunRelease', 'Invoke-BalunStep',
                             'Invoke-PowerShellMsiSwitch', 'Select-GooGetSource', 'Test-GooGetPatchPending', 'Get-GooGetConfText', 'Get-GooGetRepoFileText', 'Get-GooGetRetiredRepoFile', 'Read-TextOrEmpty', 'Test-GooGetWriteRight',
-                            'Get-GooGetInstalledName', 'Get-GooGetInstalledPackage', 'Invoke-GooGetPackageSet')) {
+                            'Get-GooGetInstalledName', 'Get-GooGetInstalledPackage', 'Invoke-GooGetPackageSet',
+                            'Get-GameSourceRank', 'Get-GameKey', 'Select-GamePackage', 'Get-GooGetArchPreference', 'Compare-GooGetVersion', 'Select-GooGetIndexEntry')) {
     $functionAst = $ast.Find({
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $functionName
@@ -114,11 +116,98 @@ try {
         $expectedGoo = if ($profileName -eq 'full') { 'crossdock,carryout,bugdom,bugdom2,cro-mag-rally-net,mightymike,nanosaur,nanosaur2,ottomatic' } else { 'crossdock,carryout' }
         Assert-True (($gooPlan -join ',') -eq $expectedGoo) "$profileName dry run lists the game-packages GooGet set (got $($gooPlan -join ','))"
     }
+    $script:Calls = @()
+    $global:LASTEXITCODE = 99
+    $output = @(& $ScriptPath -Profile games -DryRun 6>&1 | ForEach-Object { [string]$_ })
+    Assert-True ($LASTEXITCODE -eq 0) "games dry run exits 0 (got $LASTEXITCODE)"
+    Assert-True ($script:Calls.Count -eq 0) "games dry run made no system calls (got $($script:Calls -join ', '))"
+    $text = $output -join "`n"
+    Assert-True ($text -match 'Profile: games; mode: dry-run') 'games dry run announces profile and mode'
+    Assert-True ($text -match 'Standalone: nothing from the core or full profiles') 'games dry run is standalone'
+    Assert-True ($text -match 'GoLang\.Go, Git\.Git') 'games dry run installs what the GooGet build needs'
+    Assert-True ($text -match 'repo game-packages -> http://192\.168\.1\.11:8080/goo/game-packages') 'games dry run lists the GooGet repo'
+    Assert-True ($text -match 'GOG, Steam, other sources' -and $text -match '20% of the Program Files drive') 'games dry run states source order and reserve'
+    foreach ($id in @('Rustlang.Rustup', 'Valve.Steam', 'Google.Chrome', 'Hyper-V', 'OpenSSH')) {
+        Assert-True ($text.IndexOf($id) -lt 0) "games dry run leaves out $id"
+    }
 }
 finally {
     foreach ($name in $mockNames) { Remove-Item -Path "function:global:$name" -ErrorAction SilentlyContinue }
 }
 Write-Output 'DRY RUN PASSED'
+
+# --- games profile: selection --------------------------------------------------
+function Get-TestGame {
+    param([string]$Name, [double]$Size = 1GB, [string[]]$Provides = @(), [string[]]$Conflicts = @(), [string[]]$Depends = @())
+    [pscustomobject]@{ Name = $Name; Size = $Size; Provides = $Provides; Conflicts = $Conflicts; Depends = $Depends }
+}
+Assert-True ((Get-GameSourceRank -Name 'quake3-data-gog') -lt (Get-GameSourceRank -Name 'quake3-data-steam')) 'GOG ranks before Steam'
+Assert-True ((Get-GameSourceRank -Name 'wreckfest-gog-dlc1') -eq 0) 'a GOG DLC ranks as GOG'
+Assert-True ((Get-GameSourceRank -Name 'ut2004-data-steam') -lt (Get-GameSourceRank -Name 'ut2004-data-archiveorg')) 'Steam ranks before archive.org'
+Assert-True ((Get-GameKey -Name 'wreckfest-steam') -eq 'wreckfest' -and (Get-GameKey -Name 'etlegacy-bin') -eq 'etlegacy-bin') 'game key strips only a trailing source'
+$catalog = @(
+    (Get-TestGame 'crossdock' 10MB),
+    (Get-TestGame 'ut2004-data-archiveorg' 5GB @('ut2004-data') @('ut2004-data-gog', 'ut2004-data-steam')),
+    (Get-TestGame 'ut2004-data-gog' 5GB @('ut2004-data') @('ut2004-data-archiveorg', 'ut2004-data-steam')),
+    (Get-TestGame 'ut2004-data-steam' 5GB @('ut2004-data') @('ut2004-data-archiveorg', 'ut2004-data-gog')),
+    (Get-TestGame 'ut2004-bin' 150MB @() @() @('ut2004-data')),
+    (Get-TestGame 'wreckfest-gog' 30GB),
+    (Get-TestGame 'wreckfest-steam' 30GB),
+    (Get-TestGame 'wreckfest-gog-dlc1' 1MB @() @() @('wreckfest-gog')),
+    (Get-TestGame 'doom3-data-gog' 2GB @() @('doom3-data-steam', 'doom3xp-data-steam')),
+    (Get-TestGame 'doom3-data-steam' 1.5GB @() @('doom3-data-gog')),
+    (Get-TestGame 'doom3xp-data-steam' 500MB @() @('doom3-data-gog') @('doom3-data-steam')),
+    (Get-TestGame 'quake3-data-gog' 800MB @() @('quake3-data-steam')),
+    (Get-TestGame 'quake3-data-steam' 800MB @() @('quake3-data-gog'))
+)
+$sel = Select-GamePackage -Packages $catalog -Installed @('quake3-data-steam') -Available 1TB -Total 2TB -ReservePercent 20 -ExcludePattern $GamesExcludePattern
+$installNames = @($sel.Install | ForEach-Object { $_.Name })
+Assert-True ($sel.Keep -contains 'quake3-data-steam' -and $installNames -notcontains 'quake3-data-gog') 'an installed alternative is kept, not replaced'
+Assert-True ($installNames -notcontains 'crossdock') 'tools are excluded from the games'
+Assert-True ($installNames -contains 'ut2004-data-gog' -and $installNames -notcontains 'ut2004-data-steam' -and $installNames -notcontains 'ut2004-data-archiveorg') 'GOG wins a declared conflict'
+Assert-True ($installNames -contains 'wreckfest-gog' -and $installNames -notcontains 'wreckfest-steam') 'GOG wins between same-named sources'
+Assert-True ($installNames -contains 'wreckfest-gog-dlc1') 'the DLC of the chosen GOG game installs'
+Assert-True ($installNames -contains 'doom3-data-gog' -and $installNames -notcontains 'doom3xp-data-steam') 'a package conflicting with the chosen alternative is skipped'
+Assert-True ($installNames.IndexOf('ut2004-data-gog') -lt $installNames.IndexOf('ut2004-bin')) 'providers install before what needs them'
+Assert-True ((@($sel.Install | Where-Object Name -eq 'ut2004-bin')[0].Needs -join ',') -eq 'ut2004-data-gog') 'ut2004-bin records the provider it needs'
+$sel = Select-GamePackage -Packages $catalog -Installed @() -Available 40GB -Total 50GB -ReservePercent 20 -ExcludePattern $GamesExcludePattern
+$installNames = @($sel.Install | ForEach-Object { $_.Name })
+Assert-True ($installNames -notcontains 'wreckfest-gog' -and $installNames -notcontains 'wreckfest-gog-dlc1') 'the largest game and its DLC are dropped to keep 20% free'
+Assert-True (($sel.Skip | Where-Object Name -eq 'wreckfest-steam').Reason -match 'alternative to wreckfest-gog') 'the Steam alternative is not substituted for a dropped GOG game'
+Assert-True ((40GB - $sel.Need) -ge $sel.Reserve) 'the selection leaves the reserve free'
+$sel = Select-GamePackage -Packages $catalog -Installed @() -Available 1GB -Total 100GB -ReservePercent 20 -ExcludePattern $GamesExcludePattern
+Assert-True ($sel.Install.Count -eq 0) 'nothing installs when the reserve is already used up'
+$sel = Select-GamePackage -Packages @((Get-TestGame 'cro-mag-rally-net-bin' 100MB @('cro-mag-rally') @('cro-mag-rally-net'))) -Installed @('cro-mag-rally-net') -Available 1TB -Total 2TB -ReservePercent 20
+Assert-True ($sel.Install.Count -eq 0 -and $sel.Skip[0].Reason -match 'conflicts with installed cro-mag-rally-net') 'a conflict with an installed non-repo package skips the game'
+$sel = Select-GamePackage -Packages @((Get-TestGame 'wreckfest-gog' 30GB)) -Installed @('wreckfest-steam') -Available 1TB -Total 2TB -ReservePercent 20
+Assert-True ($sel.Install.Count -eq 0 -and $sel.Skip[0].Reason -eq 'alternative to installed wreckfest-steam') 'an installed source the repo no longer publishes keeps its game'
+$sel = Select-GamePackage -Packages @((Get-TestGame 'game-b' 1GB)) -Installed @('old-tool') -InstalledSpecs @([pscustomobject]@{ Name = 'old-tool'; Provides = @(); Conflicts = @('game-b') }) -Available 1TB -Total 2TB -ReservePercent 20
+Assert-True ($sel.Install.Count -eq 0 -and $sel.Skip[0].Reason -eq 'conflicts with installed old-tool') "an installed package's own conflicts count even when the repo dropped it"
+$sel = Select-GamePackage -Packages @((Get-TestGame 'mystery-gog' -1), (Get-TestGame 'small-gog' 1GB)) -Installed @() -Available 1TB -Total 2TB -ReservePercent 20
+Assert-True ((@($sel.Install | ForEach-Object { $_.Name }) -join ',') -eq 'small-gog' -and $sel.Skip[0].Reason -match 'size unknown') 'a game without a known size is skipped, not counted as free'
+Assert-True ((Compare-GooGetVersion -Left '1.2.10@1' -Right '1.2.9@5') -eq 1) 'googet versions compare numerically'
+Assert-True ((Compare-GooGetVersion -Left '1.0.0@2' -Right '1.0.0@1') -eq 1 -and (Compare-GooGetVersion -Left '3369.0.0@5' -Right '3369.0.0@5') -eq 0) 'the release breaks ties'
+Assert-True ((Compare-GooGetVersion -Left '2.1' -Right '1.9.9') -eq -1) 'a short version fills from the left, as goolib does (2.1 is 0.2.1)'
+Assert-True ((Get-GooGetArchPreference -Architecture 'ARM64') -join ',' -eq 'arm64,x86_64,x86_32,noarch') 'ARM64 prefers arm64, then emulated x86'
+$index = @(
+    [pscustomobject]@{ Source = 'a'; PackageSpec = [pscustomobject]@{ Name = 'quake3e'; Arch = 'x86_64' } },
+    [pscustomobject]@{ Source = 'b'; PackageSpec = [pscustomobject]@{ Name = 'quake3e'; Arch = 'arm64' } },
+    [pscustomobject]@{ Source = 'c'; PackageSpec = [pscustomobject]@{ Name = 'dhewm3'; Arch = 'x86_32' } },
+    [pscustomobject]@{ Source = 'd'; PackageSpec = [pscustomobject]@{ Name = 'tool'; Arch = 'arm' } }
+)
+$picked = @(Select-GooGetIndexEntry -Index $index -Archs (Get-GooGetArchPreference -Architecture 'ARM64'))
+Assert-True ((($picked | ForEach-Object { $_.Source }) -join ',') -eq 'b,c') 'one index entry per name in the best installable architecture'
+$picked = @(Select-GooGetIndexEntry -Index $index -Archs (Get-GooGetArchPreference -Architecture 'AMD64'))
+Assert-True ((($picked | ForEach-Object { $_.Source }) -join ',') -eq 'a,c') 'x64 machines take x86_64 then x86_32'
+$index = @(
+    [pscustomobject]@{ Source = 'old-x64'; PackageSpec = [pscustomobject]@{ Name = 'game'; Arch = 'x86_64'; Version = '1.0.0@1' } },
+    [pscustomobject]@{ Source = 'new-noarch'; PackageSpec = [pscustomobject]@{ Name = 'game'; Arch = 'noarch'; Version = '1.1.0@1' } },
+    [pscustomobject]@{ Source = 'newer-rel'; PackageSpec = [pscustomobject]@{ Name = 'data'; Arch = 'noarch'; Version = '2.0.0@3' } },
+    [pscustomobject]@{ Source = 'older-rel'; PackageSpec = [pscustomobject]@{ Name = 'data'; Arch = 'noarch'; Version = '2.0.0@2' } }
+)
+$picked = @(Select-GooGetIndexEntry -Index $index -Archs (Get-GooGetArchPreference -Architecture 'AMD64'))
+Assert-True ((($picked | ForEach-Object { $_.Source }) -join ',') -eq 'new-noarch,newer-rel') 'the newest version wins before the architecture, as googet installs it'
+Write-Output 'GAMES SELECTION PASSED'
 
 # --- GooGet: build inputs, googet.conf and the repo file ---------------------
 $sha = '56b678a6e6249ecae2a6b89f35686e6080e85358'

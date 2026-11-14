@@ -14,6 +14,11 @@
 #   full  core plus games (Lutris, Steam and its i686 libraries, the
 #         io.jor.* Flatpaks) and media extras (Navidrome, OwnTone, Plex,
 #         Rhythmbox, Brasero, the Transmission GUI/daemon/remote)
+#   games on its own, not on top of core or full, and touching nothing else:
+#         the LAN game-packages repo and every game it publishes for this
+#         architecture (see lib/select-games.awk: GOG builds before Steam
+#         before other sources, and the largest are left out when the set
+#         would leave less than 20% of the /opt filesystem free)
 # Modes: --dry-run prints the plan offline (no sudo, network, or writes);
 # --check reports CURRENT/DRIFT read-only and exits 2 on drift;
 # --no-upgrade installs only what is missing and keeps installed versions.
@@ -110,6 +115,16 @@ PLEX_KEY_FILE=/etc/pki/rpm-gpg/PLEX-RPM-GPG-KEY
 # crossdock's signing key for the LAN game-packages repo, vendored in files/.
 GAME_PACKAGES_KEY_FINGERPRINT=38C92DEA894BB3E48C50D6F0B48EFCBE62AAFAB2
 GAME_PACKAGES_KEY_FILE=/etc/pki/rpm-gpg/RPM-GPG-KEY-game-packages
+# The games profile: lib/select-games.awk picks from everything game-packages
+# publishes except these whole names (jm2 tools, servers, libraries and
+# runtimes: the games depend on what they need), keeping
+# GAMES_RESERVE_PERCENT of the filesystem holding GAMES_TARGET free.
+SELECT_GAMES_AWK=${SCRIPT_DIR}/lib/select-games.awk
+GAMES_EXCLUDE='(balun|carryout|crossdock|switchworks|tributary)(-bin)?|netatalk-appletalk|owntone-server|geysermc-bin|knockoutcity-server|agelanserver(-companion)?-bin|gamelaunch|gbe-fork-bin|xlln-bin|wine-ipv6only|umu-launcher|steamcmd|gconf|gtk2|openssl-1[.]0|xf86miscproto|lib[a-z0-9_.+-]*'
+GAMES_TARGET=/opt
+GAMES_RESERVE_PERCENT=20
+# dnf5's system cache, where game_records_fedora reads the repo metadata.
+DNF_SYSTEM_CACHE=/var/cache/libdnf5
 # Claude Code moved from Anthropic's RPM repo to its self-updating native
 # install; the repo file this script used to install and its key are retired.
 LEGACY_CLAUDE_REPO=/etc/yum.repos.d/claude-code.repo
@@ -477,7 +492,7 @@ die()  { printf '\033[1;31m==> ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() {
   cat <<USAGE
-Usage: ${0##*/} [--profile core|full] [--check | --dry-run] [--no-upgrade]
+Usage: ${0##*/} [--profile core|full|games] [--check | --dry-run] [--no-upgrade]
        [--wazuh-manager HOST]
        ${0##*/} -h|--help
 
@@ -488,6 +503,10 @@ privileged steps); safe to re-run at any time.
 
   --profile core  developer toolchains, editors, agents, browsers (default)
   --profile full  core plus games and media extras
+  --profile games on its own (not on top of core/full): the LAN
+                  game-packages repo and every game it publishes for this
+                  architecture (GOG before Steam before other sources),
+                  leaving at least ${GAMES_RESERVE_PERCENT}% of the ${GAMES_TARGET} filesystem free
   --check         read-only state report; no sudo or network
   --dry-run       offline plan for the selected profile; no sudo, network,
                   or writes
@@ -511,9 +530,9 @@ while (( $# )); do
   case $1 in
     -h|--help) usage; exit 0 ;;
     --profile)
-      (( $# >= 2 )) || { usage >&2; die "--profile requires core or full"; }
+      (( $# >= 2 )) || { usage >&2; die "--profile requires core, full or games"; }
       case $2 in
-        core|full) PROFILE=$2 ;;
+        core|full|games) PROFILE=$2 ;;
         *) usage >&2; die "Invalid profile: $2" ;;
       esac
       shift ;;
@@ -1968,6 +1987,279 @@ install_game_repo_pkgs() {
   note "game-packages: ${#GAME_REPO_PKGS[@]} game(s) from the LAN repository"
 }
 
+# ensure_game_packages_repo: the LAN game-packages repository (crossdock on
+# enthoo) with its pinned key; sets GAME_PACKAGES_REACHABLE when crossdock
+# answered and its metadata verified. Used by the full and games profiles.
+GAME_PACKAGES_REACHABLE=0
+ensure_game_packages_repo() {
+  local game_packages_fpr
+  # Games and engines built from jm2/game-packages, served by crossdock on the
+  # LAN. The key ships in files/ (the repo is plain HTTP); dnf skips the repo
+  # when the LAN is out of reach (skip_if_unavailable).
+  # Exactly one primary key, the pinned one: rpmkeys would trust every key in
+  # the file. Signing subkeys are allowed.
+  game_packages_fpr=$(gpg --batch --show-keys --with-colons "${FILES}/keys/game-packages.asc" 2>/dev/null \
+    | awk -F: '$1 == "pub" { want = 1; next } $1 == "sub" { want = 0 } $1 == "fpr" && want { print toupper($10); want = 0 }')
+  [[ ${game_packages_fpr} == "${GAME_PACKAGES_KEY_FINGERPRINT}" ]] \
+    || die "files/keys/game-packages.asc must hold only the pinned key ${GAME_PACKAGES_KEY_FINGERPRINT}"
+  put_file -s "${FILES}/keys/game-packages.asc" /etc/pki/rpm-gpg/RPM-GPG-KEY-game-packages
+  sudo rpmkeys --import "${GAME_PACKAGES_KEY_FILE}"
+  put_file -s "${FILES}/etc/yum.repos.d/game-packages.repo" /etc/yum.repos.d/game-packages.repo
+  dnf_repo_enabled game-packages || die "the game-packages repository is not enabled"
+  # repo_gpgcheck keeps its own metadata key; import it now, unattended, so
+  # dnf-automatic never meets a key prompt. Off the LAN, the first refresh on
+  # the LAN imports it (dnf upgrade -y below, or the next run).
+  if curl -fsI --max-time 3 -o /dev/null http://192.168.1.11:8080/rpm/game-packages/repodata/repomd.xml; then
+    # skip_if_unavailable would let a failed fetch or signature check pass, and
+    # without --refresh unexpired cached metadata would be reused.
+    if sudo dnf -y -q makecache --refresh --repo game-packages --setopt=game-packages.skip_if_unavailable=False; then
+      GAME_PACKAGES_REACHABLE=1
+      note "game-packages: metadata key imported, cache refreshed"
+    else
+      warn "game-packages: crossdock answered but its metadata could not be fetched or verified"
+    fi
+  else
+    note "game-packages: crossdock unreachable; dnf skips it until the LAN answers"
+  fi
+}
+
+#--- games profile -----------------------------------------------------------
+# game_packages_primary_xml: the game-packages primary metadata in dnf's
+# system cache (newest repo cache directory), which is world-readable even
+# though dnf itself will not read that cache for a normal user (the repository
+# sets repo_gpgcheck).
+game_packages_primary_xml() {
+  local -a files
+  mapfile -t files < <(ls -1t -- "${DNF_SYSTEM_CACHE}"/game-packages-*/repodata/*-primary.xml* 2>/dev/null)
+  (( ${#files[@]} )) || return 1
+  printf '%s\n' "${files[0]}"
+}
+
+# game_records_fedora: lib/select-games.awk input from the cached
+# game-packages primary metadata (R records for this architecture and noarch;
+# only plain capability names survive, so rich dependencies drop out) and the
+# RPM database (I records). Needs no sudo or network, so --check uses it too.
+game_records_fedora() {
+  local primary
+  primary=$(game_packages_primary_xml) || return 1
+  # shellcheck disable=SC2016 # awk program, not shell expansions
+  local rec_awk='
+    function has(l, w,   a, k, m) { m = split(l, a, " "); for (k = 1; k <= m; k++) if (a[k] == w) return 1; return 0 }
+    function attr(line, key,   v) {
+      if (!match(line, key "=\"[^\"]*\"")) return ""
+      v = substr(line, RSTART + length(key) + 2, RLENGTH - length(key) - 3)
+      return v
+    }
+    /<package / { name = ""; parch = ""; size = 0; field = ""; f["P"] = ""; f["C"] = ""; f["R"] = "" }
+    /<name>/ { v = $0; sub(/.*<name>/, "", v); sub(/<\/name>.*/, "", v); name = v }
+    /<arch>/ { v = $0; sub(/.*<arch>/, "", v); sub(/<\/arch>.*/, "", v); parch = v }
+    /<size / { size = attr($0, "installed") + 0 }
+    /<rpm:provides>/ { field = "P" }
+    /<rpm:conflicts>/ { field = "C" }
+    /<rpm:requires>/ { field = "R" }
+    /<\/rpm:(provides|conflicts|requires)>/ { field = "" }
+    /<rpm:entry / && field != "" {
+      v = attr($0, "name")
+      if (v ~ /^[A-Za-z0-9_][A-Za-z0-9_.+-]*$/ && !has(f[field], v)) f[field] = f[field] (f[field] == "" ? "" : " ") v
+    }
+    /<\/package>/ {
+      if (name != "" && (parch == "noarch" || parch == arch))
+        printf "R\t%s\t%s\t%s\t%s\t%s\n", name, size, f["P"], f["C"], f["R"]
+    }'
+  case ${primary} in
+    *.gz) gzip -dc -- "${primary}" ;;
+    *.zst) zstd -dcq -- "${primary}" ;;
+    *.xz) xz -dc -- "${primary}" ;;
+    *) cat -- "${primary}" ;;
+  esac | awk -v arch="${ARCH}" "${rec_awk}" || return 1
+  rpm -qa --qf '%{name}\t[%{provides} ]\t[%{conflicts} ]\n' \
+    | awk -F'\t' '{ printf "I\t%s\t%s\t%s\n", $1, $2, $3 }'
+}
+
+# games_target_dir: GAMES_TARGET, or its nearest existing parent before the
+# first game creates it.
+games_target_dir() {
+  local dir=${GAMES_TARGET}
+  while [[ ! -d ${dir} ]]; do dir=$(dirname -- "${dir}"); done
+  printf '%s\n' "${dir}"
+}
+
+# select_games <records-command...>: runs lib/select-games.awk on the
+# command's output against the free space of GAMES_TARGET's filesystem and
+# fills GAMES_KEEP, GAMES_INSTALL (dependency order), GAMES_NEEDS (per game,
+# the games in GAMES_INSTALL it depends on), GAMES_SKIP ("name reason") and
+# GAMES_SPACE ("need avail total kept-free" in bytes).
+GAMES_KEEP=()
+GAMES_INSTALL=()
+GAMES_SKIP=()
+GAMES_SPACE=
+declare -A GAMES_NEEDS=()
+select_games() {
+  local df_line total avail records output kind name rest
+  df_line=$(df -B1 --output=size,avail -- "$(games_target_dir)" | tail -n 1) \
+    || die "could not read the free space of ${GAMES_TARGET}"
+  read -r total avail <<<"${df_line}"
+  records=$("$@") || die "could not read the game-packages metadata"
+  grep -q '^R' <<<"${records}" || die "the game-packages metadata lists no packages"
+  output=$(awk -v exclude="${GAMES_EXCLUDE}" -v avail="${avail}" -v total="${total}" \
+    -v reserve="${GAMES_RESERVE_PERCENT}" -f "${SELECT_GAMES_AWK}" <<<"${records}") \
+    || die "could not select the games from the game-packages repository"
+  GAMES_KEEP=() GAMES_INSTALL=() GAMES_SKIP=() GAMES_SPACE='' GAMES_NEEDS=()
+  while read -r kind name rest; do
+    case ${kind} in
+      keep) GAMES_KEEP+=("${name}") ;;
+      install)
+        GAMES_INSTALL+=("${name}")
+        read -r _ GAMES_NEEDS["${name}"] <<<"${rest}"
+        ;;
+      skip) GAMES_SKIP+=("${name} ${rest}") ;;
+      space) GAMES_SPACE="${name} ${rest}" ;;
+    esac
+  done <<<"${output}"
+}
+
+# games_space_summary: one line from GAMES_SPACE.
+games_space_summary() {
+  local need avail total keep
+  read -r need avail total keep <<<"${GAMES_SPACE}"
+  printf '%s to install, %s free of %s on %s; %s (%s%%) stays free\n' \
+    "$(numfmt --to=iec "${need}")" "$(numfmt --to=iec "${avail}")" "$(numfmt --to=iec "${total}")" \
+    "${GAMES_TARGET}" "$(numfmt --to=iec "${keep}")" "${GAMES_RESERVE_PERCENT}"
+}
+
+# print_games_plan: the offline --dry-run plan of the games profile. The game
+# list depends on the repository and the disk, so it is decided at apply time.
+print_games_plan() {
+  printf 'Profile: games; mode: dry-run (offline; no sudo, network, or writes)\n'
+  printf 'PLAN: standalone; nothing from the core or full profiles is installed or configured\n'
+  printf 'PLAN: game-packages repository: pinned key %s, %s; import its metadata key\n' \
+    "${GAME_PACKAGES_KEY_FINGERPRINT}" /etc/yum.repos.d/game-packages.repo
+  printf 'PLAN: stop unless http://192.168.1.11:8080 answers (the games come only from the LAN repository)\n'
+  printf 'PLAN: %s\n' "$( (( NO_UPGRADE )) && echo 'installed games kept at their versions (--no-upgrade)' || echo 'dnf upgrade --from-repo game-packages <installed games> (the rest of the system is left alone)')"
+  printf 'PLAN: every game game-packages publishes for %s except tools, servers, libraries and runtimes (%s),\n' "${ARCH}" "${GAMES_EXCLUDE}"
+  printf '      one alternative per game (installed first, then GOG, Steam, other sources), dropping the largest\n'
+  printf '      until at least %s%% of the %s filesystem stays free; installed one at a time without weak\n' "${GAMES_RESERVE_PERCENT}" "${GAMES_TARGET}"
+  printf '      dependencies, through a dnf cache on that filesystem (packages are not kept)\n'
+}
+
+# run_games_check: read-only state of the games profile against dnf's cached
+# metadata (no sudo or network). Exit 0 converged, 2 drift.
+run_games_check() {
+  local name
+  CHECK_DRIFT=0
+  printf 'Profile: games; mode: check (read-only)\n'
+  if [[ -f /etc/yum.repos.d/game-packages.repo && ! -L /etc/yum.repos.d/game-packages.repo ]] \
+     && [[ $(<"${FILES}/etc/yum.repos.d/game-packages.repo") == "$(</etc/yum.repos.d/game-packages.repo)" ]]; then
+    check_report CURRENT "/etc/yum.repos.d/game-packages.repo"
+  else
+    check_report DRIFT "/etc/yum.repos.d/game-packages.repo: missing or differs from files/"
+  fi
+  if ! game_packages_primary_xml >/dev/null; then
+    check_report DRIFT "game-packages metadata: not cached (apply fetches it on the LAN)"
+  else
+    select_games game_records_fedora
+    for name in "${GAMES_KEEP[@]}"; do check_report CURRENT "game ${name}"; done
+    for name in "${GAMES_INSTALL[@]}"; do check_report DRIFT "game ${name}: not installed"; done
+    for name in "${GAMES_SKIP[@]}"; do check_report NOTE "game ${name%% *}: skipped, ${name#* }"; done
+    check_report NOTE "space: $(games_space_summary)"
+  fi
+  if (( CHECK_DRIFT )); then
+    printf 'Result: drift found\n'
+    return 2
+  fi
+  printf 'Result: converged\n'
+}
+
+# games_repo_reachable: crossdock still answers with the game-packages metadata.
+games_repo_reachable() {
+  curl -fsI --max-time 5 -o /dev/null http://192.168.1.11:8080/rpm/game-packages/repodata/repomd.xml
+}
+
+# games_clear_downloads <cache>: drop downloaded packages from the games' dnf
+# cache, keeping the repository metadata (keepcache=False leaves a failed
+# transaction's downloads behind).
+games_clear_downloads() {
+  sudo find "$1" -path '*/packages/*' -type f -delete
+}
+
+# run_games_apply: the games profile. Installed games are upgraded by name
+# from game-packages (nothing else on the system), then the selection is made
+# against the space that leaves. Each new game installs in its own dnf
+# transaction, from game-packages only (dependencies from any repository),
+# without weak dependencies (an optional data package would pull whichever
+# alternative dnf prefers), through a dnf cache on the games' filesystem whose
+# downloads are cleared after every attempt, so neither / nor the space check
+# has to hold the whole set twice. The run stops if crossdock drops off the
+# network.
+run_games_apply() {
+  local cache name need dep failed=()
+  local -a dnf_games
+  log "Fedora ${FEDORA_VERSION} on ${ARCH} (profile: games$( (( NO_UPGRADE )) && echo '; --no-upgrade'))"
+  log "Authenticating sudo"
+  sudo -v || die "sudo authentication failed"
+  local prereqs=()
+  command -v gpg >/dev/null || prereqs+=(gnupg2)
+  command -v curl >/dev/null || prereqs+=(curl-minimal)
+  if (( ${#prereqs[@]} )); then
+    log "Installing prerequisites: ${prereqs[*]}"
+    sudo dnf -y install "${prereqs[@]}"
+  fi
+  log "game-packages repository (LAN)"
+  ensure_game_packages_repo
+  (( GAME_PACKAGES_REACHABLE )) \
+    || die "crossdock (http://192.168.1.11:8080) is unreachable; the games profile installs only from the LAN game-packages repository"
+
+  sudo install -d -m 0755 -- "${GAMES_TARGET}"
+  cache=$(sudo mktemp -d -- "${GAMES_TARGET}/.game-packages-cache.XXXXXX") \
+    || die "could not create a dnf cache under ${GAMES_TARGET}"
+  # shellcheck disable=SC2064 # expand ${cache} now, while it is set
+  trap "sudo rm -rf -- '${cache}'; cleanup" EXIT
+  dnf_games=(-y --setopt=install_weak_deps=False --setopt=keepcache=False "--setopt=system_cachedir=${cache}")
+
+  log "Selecting games"
+  select_games game_records_fedora
+  if (( NO_UPGRADE )); then
+    note "installed games kept at their versions (--no-upgrade)"
+  elif (( ${#GAMES_KEEP[@]} )); then
+    # dnf applies --from-repo only to the packages named; with none it would
+    # upgrade the whole system.
+    log "Updating ${#GAMES_KEEP[@]} installed game(s) from game-packages"
+    sudo dnf "${dnf_games[@]}" upgrade --from-repo game-packages -- "${GAMES_KEEP[@]}"
+    games_clear_downloads "${cache}"
+    select_games game_records_fedora
+  fi
+  note "${#GAMES_KEEP[@]} installed, ${#GAMES_INSTALL[@]} to install, ${#GAMES_SKIP[@]} skipped"
+  note "$(games_space_summary)"
+  for name in "${GAMES_SKIP[@]}"; do note "skipped ${name%% *}: ${name#* }"; done
+  (( ! ${#GAMES_INSTALL[@]} )) || log "Installing ${#GAMES_INSTALL[@]} game(s)"
+  for name in "${GAMES_INSTALL[@]}"; do
+    note "${name}"
+    need=
+    for dep in ${GAMES_NEEDS[${name}]:-}; do
+      [[ " ${failed[*]} " == *" ${dep} "* ]] && { need=${dep}; break; }
+    done
+    if [[ -n ${need} ]]; then
+      warn "${name}: skipped, it needs ${need}, which failed (dnf would pick another alternative)"
+      failed+=("${name}")
+      continue
+    fi
+    if ! sudo dnf "${dnf_games[@]}" install --from-repo game-packages -- "${name}"; then
+      failed+=("${name}")
+      games_clear_downloads "${cache}"
+      games_repo_reachable \
+        || die "crossdock stopped answering; not installed: ${failed[*]} and the rest of the selection"
+      warn "${name}: dnf failed; continuing with the next game"
+      continue
+    fi
+    games_clear_downloads "${cache}"
+  done
+  sudo rm -rf -- "${cache}"
+  trap cleanup EXIT
+
+  log "Done: $(( ${#GAMES_INSTALL[@]} - ${#failed[@]} )) installed now, ${#GAMES_KEEP[@]} already installed, ${#GAMES_SKIP[@]} skipped, ${#failed[@]} failed"
+  (( ! ${#failed[@]} )) || die "not installed: ${failed[*]}"
+}
+
 # keep_installed <command|rpm:name>: with --no-upgrade, succeed (and skip the
 # installer) when the tool is already present; otherwise fail so it runs.
 tool_present() {
@@ -2412,6 +2704,35 @@ check_state() {
   printf 'Result: converged\n'
 }
 
+if [[ ${PROFILE} == games ]]; then
+  if [[ ${MODE} == dry-run ]]; then
+    print_games_plan
+    exit 0
+  fi
+  [[ ${EUID} -ne 0 ]] || die "Run as your normal user, not root (sudo is used where needed)."
+  [[ -f /etc/fedora-release ]] || die "This script is for Fedora."
+  [[ -d ${FILES} ]] || die "Payload directory not found: ${FILES}"
+  [[ -r ${SELECT_GAMES_AWK} ]] || die "Game selector not found: ${SELECT_GAMES_AWK}"
+  command -v dnf >/dev/null || die "dnf is required."
+  command -v rpm >/dev/null || die "rpm is required."
+  if [[ ${MODE} == check ]]; then
+    check_status=0
+    run_games_check || check_status=$?
+    exit "${check_status}"
+  fi
+  command -v sudo >/dev/null || die "sudo is required."
+  FEDORA_VERSION=$(rpm -E %fedora)
+  DNF_VERSION_OUTPUT=$(dnf --version 2>/dev/null) || die "could not query the DNF version"
+  [[ ${DNF_VERSION_OUTPUT} == dnf5\ version* ]] || die "DNF5 is required."
+  WORK_DIR=$(mktemp -d)
+  cleanup() {
+    rm -rf "${WORK_DIR}"
+  }
+  trap cleanup EXIT
+  run_games_apply
+  exit 0
+fi
+
 select_profile
 if [[ ${MODE} == dry-run ]]; then
   print_plan
@@ -2554,36 +2875,8 @@ if (( IS_X86_64 )) && [[ ${PROFILE} == full ]]; then
   put_file -s "${FILES}/etc/yum.repos.d/plex.repo" /etc/yum.repos.d/plex.repo
   dnf_repo_enabled PlexTv || die "the Plex Media Server repository is not enabled"
 fi
-GAME_PACKAGES_REACHABLE=0
 if [[ ${PROFILE} == full ]]; then
-  # Games and engines built from jm2/game-packages, served by crossdock on the
-  # LAN. The key ships in files/ (the repo is plain HTTP); dnf skips the repo
-  # when the LAN is out of reach (skip_if_unavailable).
-  # Exactly one primary key, the pinned one: rpmkeys would trust every key in
-  # the file. Signing subkeys are allowed.
-  game_packages_fpr=$(gpg --batch --show-keys --with-colons "${FILES}/keys/game-packages.asc" 2>/dev/null \
-    | awk -F: '$1 == "pub" { want = 1; next } $1 == "sub" { want = 0 } $1 == "fpr" && want { print toupper($10); want = 0 }')
-  [[ ${game_packages_fpr} == "${GAME_PACKAGES_KEY_FINGERPRINT}" ]] \
-    || die "files/keys/game-packages.asc must hold only the pinned key ${GAME_PACKAGES_KEY_FINGERPRINT}"
-  put_file -s "${FILES}/keys/game-packages.asc" /etc/pki/rpm-gpg/RPM-GPG-KEY-game-packages
-  sudo rpmkeys --import "${GAME_PACKAGES_KEY_FILE}"
-  put_file -s "${FILES}/etc/yum.repos.d/game-packages.repo" /etc/yum.repos.d/game-packages.repo
-  dnf_repo_enabled game-packages || die "the game-packages repository is not enabled"
-  # repo_gpgcheck keeps its own metadata key; import it now, unattended, so
-  # dnf-automatic never meets a key prompt. Off the LAN, the first refresh on
-  # the LAN imports it (dnf upgrade -y below, or the next run).
-  if curl -fsI --max-time 3 -o /dev/null http://192.168.1.11:8080/rpm/game-packages/repodata/repomd.xml; then
-    # skip_if_unavailable would let a failed fetch or signature check pass, and
-    # without --refresh unexpired cached metadata would be reused.
-    if sudo dnf -y -q makecache --refresh --repo game-packages --setopt=game-packages.skip_if_unavailable=False; then
-      GAME_PACKAGES_REACHABLE=1
-      note "game-packages: metadata key imported, cache refreshed"
-    else
-      warn "game-packages: crossdock answered but its metadata could not be fetched or verified"
-    fi
-  else
-    note "game-packages: crossdock unreachable; dnf skips it until the LAN answers"
-  fi
+  ensure_game_packages_repo
 fi
 # sing-box: modern multi-protocol proxy (shadowsocks incl. 2022 ciphers).
 # Reconcile enabled state rather than treating any file as sufficient.
