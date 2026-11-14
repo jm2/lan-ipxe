@@ -191,6 +191,21 @@ them `-Profile`, `-Check`, `-DryRun`, `-NoUpgrade`):
 - `--profile core|full` — core (the default) installs every developer toolchain,
   editor, AI agent, and everyday app; full adds games and media servers/apps.
   Switching a machine from full to core removes nothing.
+- `--profile games` (Arch, Fedora, Windows) — a profile of its own, not added on top
+  of core or full: it sets up only the LAN game-packages repository (on Arch also
+  `[multilib]`; on Windows GooGet, with the Go and Git it is built from) and installs
+  every game the repository publishes for that platform and architecture. Tools,
+  servers, libraries and runtimes are left out (games pull in what they need). Where a
+  game comes from several sources, an installed copy is kept and otherwise GOG wins,
+  then Steam, then archive.org and the rest (`lib/select-games.awk`; the Windows
+  script mirrors it). The largest games are left out until at least 20% of the
+  filesystem holding `/opt` (Program Files on Windows) stays free afterwards: a
+  ballpark from the packages' installed sizes (download size × 1.25 on Windows,
+  whose GooGet index has none). Each game is a separate install whose downloaded
+  package is not kept, so the disk never holds the whole set twice; on Windows
+  `googet remove` downloads it again when it needs it. The profile stops when enthoo
+  is unreachable. `--check` lists the games that would still install and why the
+  others are skipped.
 - `--dry-run` — offline, read-only plan for the selected profile (no sudo, network, or
   writes); exits 0.
 - `--check` — read-only state report (`CURRENT`/`DRIFT`); exits 0 when converged, 2 on

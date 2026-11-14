@@ -46,7 +46,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install shell test dependencies
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends jq systemd-zram-generator
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends jq systemd-zram-generator libarchive-tools
       - name: Run mocked Linux setup behavior tests
         run: |
           tests/test-controller-release-updates.sh
@@ -56,6 +56,7 @@ jobs:
           tests/test-scanner-neutralize.sh
           tests/test-arch-profiles.sh
           tests/test-fedora-profiles.sh
+          tests/test-games-profile.sh
           tests/test-pacman-update.sh
           tests/test-zram-generator.sh
           /bin/bash tests/test-macos-shell.sh
