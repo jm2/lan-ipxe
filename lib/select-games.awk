@@ -23,7 +23,9 @@
 #   - Alternatives of one game (declared conflicts or provides, or names
 #     that differ only in a trailing -gog/-steam/-archiveorg/-revoltio/-hib
 #     source) resolve to GOG first, then Steam, then any other source.
-#   - A candidate conflicting with any installed package is skipped.
+#   - A candidate conflicting with any installed package, or another source
+#     of a game installed from a source the repository no longer publishes,
+#     is skipped.
 #   - A candidate needing something that only a skipped candidate provides
 #     is skipped too (a GOG DLC once the GOG game lost, an engine whose
 #     data package was dropped), so no unwanted alternative is pulled in.
@@ -162,6 +164,7 @@ END {
     for (j = 1; j <= ni && why == ""; j++) {
       o = iname[j]
       if (overlap(rconf[n], iprov[o]) || overlap(iconf[o], rprov[n])) why = "conflicts with installed " o
+      else if (game_key(n) != n && game_key(o) == game_key(n)) why = "alternative to installed " o
     }
     for (o in chosen) {
       if (why != "") break

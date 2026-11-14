@@ -69,6 +69,12 @@ test_selector() {
   grep -qx "install ut2004-bin $((GB / 7)) ut2004-data-gog" <<<"${out}" \
     || fail 'ut2004-bin lists the provider it needs'
 
+  # A Steam copy the repository no longer publishes still counts as installed.
+  out=$(printf 'R\twreckfest-wine-gog\t%s\t\t\t\nI\twreckfest-wine-steam\t\t\n' $((30 * GB)) \
+    | select_games $((1000 * GB)) $((2000 * GB)))
+  grep -qx 'skip wreckfest-wine-gog alternative to installed wreckfest-wine-steam' <<<"${out}" \
+    || fail "an installed unpublished source keeps its game (got: ${out})"
+
   # 40 GiB free of 50: the 30 GiB GOG Wreckfest and its DLC are dropped, and
   # the Steam copy is not substituted.
   out=$(records | select_games $((40 * GB)) $((50 * GB)))

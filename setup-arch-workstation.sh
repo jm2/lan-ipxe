@@ -849,10 +849,16 @@ run_games_check() {
   (( CHECK_DRIFT == 0 )) || return 2
 }
 
-# run_games_apply: the games profile. Each game installs in its own pacman
-# transaction through a download cache on the games' filesystem, emptied
-# after each one, so neither / nor the space check has to hold the whole set
-# twice.
+# games_repo_reachable: crossdock still answers with the game-packages database.
+games_repo_reachable() {
+  curl -fsI --max-time 5 -o /dev/null http://192.168.1.11:8080/arch/game-packages/x86_64/game-packages.db
+}
+
+# run_games_apply: the games profile. Every download, the -Syu that updates
+# installed games included, goes through a cache on the games' filesystem that
+# is emptied after each transaction, so neither / nor the space check has to
+# hold the downloads. Each game installs from game-packages in its own pacman
+# transaction; the run stops if crossdock drops off the network.
 run_games_apply() {
   local sync_db cache name need dep failed=()
   log "Profile: games$( (( NO_UPGRADE )) && printf ' (--no-upgrade)' )"
@@ -862,13 +868,23 @@ run_games_apply() {
   ensure_game_packages_repo
   grep -q '^\[game-packages\]' "${GAME_PACKAGES_CONF}" \
     || die "crossdock (http://192.168.1.11:8080) is unreachable; the games profile installs only from the LAN game-packages repository"
+
+  sudo install -d -m 0755 -- "${GAMES_TARGET}"
+  cache=$(sudo mktemp -d -- "${GAMES_TARGET}/.game-packages-cache.XXXXXX") \
+    || die "could not create a download cache under ${GAMES_TARGET}"
+  # pacman downloads as its unprivileged DownloadUser, which must reach it.
+  sudo chmod 0755 -- "${cache}"
+  # shellcheck disable=SC2064 # expand ${cache} now, while it is set
+  trap "sudo rm -rf -- '${cache}'; cleanup" EXIT
+
   if (( NO_UPGRADE )); then
     sync_dbs_present \
       || die "--no-upgrade needs an existing sync database for every enabled repository; rerun without --no-upgrade"
     warn "--no-upgrade: skipping pacman -Syu (a partial upgrade if the sync databases are stale)"
   else
-    log "Syncing databases and applying updates (pacman -Syu)"
-    sudo pacman -Syu --noconfirm
+    log "Syncing databases and applying updates (pacman -Syu, downloads through ${cache})"
+    sudo pacman -Syu --noconfirm --cachedir "${cache}"
+    sudo find "${cache}" -mindepth 1 -delete
   fi
   sync_db=$(pacman-conf DBPath 2>/dev/null) || sync_db=/var/lib/pacman/
   sync_db=${sync_db%/}/sync/game-packages.db
@@ -879,19 +895,8 @@ run_games_apply() {
   note "${#GAMES_KEEP[@]} installed, ${#GAMES_INSTALL[@]} to install, ${#GAMES_SKIP[@]} skipped"
   note "$(games_space_summary)"
   for name in "${GAMES_SKIP[@]}"; do note "skipped ${name%% *}: ${name#* }"; done
-  if (( ! ${#GAMES_INSTALL[@]} )); then
-    log "Done: nothing to install"
-    return 0
-  fi
 
-  sudo install -d -m 0755 -- "${GAMES_TARGET}"
-  cache=$(sudo mktemp -d -- "${GAMES_TARGET}/.game-packages-cache.XXXXXX") \
-    || die "could not create a download cache under ${GAMES_TARGET}"
-  # pacman downloads as its unprivileged DownloadUser, which must reach it.
-  sudo chmod 0755 -- "${cache}"
-  # shellcheck disable=SC2064 # expand ${cache} now, while it is set
-  trap "sudo rm -rf -- '${cache}'; cleanup" EXIT
-  log "Installing ${#GAMES_INSTALL[@]} game(s)"
+  (( ! ${#GAMES_INSTALL[@]} )) || log "Installing ${#GAMES_INSTALL[@]} game(s)"
   for name in "${GAMES_INSTALL[@]}"; do
     note "${name}"
     need=
@@ -903,9 +908,15 @@ run_games_apply() {
       failed+=("${name}")
       continue
     fi
-    if ! sudo pacman -S --needed --noconfirm --cachedir "${cache}" -- "${name}"; then
-      warn "${name}: pacman failed; continuing with the next game"
+    # Repository-qualified: an earlier repository with the same name would
+    # otherwise win, and selection measured the game-packages package.
+    if ! sudo pacman -S --needed --noconfirm --cachedir "${cache}" -- "game-packages/${name}"; then
       failed+=("${name}")
+      sudo find "${cache}" -mindepth 1 -delete
+      games_repo_reachable \
+        || die "crossdock stopped answering; not installed: ${failed[*]} and the rest of the selection"
+      warn "${name}: pacman failed; continuing with the next game"
+      continue
     fi
     sudo find "${cache}" -mindepth 1 -delete
   done

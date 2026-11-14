@@ -2113,12 +2113,17 @@ function Get-GameKey {
 # source) resolve to the best-ranked source; a candidate conflicting with an
 # installed package is skipped; one depending on something only a skipped
 # candidate provides is skipped too; and the largest are dropped until at
-# least $ReservePercent of $Total stays free. Install is in dependency order,
-# each with Needs: the new packages it depends on.
+# least $ReservePercent of $Total stays free. A package without a known size
+# (Size below 0) is skipped rather than counted as free. Install is in
+# dependency order, each with Needs: the new packages it depends on.
 function Select-GamePackage {
     param(
         [AllowEmptyCollection()][object[]]$Packages = @(),
         [AllowEmptyCollection()][string[]]$Installed = @(),
+        # Installed packages' own specs (Name, Provides, Conflicts), from
+        # `googet installed -format=json`; the catalog entry, or the bare
+        # name, stands in for any missing here.
+        [AllowEmptyCollection()][object[]]$InstalledSpecs = @(),
         [Parameter(Mandatory = $true)][double]$Available,
         [Parameter(Mandatory = $true)][double]$Total,
         [Parameter(Mandatory = $true)][double]$ReservePercent,
@@ -2140,7 +2145,12 @@ function Select-GamePackage {
     $chosen = [ordered]@{}
     foreach ($c in $candidates) { if ($Installed -contains $c.Name) { $chosen[$c.Name] = $c } }
     $installedPackages = @(foreach ($name in $Installed) {
-        if ($byName.Contains($name)) { $byName[$name] } else { [pscustomobject]@{ Name = $name; Provides = @($name); Conflicts = @() } }
+        $spec = @($InstalledSpecs | Where-Object { $_.Name -eq $name })[0]
+        if ($spec) {
+            [pscustomobject]@{ Name = $name; Provides = @(@($name) + @($spec.Provides) | Where-Object { $_ }); Conflicts = @($spec.Conflicts | Where-Object { $_ }) }
+        }
+        elseif ($byName.Contains($name)) { $byName[$name] }
+        else { [pscustomobject]@{ Name = $name; Provides = @($name); Conflicts = @() } }
     })
     $test = { param($a, $b) @($a | Where-Object { $b -contains $_ }).Count -gt 0 }
     $alternatives = {
@@ -2153,10 +2163,15 @@ function Select-GamePackage {
         Sort-Object -Property @{ Expression = { Get-GameSourceRank -Name $_.Name } }, @{ Expression = { $_.Name } })
     $reasons = [ordered]@{}
     $fresh = [ordered]@{}
+    $cKey = $null
     foreach ($c in $order) {
         $why = $null
+        if ($c.Size -lt 0) { $why = 'download size unknown, so it cannot be budgeted' }
+        $cKey = Get-GameKey -Name $c.Name
         foreach ($i in $installedPackages) {
+            if ($why) { break }
             if ((& $test $c.Conflicts $i.Provides) -or (& $test $i.Conflicts $c.Provides)) { $why = "conflicts with installed $($i.Name)"; break }
+            if ($cKey -ne $c.Name -and $cKey -eq (Get-GameKey -Name $i.Name)) { $why = "alternative to installed $($i.Name)"; break }
         }
         if (-not $why) {
             foreach ($o in @($chosen.Values)) { if (& $alternatives $c $o) { $why = "alternative to $($o.Name)"; break } }
@@ -2227,8 +2242,39 @@ function Get-GooGetArchPreference {
     return @('x86_64', 'x86_32', 'noarch')
 }
 
-# Pure: one index entry per package name, in the architecture googet would
-# pick; entries for architectures this machine cannot install are dropped.
+# Pure: googet's version order (goolib.Compare): "major.minor.patch@release",
+# a version with fewer than three parts filled from the left with zeros, then
+# the release number. Returns -1, 0 or 1.
+function Compare-GooGetVersion {
+    param([AllowEmptyString()][string]$Left = '', [AllowEmptyString()][string]$Right = '')
+    $parse = {
+        param($v)
+        $halves = @($v -split '@', 2)
+        $release = if ($halves.Count -gt 1) { $halves[1] } else { '0' }
+        $semver = ($halves[0] -split '[+-]', 2)[0]
+        $parts = @($semver -split '\.', 3)
+        $nums = @([decimal]0, [decimal]0, [decimal]0)
+        for ($k = 0; $k -lt $parts.Count; $k++) {
+            $n = [decimal]0
+            [void][decimal]::TryParse($parts[$k], [ref]$n)
+            $nums[$k + 3 - $parts.Count] = $n
+        }
+        $r = [decimal]0
+        [void][decimal]::TryParse([string]$release, [ref]$r)
+        return @($nums + $r)
+    }
+    $a = & $parse $Left
+    $b = & $parse $Right
+    for ($k = 0; $k -lt 4; $k++) {
+        if ($a[$k] -gt $b[$k]) { return 1 }
+        if ($a[$k] -lt $b[$k]) { return -1 }
+    }
+    return 0
+}
+
+# Pure: one index entry per package name, the one googet would install
+# (client.FindRepoLatest): the newest version, then the best architecture;
+# entries for architectures this machine cannot install are dropped.
 function Select-GooGetIndexEntry {
     param([AllowEmptyCollection()][object[]]$Index = @(), [Parameter(Mandatory = $true)][string[]]$Archs)
     $best = [ordered]@{}
@@ -2237,25 +2283,36 @@ function Select-GooGetIndexEntry {
         $rank = [Array]::IndexOf($Archs, [string]$spec.Arch)
         if ($rank -lt 0) { continue }
         $name = [string]$spec.Name
-        if (-not $best.Contains($name) -or $rank -lt $best[$name].Rank) { $best[$name] = [pscustomobject]@{ Rank = $rank; Entry = $entry } }
+        if ($best.Contains($name)) {
+            $cmp = Compare-GooGetVersion -Left ([string]$spec.Version) -Right ([string]$best[$name].Entry.PackageSpec.Version)
+            if ($cmp -lt 0 -or ($cmp -eq 0 -and $rank -ge $best[$name].Rank)) { continue }
+        }
+        $best[$name] = [pscustomobject]@{ Rank = $rank; Entry = $entry }
     }
     return @($best.Values | ForEach-Object { $_.Entry })
 }
 
 # The repo's packages for this machine as Select-GamePackage input. Sizes are
-# HEAD Content-Length of each .goo times $GamesSizeFactor.
+# HEAD Content-Length of each .goo times $GamesSizeFactor (two tries); -1 when
+# unknown, which Select-GamePackage skips.
 function Get-GamePackageCatalog {
     $index = @(Invoke-RestMethod -Uri "$GooGetRepoUrl/index" -UseBasicParsing -TimeoutSec 30)
     if ($index.Count -eq 1 -and $index[0] -is [array]) { $index = @($index[0]) }
     $base = $GooGetRepoUrl.Substring(0, $GooGetRepoUrl.LastIndexOf('/') + 1)
     foreach ($entry in (Select-GooGetIndexEntry -Index $index -Archs (Get-GooGetArchPreference))) {
         $spec = $entry.PackageSpec
-        $size = 0
-        try {
-            $head = Invoke-WebRequest -Uri ($base + $entry.Source) -Method Head -UseBasicParsing -TimeoutSec 30
-            $size = [double](@($head.Headers['Content-Length'])[0]) * $GamesSizeFactor
+        $size = -1
+        foreach ($try in 1..2) {
+            try {
+                $head = Invoke-WebRequest -Uri ($base + $entry.Source) -Method Head -UseBasicParsing -TimeoutSec 30
+                $length = [double]0
+                if ([double]::TryParse([string](@($head.Headers['Content-Length'])[0]), [ref]$length) -and $length -gt 0) {
+                    $size = $length * $GamesSizeFactor
+                    break
+                }
+            }
+            catch { Write-Verbose "games: no size for $($spec.Name) (try $try): $($_.Exception.Message)" }
         }
-        catch { Write-Verbose "games: no size for $($spec.Name): $($_.Exception.Message)" }
         $deps = @()
         if ($spec.PkgDependencies) { $deps = @($spec.PkgDependencies.PSObject.Properties | ForEach-Object { $_.Name }) }
         [pscustomobject]@{
@@ -2282,16 +2339,44 @@ function Format-GameSize {
     return '{0:N0} MB' -f ($Bytes / 1MB)
 }
 
-# Selects the games against the live repo, the installed set and the drive.
+# Installed packages' own specs (Name, Provides, Conflicts with Replaces), from
+# `googet installed -format=json`; empty when googet cannot report them, and
+# Select-GamePackage then falls back to the catalog.
+function Get-GooGetInstalledSpec {
+    param([Parameter(Mandatory = $true)][string]$Exe, [Parameter(Mandatory = $true)][string]$Root)
+    try {
+        $json = (Invoke-GooGetCommand -Exe $Exe -Root $Root -Arguments @('installed', '-format=json') 2>$null) -join "`n"
+        if ($LASTEXITCODE -ne 0 -or -not $json.Trim()) { return @() }
+        foreach ($state in @($json | ConvertFrom-Json | ForEach-Object { $_ })) {
+            $spec = $state.PackageSpec
+            if (-not $spec) { continue }
+            [pscustomobject]@{
+                Name      = [string]$spec.Name
+                Provides  = @($spec.Provides | Where-Object { $_ } | ForEach-Object { ([string]$_ -split '=')[0] })
+                Conflicts = @(@($spec.Conflicts) + @($spec.Replaces) | Where-Object { $_ } | ForEach-Object { ([string]$_ -split '=')[0] })
+            }
+        }
+    }
+    catch {
+        Write-Verbose "games: googet installed -format=json: $($_.Exception.Message)"
+        return @()
+    }
+}
+
+# Selects the games against the live repo (or a catalog already read), the
+# installed set and the drive as they are now.
 function Get-GameSelection {
-    param([Parameter(Mandatory = $true)]$GooGet)
-    $installed = @(Get-GooGetInstalledPackage -Exe $GooGet.Exe -Root (Get-GooGetRoot))
-    $catalog = @(Get-GamePackageCatalog)
-    if (-not $catalog.Count) { throw "$GooGetRepoUrl lists no packages for this machine" }
+    param([Parameter(Mandatory = $true)]$GooGet, [object[]]$Catalog)
+    $root = Get-GooGetRoot
+    $installed = @(Get-GooGetInstalledPackage -Exe $GooGet.Exe -Root $root)
+    $installedSpecs = @(Get-GooGetInstalledSpec -Exe $GooGet.Exe -Root $root)
+    if (-not $Catalog) { $Catalog = @(Get-GamePackageCatalog) }
+    if (-not $Catalog.Count) { throw "$GooGetRepoUrl lists no packages for this machine" }
     $drive = Get-GameDrive
-    $selection = Select-GamePackage -Packages $catalog -Installed $installed -Available $drive.Available -Total $drive.Total `
-        -ReservePercent $GamesReservePercent -ExcludePattern $GamesExcludePattern
+    $selection = Select-GamePackage -Packages $Catalog -Installed $installed -InstalledSpecs $installedSpecs `
+        -Available $drive.Available -Total $drive.Total -ReservePercent $GamesReservePercent -ExcludePattern $GamesExcludePattern
     $selection | Add-Member -NotePropertyName Drive -NotePropertyValue $drive
+    $selection | Add-Member -NotePropertyName Catalog -NotePropertyValue $Catalog
     return $selection
 }
 
@@ -2302,13 +2387,35 @@ function Write-GameSpace {
         $Selection.Drive.Name, (Format-GameSize $Selection.Reserve), $GamesReservePercent)
 }
 
+# One googet install from the game-packages repo only (-sources overrides the
+# other .repo files, so another repo cannot supply a package selection did not
+# measure), followed by clearing the downloads: this package's cached .goo,
+# and with `googet clean` anything left by a failed attempt. Returns whether
+# googet exited 0 and the package is installed.
+function Invoke-GameInstall {
+    param([Parameter(Mandatory = $true)]$GooGet, [Parameter(Mandatory = $true)][string]$Name)
+    $root = Get-GooGetRoot
+    $ok = $false
+    try {
+        Invoke-GooGetCommand -Exe $GooGet.Exe -Root $root -Arguments @('-noconfirm', 'install', '-sources', $GooGetRepoUrl, $Name) | Out-Host
+        $code = $LASTEXITCODE
+        $ok = $code -eq 0 -and @(Get-GooGetInstalledPackage -Exe $GooGet.Exe -Root $root) -contains $Name
+        if (-not $ok) { Write-Warning "games: $Name is not installed or updated (googet exited with $code)" }
+    }
+    finally {
+        Invoke-GooGetCommand -Exe $GooGet.Exe -Root $root -Arguments @('clean', "-packages=$Name") | Out-Null
+        if (-not $ok) { Invoke-GooGetCommand -Exe $GooGet.Exe -Root $root -Arguments @('clean') | Out-Null }
+    }
+    return $ok
+}
+
 # Each game installs on its own, so a failure costs only that game (and the
 # games needing it, which are skipped rather than letting googet pick another
 # alternative). Its cached .goo is cleared afterwards, so the drive does not
 # hold every game twice; `googet remove` downloads it again when it needs it.
+# Stops when the repo stops answering.
 function Install-GameSet {
     param([Parameter(Mandatory = $true)]$GooGet, [Parameter(Mandatory = $true)]$Selection)
-    $root = Get-GooGetRoot
     $failed = @()
     foreach ($game in $Selection.Install) {
         $missingNeed = @($game.Needs | Where-Object { $failed -contains $_ })
@@ -2318,14 +2425,18 @@ function Install-GameSet {
             continue
         }
         Write-Note "games: googet install $($game.Name) (~$(Format-GameSize $game.Size))"
-        Invoke-GooGetCommand -Exe $GooGet.Exe -Root $root -Arguments @('-noconfirm', 'install', $game.Name) | Out-Host
-        $code = $LASTEXITCODE
-        $after = @(Get-GooGetInstalledPackage -Exe $GooGet.Exe -Root $root)
-        if ($after -notcontains $game.Name) {
-            Write-Warning "games: $($game.Name) is not installed (googet exited with $code)"
+        if (-not (Invoke-GameInstall -GooGet $GooGet -Name $game.Name)) {
             $failed += $game.Name
+            if (-not (Test-GooGetRepoReachable)) {
+                Write-Warning "games: $GooGetRepoUrl stopped answering; the rest of the selection is not installed"
+                $done = $false
+                foreach ($rest in $Selection.Install) {
+                    if ($rest.Name -eq $game.Name) { $done = $true; continue }
+                    if ($done -and $failed -notcontains $rest.Name) { $failed += $rest.Name }
+                }
+                break
+            }
         }
-        Invoke-GooGetCommand -Exe $GooGet.Exe -Root $root -Arguments @('clean', "-packages=$($game.Name)") | Out-Null
     }
     return $failed
 }
@@ -2345,7 +2456,8 @@ function Write-GameProfilePlan {
     Write-Note "Games: every package in $GooGetRepoUrl for this machine except $GamesExcludePattern,"
     Write-Note '    one source per game (installed first, then GOG, Steam, other sources), dropping the largest until at'
     Write-Note "    least $GamesReservePercent% of the Program Files drive stays free (size: .goo download x $GamesSizeFactor);"
-    Write-Note '    one googet install per game, its cached .goo cleared afterwards; stops while enthoo is unreachable'
+    Write-Note '    installed games updated first; one googet install per game from that repo only (-sources),'
+    Write-Note '    its cached .goo cleared afterwards; stops while enthoo is unreachable'
 }
 
 function Invoke-GameProfileCheck {
@@ -2368,32 +2480,41 @@ function Invoke-GameProfileCheck {
 function Invoke-GameProfile {
     param([switch]$NoUpgrade)
     $result = [pscustomobject]@{ Failed = @(); Installed = 0; Kept = 0; Skipped = 0; Bootstrap = $null }
-    Write-Step "WinGet packages GooGet's build needs ($($GamesBootstrapWingetPackages -join ', '))"
+    # Presence-only: the games profile installs the GooGet build tools when
+    # missing and leaves installed ones at their version.
+    Write-Step "WinGet packages GooGet's build needs ($($GamesBootstrapWingetPackages -join ', '); installed if missing)"
     $result.Bootstrap = Invoke-WingetPackageSet -InstalledIds (Get-WingetInventory) -DesiredIds $GamesBootstrapWingetPackages `
-        -PresenceOnlyIds @() -LegacyIds @() -HostIds @() -NoUpgrade:$NoUpgrade
+        -PresenceOnlyIds $GamesBootstrapWingetPackages -LegacyIds @() -HostIds @() -NoUpgrade:$NoUpgrade
     Write-Step 'GooGet (built from source) and the game-packages repo'
     $googetResult = Invoke-GooGetStep -NoUpgrade:$NoUpgrade
     Write-Note "GooGet: $googetResult"
+    # A failed step can mean Initialize-GooGetRoot rejected the existing root;
+    # its googet.exe must then not run elevated.
+    if ($googetResult -eq 'failed') { throw 'GooGet setup failed; not running googet (see the warning above)' }
     $googet = Get-GooGetInstall
     if (-not $googet) { throw "googet is not installed ($googetResult); re-run once Go and Git are installed" }
     if (-not (Test-GooGetRepoReachable)) { throw "$GooGetRepoUrl is unreachable; the games profile installs only from the LAN game-packages repo" }
     Write-Step 'Selecting games'
     $selection = Get-GameSelection -GooGet $googet
-    Write-Note "$($selection.Keep.Count) installed, $($selection.Install.Count) to install, $($selection.Skip.Count) skipped"
-    Write-GameSpace -Selection $selection
-    foreach ($skip in $selection.Skip) { Write-Note "skipped $($skip.Name): $($skip.Reason)" }
+    $updateFailed = @()
     if (-not $NoUpgrade -and $selection.Keep.Count) {
         Write-Step "Updating installed games ($($selection.Keep.Count))"
         foreach ($name in $selection.Keep) {
-            Invoke-GooGetCommand -Exe $googet.Exe -Root (Get-GooGetRoot) -Arguments @('-noconfirm', 'install', $name) | Out-Host
-            Invoke-GooGetCommand -Exe $googet.Exe -Root (Get-GooGetRoot) -Arguments @('clean', "-packages=$name") | Out-Null
+            if (-not (Invoke-GameInstall -GooGet $googet -Name $name)) { $updateFailed += $name }
         }
+        # Updates change both the free space and the installed set.
+        $selection = Get-GameSelection -GooGet $googet -Catalog $selection.Catalog
     }
+    Write-Note "$($selection.Keep.Count) installed, $($selection.Install.Count) to install, $($selection.Skip.Count) skipped"
+    Write-GameSpace -Selection $selection
+    foreach ($skip in $selection.Skip) { Write-Note "skipped $($skip.Name): $($skip.Reason)" }
+    $installFailed = @()
     if ($selection.Install.Count) {
         Write-Step "Installing $($selection.Install.Count) game(s)"
-        $result.Failed = @(Install-GameSet -GooGet $googet -Selection $selection)
+        $installFailed = @(Install-GameSet -GooGet $googet -Selection $selection)
     }
-    $result.Installed = $selection.Install.Count - $result.Failed.Count
+    $result.Failed = @($updateFailed) + @($installFailed)
+    $result.Installed = $selection.Install.Count - $installFailed.Count
     $result.Kept = $selection.Keep.Count
     $result.Skipped = $selection.Skip.Count
     return $result

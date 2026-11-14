@@ -35,7 +35,7 @@ foreach ($functionName in @('Write-Note', 'Invoke-Winget', 'Get-WingetPackageArg
                             'Get-NativeProcessorArchitecture', 'Get-WindowsArchitectureName', 'Get-BalunRelease', 'Invoke-BalunStep',
                             'Invoke-PowerShellMsiSwitch', 'Select-GooGetSource', 'Test-GooGetPatchPending', 'Get-GooGetConfText', 'Get-GooGetRepoFileText', 'Get-GooGetRetiredRepoFile', 'Read-TextOrEmpty', 'Test-GooGetWriteRight',
                             'Get-GooGetInstalledName', 'Get-GooGetInstalledPackage', 'Invoke-GooGetPackageSet',
-                            'Get-GameSourceRank', 'Get-GameKey', 'Select-GamePackage', 'Get-GooGetArchPreference', 'Select-GooGetIndexEntry')) {
+                            'Get-GameSourceRank', 'Get-GameKey', 'Select-GamePackage', 'Get-GooGetArchPreference', 'Compare-GooGetVersion', 'Select-GooGetIndexEntry')) {
     $functionAst = $ast.Find({
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $functionName
@@ -179,6 +179,15 @@ $sel = Select-GamePackage -Packages $catalog -Installed @() -Available 1GB -Tota
 Assert-True ($sel.Install.Count -eq 0) 'nothing installs when the reserve is already used up'
 $sel = Select-GamePackage -Packages @((Get-TestGame 'cro-mag-rally-net-bin' 100MB @('cro-mag-rally') @('cro-mag-rally-net'))) -Installed @('cro-mag-rally-net') -Available 1TB -Total 2TB -ReservePercent 20
 Assert-True ($sel.Install.Count -eq 0 -and $sel.Skip[0].Reason -match 'conflicts with installed cro-mag-rally-net') 'a conflict with an installed non-repo package skips the game'
+$sel = Select-GamePackage -Packages @((Get-TestGame 'wreckfest-gog' 30GB)) -Installed @('wreckfest-steam') -Available 1TB -Total 2TB -ReservePercent 20
+Assert-True ($sel.Install.Count -eq 0 -and $sel.Skip[0].Reason -eq 'alternative to installed wreckfest-steam') 'an installed source the repo no longer publishes keeps its game'
+$sel = Select-GamePackage -Packages @((Get-TestGame 'game-b' 1GB)) -Installed @('old-tool') -InstalledSpecs @([pscustomobject]@{ Name = 'old-tool'; Provides = @(); Conflicts = @('game-b') }) -Available 1TB -Total 2TB -ReservePercent 20
+Assert-True ($sel.Install.Count -eq 0 -and $sel.Skip[0].Reason -eq 'conflicts with installed old-tool') "an installed package's own conflicts count even when the repo dropped it"
+$sel = Select-GamePackage -Packages @((Get-TestGame 'mystery-gog' -1), (Get-TestGame 'small-gog' 1GB)) -Installed @() -Available 1TB -Total 2TB -ReservePercent 20
+Assert-True ((@($sel.Install | ForEach-Object { $_.Name }) -join ',') -eq 'small-gog' -and $sel.Skip[0].Reason -match 'size unknown') 'a game without a known size is skipped, not counted as free'
+Assert-True ((Compare-GooGetVersion -Left '1.2.10@1' -Right '1.2.9@5') -eq 1) 'googet versions compare numerically'
+Assert-True ((Compare-GooGetVersion -Left '1.0.0@2' -Right '1.0.0@1') -eq 1 -and (Compare-GooGetVersion -Left '3369.0.0@5' -Right '3369.0.0@5') -eq 0) 'the release breaks ties'
+Assert-True ((Compare-GooGetVersion -Left '2.1' -Right '1.9.9') -eq -1) 'a short version fills from the left, as goolib does (2.1 is 0.2.1)'
 Assert-True ((Get-GooGetArchPreference -Architecture 'ARM64') -join ',' -eq 'arm64,x86_64,x86_32,noarch') 'ARM64 prefers arm64, then emulated x86'
 $index = @(
     [pscustomobject]@{ Source = 'a'; PackageSpec = [pscustomobject]@{ Name = 'quake3e'; Arch = 'x86_64' } },
@@ -190,6 +199,14 @@ $picked = @(Select-GooGetIndexEntry -Index $index -Archs (Get-GooGetArchPreferen
 Assert-True ((($picked | ForEach-Object { $_.Source }) -join ',') -eq 'b,c') 'one index entry per name in the best installable architecture'
 $picked = @(Select-GooGetIndexEntry -Index $index -Archs (Get-GooGetArchPreference -Architecture 'AMD64'))
 Assert-True ((($picked | ForEach-Object { $_.Source }) -join ',') -eq 'a,c') 'x64 machines take x86_64 then x86_32'
+$index = @(
+    [pscustomobject]@{ Source = 'old-x64'; PackageSpec = [pscustomobject]@{ Name = 'game'; Arch = 'x86_64'; Version = '1.0.0@1' } },
+    [pscustomobject]@{ Source = 'new-noarch'; PackageSpec = [pscustomobject]@{ Name = 'game'; Arch = 'noarch'; Version = '1.1.0@1' } },
+    [pscustomobject]@{ Source = 'newer-rel'; PackageSpec = [pscustomobject]@{ Name = 'data'; Arch = 'noarch'; Version = '2.0.0@3' } },
+    [pscustomobject]@{ Source = 'older-rel'; PackageSpec = [pscustomobject]@{ Name = 'data'; Arch = 'noarch'; Version = '2.0.0@2' } }
+)
+$picked = @(Select-GooGetIndexEntry -Index $index -Archs (Get-GooGetArchPreference -Architecture 'AMD64'))
+Assert-True ((($picked | ForEach-Object { $_.Source }) -join ',') -eq 'new-noarch,newer-rel') 'the newest version wins before the architecture, as googet installs it'
 Write-Output 'GAMES SELECTION PASSED'
 
 # --- GooGet: build inputs, googet.conf and the repo file ---------------------

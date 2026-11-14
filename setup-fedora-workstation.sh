@@ -2135,7 +2135,7 @@ print_games_plan() {
   printf 'PLAN: game-packages repository: pinned key %s, %s; import its metadata key\n' \
     "${GAME_PACKAGES_KEY_FINGERPRINT}" /etc/yum.repos.d/game-packages.repo
   printf 'PLAN: stop unless http://192.168.1.11:8080 answers (the games come only from the LAN repository)\n'
-  printf 'PLAN: %s\n' "$( (( NO_UPGRADE )) && echo 'installed games kept at their versions (--no-upgrade)' || echo 'dnf upgrade --from-repo game-packages (installed games only; the rest of the system is left alone)')"
+  printf 'PLAN: %s\n' "$( (( NO_UPGRADE )) && echo 'installed games kept at their versions (--no-upgrade)' || echo 'dnf upgrade --from-repo game-packages <installed games> (the rest of the system is left alone)')"
   printf 'PLAN: every game game-packages publishes for %s except tools, servers, libraries and runtimes (%s),\n' "${ARCH}" "${GAMES_EXCLUDE}"
   printf '      one alternative per game (installed first, then GOG, Steam, other sources), dropping the largest\n'
   printf '      until at least %s%% of the %s filesystem stays free; installed one at a time without weak\n' "${GAMES_RESERVE_PERCENT}" "${GAMES_TARGET}"
@@ -2170,11 +2170,27 @@ run_games_check() {
   printf 'Result: converged\n'
 }
 
-# run_games_apply: the games profile. Each game installs in its own dnf
-# transaction, without weak dependencies (an optional data package would pull
-# whichever alternative dnf prefers), through a dnf cache on the games'
-# filesystem: dnf removes the packages after each transaction, so neither /
-# nor the space check has to hold the whole set twice.
+# games_repo_reachable: crossdock still answers with the game-packages metadata.
+games_repo_reachable() {
+  curl -fsI --max-time 5 -o /dev/null http://192.168.1.11:8080/rpm/game-packages/repodata/repomd.xml
+}
+
+# games_clear_downloads <cache>: drop downloaded packages from the games' dnf
+# cache, keeping the repository metadata (keepcache=False leaves a failed
+# transaction's downloads behind).
+games_clear_downloads() {
+  sudo find "$1" -path '*/packages/*' -type f -delete
+}
+
+# run_games_apply: the games profile. Installed games are upgraded by name
+# from game-packages (nothing else on the system), then the selection is made
+# against the space that leaves. Each new game installs in its own dnf
+# transaction, from game-packages only (dependencies from any repository),
+# without weak dependencies (an optional data package would pull whichever
+# alternative dnf prefers), through a dnf cache on the games' filesystem whose
+# downloads are cleared after every attempt, so neither / nor the space check
+# has to hold the whole set twice. The run stops if crossdock drops off the
+# network.
 run_games_apply() {
   local cache name need dep failed=()
   local -a dnf_games
@@ -2199,21 +2215,23 @@ run_games_apply() {
   # shellcheck disable=SC2064 # expand ${cache} now, while it is set
   trap "sudo rm -rf -- '${cache}'; cleanup" EXIT
   dnf_games=(-y --setopt=install_weak_deps=False --setopt=keepcache=False "--setopt=system_cachedir=${cache}")
-  if (( NO_UPGRADE )); then
-    note "installed games kept at their versions (--no-upgrade)"
-  else
-    log "Updating installed games (dnf upgrade --from-repo game-packages)"
-    sudo dnf "${dnf_games[@]}" upgrade --from-repo game-packages
-  fi
 
   log "Selecting games"
   select_games game_records_fedora
+  if (( NO_UPGRADE )); then
+    note "installed games kept at their versions (--no-upgrade)"
+  elif (( ${#GAMES_KEEP[@]} )); then
+    # dnf applies --from-repo only to the packages named; with none it would
+    # upgrade the whole system.
+    log "Updating ${#GAMES_KEEP[@]} installed game(s) from game-packages"
+    sudo dnf "${dnf_games[@]}" upgrade --from-repo game-packages -- "${GAMES_KEEP[@]}"
+    games_clear_downloads "${cache}"
+    select_games game_records_fedora
+  fi
   note "${#GAMES_KEEP[@]} installed, ${#GAMES_INSTALL[@]} to install, ${#GAMES_SKIP[@]} skipped"
   note "$(games_space_summary)"
   for name in "${GAMES_SKIP[@]}"; do note "skipped ${name%% *}: ${name#* }"; done
-  if (( ${#GAMES_INSTALL[@]} )); then
-    log "Installing ${#GAMES_INSTALL[@]} game(s)"
-  fi
+  (( ! ${#GAMES_INSTALL[@]} )) || log "Installing ${#GAMES_INSTALL[@]} game(s)"
   for name in "${GAMES_INSTALL[@]}"; do
     note "${name}"
     need=
@@ -2225,10 +2243,15 @@ run_games_apply() {
       failed+=("${name}")
       continue
     fi
-    if ! sudo dnf "${dnf_games[@]}" install -- "${name}"; then
-      warn "${name}: dnf failed; continuing with the next game"
+    if ! sudo dnf "${dnf_games[@]}" install --from-repo game-packages -- "${name}"; then
       failed+=("${name}")
+      games_clear_downloads "${cache}"
+      games_repo_reachable \
+        || die "crossdock stopped answering; not installed: ${failed[*]} and the rest of the selection"
+      warn "${name}: dnf failed; continuing with the next game"
+      continue
     fi
+    games_clear_downloads "${cache}"
   done
   sudo rm -rf -- "${cache}"
   trap cleanup EXIT
