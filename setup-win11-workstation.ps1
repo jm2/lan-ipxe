@@ -941,7 +941,7 @@ function Invoke-PowerShellMsiSwitch {
         Write-Warning "PowerShell 7 MSI: $msi does not run; leaving any Store copy in place"
         return 'failed'
     }
-    $store = Get-StorePowerShell
+    $store = @(Get-StorePowerShell)
     if ($store.Count -and (Get-Process -Id $PID).Path -like '*\WindowsApps\*') {
         Write-Warning 'PowerShell 7 Store package: this script runs from it, so it stays; re-run from the MSI pwsh or powershell.exe to remove it'
         return 'store-kept'
@@ -2713,7 +2713,7 @@ if ($Check) {
     $pwshMsi = Get-PowerShellMsiPath
     $hasMsi = Test-Path -LiteralPath $pwshMsi
     Write-State $hasMsi 'PowerShell 7 (MSI)' $(if ($hasMsi) { $pwshMsi } else { 'not installed' })
-    $storePwsh = Get-StorePowerShell
+    $storePwsh = @(Get-StorePowerShell)
     if ($storePwsh.Count) {
         Write-State $false 'PowerShell 7 (Store package)' "$($storePwsh[0].Version); its alias can't run in Codex's sandbox; replaced by the MSI on apply"
     }
