@@ -490,6 +490,7 @@ test_game_packages_repo() {
   local repo=${REPO_ROOT}/files/etc/yum.repos.d/game-packages.repo out
   grep -qx 'skip_if_unavailable=True' "${repo}" || fail 'game-packages.repo does not skip an unreachable LAN'
   grep -qx 'repo_gpgcheck=1' "${repo}" || fail 'game-packages.repo does not verify repomd.xml'
+  grep -qx 'metadata_expire=1h' "${repo}" || fail 'game-packages.repo keeps stale metadata past a rebuild'
   grep -qx 'gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-game-packages' "${repo}" \
     || fail 'game-packages.repo does not use the vendored key'
   [[ $(gpg --batch --show-keys --with-colons "${REPO_ROOT}/files/keys/game-packages.asc" | awk -F: '$1 == "fpr" { print $10; exit }') \
