@@ -3,6 +3,9 @@
 # package's SHA-256; crossdock doesn't sign RPM headers, so gpgcheck is off.
 # skip_if_unavailable lets dnf carry on without this repo off the LAN, and the
 # short timeout keeps a network that drops the packets from stalling it.
+# crossdock replaces a package as soon as it is rebuilt, so cached metadata
+# older than an hour (dnf's default keeps it 48h) would point dnf at files the
+# repo no longer has (404).
 [game-packages]
 name=game-packages (LAN)
 baseurl=http://192.168.1.11:8080/rpm/game-packages
@@ -12,3 +15,4 @@ gpgcheck=0
 gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-game-packages
 skip_if_unavailable=True
 timeout=5
+metadata_expire=1h
