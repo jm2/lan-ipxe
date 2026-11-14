@@ -123,6 +123,8 @@ SELECT_GAMES_AWK=${SCRIPT_DIR}/lib/select-games.awk
 GAMES_EXCLUDE='(balun|carryout|crossdock|switchworks|tributary)(-bin)?|netatalk-appletalk|owntone-server|geysermc-bin|knockoutcity-server|agelanserver(-companion)?-bin|gamelaunch|gbe-fork-bin|xlln-bin|wine-ipv6only|umu-launcher|steamcmd|gconf|gtk2|openssl-1[.]0|xf86miscproto|lib[a-z0-9_.+-]*'
 GAMES_TARGET=/opt
 GAMES_RESERVE_PERCENT=20
+# Consecutive games share one transaction up to this many bytes.
+GAMES_BATCH_BYTES=$((16 * 1024 * 1024 * 1024))
 # dnf5's system cache, where game_records_fedora reads the repo metadata.
 DNF_SYSTEM_CACHE=/var/cache/libdnf5
 # Claude Code moved from Anthropic's RPM repo to its self-updating native
@@ -2093,7 +2095,7 @@ GAMES_KEEP=()
 GAMES_INSTALL=()
 GAMES_SKIP=()
 GAMES_SPACE=
-declare -A GAMES_NEEDS=()
+declare -A GAMES_NEEDS=() GAMES_SIZE=()
 select_games() {
   local df_line total avail records output kind name rest
   df_line=$(df -B1 --output=size,avail -- "$(games_target_dir)" | tail -n 1) \
@@ -2104,13 +2106,13 @@ select_games() {
   output=$(awk -v exclude="${GAMES_EXCLUDE}" -v avail="${avail}" -v total="${total}" \
     -v reserve="${GAMES_RESERVE_PERCENT}" -f "${SELECT_GAMES_AWK}" <<<"${records}") \
     || die "could not select the games from the game-packages repository"
-  GAMES_KEEP=() GAMES_INSTALL=() GAMES_SKIP=() GAMES_SPACE='' GAMES_NEEDS=()
+  GAMES_KEEP=() GAMES_INSTALL=() GAMES_SKIP=() GAMES_SPACE='' GAMES_NEEDS=() GAMES_SIZE=()
   while read -r kind name rest; do
     case ${kind} in
       keep) GAMES_KEEP+=("${name}") ;;
       install)
         GAMES_INSTALL+=("${name}")
-        read -r _ GAMES_NEEDS["${name}"] <<<"${rest}"
+        read -r GAMES_SIZE["${name}"] GAMES_NEEDS["${name}"] <<<"${rest}"
         ;;
       skip) GAMES_SKIP+=("${name} ${rest}") ;;
       space) GAMES_SPACE="${name} ${rest}" ;;
@@ -2138,8 +2140,9 @@ print_games_plan() {
   printf 'PLAN: %s\n' "$( (( NO_UPGRADE )) && echo 'installed games kept at their versions (--no-upgrade)' || echo 'dnf upgrade --from-repo game-packages <installed games> (the rest of the system is left alone)')"
   printf 'PLAN: every game game-packages publishes for %s except tools, servers, libraries and runtimes (%s),\n' "${ARCH}" "${GAMES_EXCLUDE}"
   printf '      one alternative per game (installed first, then GOG, Steam, other sources), dropping the largest\n'
-  printf '      until at least %s%% of the %s filesystem stays free; installed one at a time without weak\n' "${GAMES_RESERVE_PERCENT}" "${GAMES_TARGET}"
-  printf '      dependencies, through a dnf cache on that filesystem (packages are not kept)\n'
+  printf '      until at least %s%% of the %s filesystem stays free; installed in transactions of up to\n' "${GAMES_RESERVE_PERCENT}" "${GAMES_TARGET}"
+  printf '      %s GiB (a larger game alone) without weak dependencies, through a dnf cache on that filesystem\n' "$(( GAMES_BATCH_BYTES / 1024 / 1024 / 1024 ))"
+  printf '      (packages are not kept)\n'
 }
 
 # run_games_check: read-only state of the games profile against dnf's cached
@@ -2170,6 +2173,108 @@ run_games_check() {
   printf 'Result: converged\n'
 }
 
+# games_sudo_keepalive: keep the sudo timestamp fresh for the whole games run;
+# a large game can take longer to install than sudo's timeout. Detached from
+# stdout/stderr so it never holds a pipe open after the script ends.
+GAMES_SUDO_KEEPALIVE=
+games_sudo_keepalive() {
+  ( while kill -0 "$$" 2>/dev/null; do sudo -n true || true; sleep 50; done ) >/dev/null 2>&1 &
+  GAMES_SUDO_KEEPALIVE=$!
+}
+
+# install_games: installs GAMES_INSTALL in its dependency order, as batches of
+# consecutive games of up to GAMES_BATCH_BYTES or half the space kept free,
+# whichever is smaller (a larger game goes alone), so
+# the per-transaction overhead is paid once per batch while the download
+# cache never holds more than one batch. A failed batch is retried one game
+# at a time, so one broken game costs only itself and the games needing it
+# (skipped rather than let the package manager pick another alternative).
+# Stops when crossdock stops answering. Fills GAMES_FAILED.
+GAMES_FAILED=()
+install_games() {
+  local -a batch=()
+  local name bytes=0 limit keep
+  GAMES_FAILED=()
+  # A transaction downloads its whole batch before installing it, and the
+  # reserve is the only room for that, so a batch takes at most half of it.
+  read -r _ _ _ keep <<<"${GAMES_SPACE}"
+  limit=$(( ${keep:-0} / 2 < GAMES_BATCH_BYTES ? ${keep:-0} / 2 : GAMES_BATCH_BYTES ))
+  for name in "${GAMES_INSTALL[@]}"; do
+    if (( ${#batch[@]} )) && (( bytes + ${GAMES_SIZE[${name}]:-0} > limit )); then
+      install_games_batch "${batch[@]}"
+      batch=() bytes=0
+    fi
+    batch+=("${name}")
+    bytes=$(( bytes + ${GAMES_SIZE[${name}]:-0} ))
+  done
+  (( ! ${#batch[@]} )) || install_games_batch "${batch[@]}"
+}
+
+# games_needs_failed <name>: prints a game it depends on that failed.
+games_needs_failed() {
+  local dep
+  for dep in ${GAMES_NEEDS[$1]:-}; do
+    [[ " ${GAMES_FAILED[*]} " == *" ${dep} "* ]] && { printf '%s\n' "${dep}"; return 0; }
+  done
+  return 1
+}
+
+install_games_batch() {
+  local -a ready=()
+  local name need
+  for name in "$@"; do
+    if need=$(games_needs_failed "${name}"); then
+      warn "${name}: skipped, it needs ${need}, which failed"
+      GAMES_FAILED+=("${name}")
+    else
+      ready+=("${name}")
+    fi
+  done
+  (( ${#ready[@]} )) || return 0
+  note "transaction: ${ready[*]}"
+  if games_install_cmd "${ready[@]}"; then
+    games_clear_cache
+    return 0
+  fi
+  games_clear_cache
+  games_repo_reachable \
+    || die "crossdock stopped answering; not installed: ${ready[*]} and the rest of the selection"
+  if (( ${#ready[@]} == 1 )); then
+    warn "${ready[0]}: install failed; continuing with the next game"
+    GAMES_FAILED+=("${ready[0]}")
+    return 0
+  fi
+  warn "the batch failed; installing its games one at a time"
+  for name in "${ready[@]}"; do
+    if need=$(games_needs_failed "${name}"); then
+      warn "${name}: skipped, it needs ${need}, which failed"
+      GAMES_FAILED+=("${name}")
+      continue
+    fi
+    note "transaction: ${name}"
+    if ! games_install_cmd "${name}"; then
+      GAMES_FAILED+=("${name}")
+      games_clear_cache
+      games_repo_reachable \
+        || die "crossdock stopped answering; not installed: ${GAMES_FAILED[*]} and the rest of the selection"
+      warn "${name}: install failed; continuing with the next game"
+      continue
+    fi
+    games_clear_cache
+  done
+}
+
+# games_install_cmd <name>...: one dnf transaction, the games from
+# game-packages only (dependencies from any repository), through GAMES_CACHE.
+GAMES_CACHE=
+DNF_GAMES=()
+games_install_cmd() {
+  sudo dnf "${DNF_GAMES[@]}" install --from-repo game-packages -- "$@"
+}
+games_clear_cache() {
+  games_clear_downloads "${GAMES_CACHE}"
+}
+
 # games_repo_reachable: crossdock still answers with the game-packages metadata.
 games_repo_reachable() {
   curl -fsI --max-time 5 -o /dev/null http://192.168.1.11:8080/rpm/game-packages/repodata/repomd.xml
@@ -2184,19 +2289,19 @@ games_clear_downloads() {
 
 # run_games_apply: the games profile. Installed games are upgraded by name
 # from game-packages (nothing else on the system), then the selection is made
-# against the space that leaves. Each new game installs in its own dnf
-# transaction, from game-packages only (dependencies from any repository),
+# against the space that leaves. New games install in batches (install_games),
+# from game-packages only (dependencies from any repository),
 # without weak dependencies (an optional data package would pull whichever
 # alternative dnf prefers), through a dnf cache on the games' filesystem whose
 # downloads are cleared after every attempt, so neither / nor the space check
 # has to hold the whole set twice. The run stops if crossdock drops off the
 # network.
 run_games_apply() {
-  local cache name need dep failed=()
-  local -a dnf_games
+  local name
   log "Fedora ${FEDORA_VERSION} on ${ARCH} (profile: games$( (( NO_UPGRADE )) && echo '; --no-upgrade'))"
   log "Authenticating sudo"
   sudo -v || die "sudo authentication failed"
+  games_sudo_keepalive
   local prereqs=()
   command -v gpg >/dev/null || prereqs+=(gnupg2)
   command -v curl >/dev/null || prereqs+=(curl-minimal)
@@ -2210,11 +2315,11 @@ run_games_apply() {
     || die "crossdock (http://192.168.1.11:8080) is unreachable; the games profile installs only from the LAN game-packages repository"
 
   sudo install -d -m 0755 -- "${GAMES_TARGET}"
-  cache=$(sudo mktemp -d -- "${GAMES_TARGET}/.game-packages-cache.XXXXXX") \
+  GAMES_CACHE=$(sudo mktemp -d -- "${GAMES_TARGET}/.game-packages-cache.XXXXXX") \
     || die "could not create a dnf cache under ${GAMES_TARGET}"
-  # shellcheck disable=SC2064 # expand ${cache} now, while it is set
-  trap "sudo rm -rf -- '${cache}'; cleanup" EXIT
-  dnf_games=(-y --setopt=install_weak_deps=False --setopt=keepcache=False "--setopt=system_cachedir=${cache}")
+  # shellcheck disable=SC2064 # expand ${GAMES_CACHE} now, while it is set
+  trap "sudo rm -rf -- '${GAMES_CACHE}'; cleanup" EXIT
+  DNF_GAMES=(-y --setopt=install_weak_deps=False --setopt=keepcache=False "--setopt=system_cachedir=${GAMES_CACHE}")
 
   log "Selecting games"
   select_games game_records_fedora
@@ -2224,40 +2329,22 @@ run_games_apply() {
     # dnf applies --from-repo only to the packages named; with none it would
     # upgrade the whole system.
     log "Updating ${#GAMES_KEEP[@]} installed game(s) from game-packages"
-    sudo dnf "${dnf_games[@]}" upgrade --from-repo game-packages -- "${GAMES_KEEP[@]}"
-    games_clear_downloads "${cache}"
+    sudo dnf "${DNF_GAMES[@]}" upgrade --from-repo game-packages -- "${GAMES_KEEP[@]}"
+    games_clear_cache
     select_games game_records_fedora
   fi
   note "${#GAMES_KEEP[@]} installed, ${#GAMES_INSTALL[@]} to install, ${#GAMES_SKIP[@]} skipped"
   note "$(games_space_summary)"
   for name in "${GAMES_SKIP[@]}"; do note "skipped ${name%% *}: ${name#* }"; done
-  (( ! ${#GAMES_INSTALL[@]} )) || log "Installing ${#GAMES_INSTALL[@]} game(s)"
-  for name in "${GAMES_INSTALL[@]}"; do
-    note "${name}"
-    need=
-    for dep in ${GAMES_NEEDS[${name}]:-}; do
-      [[ " ${failed[*]} " == *" ${dep} "* ]] && { need=${dep}; break; }
-    done
-    if [[ -n ${need} ]]; then
-      warn "${name}: skipped, it needs ${need}, which failed (dnf would pick another alternative)"
-      failed+=("${name}")
-      continue
-    fi
-    if ! sudo dnf "${dnf_games[@]}" install --from-repo game-packages -- "${name}"; then
-      failed+=("${name}")
-      games_clear_downloads "${cache}"
-      games_repo_reachable \
-        || die "crossdock stopped answering; not installed: ${failed[*]} and the rest of the selection"
-      warn "${name}: dnf failed; continuing with the next game"
-      continue
-    fi
-    games_clear_downloads "${cache}"
-  done
-  sudo rm -rf -- "${cache}"
+  if (( ${#GAMES_INSTALL[@]} )); then
+    log "Installing ${#GAMES_INSTALL[@]} game(s)"
+    install_games
+  fi
+  sudo rm -rf -- "${GAMES_CACHE}"
   trap cleanup EXIT
 
-  log "Done: $(( ${#GAMES_INSTALL[@]} - ${#failed[@]} )) installed now, ${#GAMES_KEEP[@]} already installed, ${#GAMES_SKIP[@]} skipped, ${#failed[@]} failed"
-  (( ! ${#failed[@]} )) || die "not installed: ${failed[*]}"
+  log "Done: $(( ${#GAMES_INSTALL[@]} - ${#GAMES_FAILED[@]} )) installed now, ${#GAMES_KEEP[@]} already installed, ${#GAMES_SKIP[@]} skipped, ${#GAMES_FAILED[@]} failed"
+  (( ! ${#GAMES_FAILED[@]} )) || die "not installed: ${GAMES_FAILED[*]}"
 }
 
 # keep_installed <command|rpm:name>: with --no-upgrade, succeed (and skip the
@@ -2726,6 +2813,7 @@ if [[ ${PROFILE} == games ]]; then
   [[ ${DNF_VERSION_OUTPUT} == dnf5\ version* ]] || die "DNF5 is required."
   WORK_DIR=$(mktemp -d)
   cleanup() {
+    [[ -z ${GAMES_SUDO_KEEPALIVE} ]] || kill "${GAMES_SUDO_KEEPALIVE}" 2>/dev/null || true
     rm -rf "${WORK_DIR}"
   }
   trap cleanup EXIT

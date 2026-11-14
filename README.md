@@ -201,9 +201,11 @@ them `-Profile`, `-Check`, `-DryRun`, `-NoUpgrade`):
   script mirrors it). The largest games are left out until at least 20% of the
   filesystem holding `/opt` (Program Files on Windows) stays free afterwards: a
   ballpark from the packages' installed sizes (download size × 1.25 on Windows,
-  whose GooGet index has none). Each game is a separate install whose downloaded
-  package is not kept, so the disk never holds the whole set twice; on Windows
-  `googet remove` downloads it again when it needs it. The profile stops when enthoo
+  whose GooGet index has none). On Linux, games install in transactions of up to
+  16 GiB of consecutive games (a larger game alone; a failed batch is retried one
+  game at a time) with sudo kept alive throughout; on Windows each is a separate
+  googet install. Downloaded packages are not kept, so the disk never holds the whole
+  set twice; on Windows `googet remove` downloads a game again when it needs it. The profile stops when enthoo
   is unreachable. `--check` lists the games that would still install and why the
   others are skipped.
 - `--dry-run` — offline, read-only plan for the selected profile (no sudo, network, or

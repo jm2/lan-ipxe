@@ -184,6 +184,53 @@ XML
     || fail 'Fedora installed record'
 )
 
+# shellcheck disable=SC2034 # the GAMES_* arrays are read by the sourced install_games
+test_batches() {
+  local script
+  for script in setup-arch-workstation.sh setup-fedora-workstation.sh; do
+    (
+      set --
+      rpm() { [[ $1 == -E ]] && printf '45\n'; }
+      # shellcheck disable=SC1090
+      source <(sed '/^#--- Preflight/,$d' "${REPO_ROOT}/${script}")
+      local log=${TEST_ROOT}/batches.log reachable=1
+      : >"${log}"
+      note() { :; }
+      warn() { :; }
+      # Fails any transaction holding "broken"; logs every transaction.
+      games_install_cmd() { printf '%s\n' "$*" >>"${log}"; [[ " $* " != *' broken '* ]]; }
+      games_clear_cache() { printf 'clear\n' >>"${log}"; }
+      games_repo_reachable() { (( reachable )); }
+      GB=$((1024 * 1024 * 1024))
+      GAMES_SPACE="0 0 0 $((500 * GB))"
+      GAMES_INSTALL=(a-data a broken c big d)
+      GAMES_SIZE=([a-data]=$((6 * GB)) [a]=$((GB / 10)) [broken]=$((5 * GB)) [c]=$((2 * GB)) [big]=$((90 * GB)) [d]=$GB)
+      GAMES_NEEDS=([a]=a-data [c]=broken)
+      install_games
+      [[ $(grep -v clear "${log}" | tr '\n' '|') == 'a-data a broken c|a-data|a|broken|big|d|' ]] \
+        || fail "${script}: batches and retries (got: $(tr '\n' '|' <"${log}"))"
+      [[ " ${GAMES_FAILED[*]} " == ' broken c ' ]] || fail "${script}: failed set (got: ${GAMES_FAILED[*]})"
+      (( $(grep -c clear "${log}") == 6 )) || fail "${script}: the cache is cleared after every transaction"
+
+      # Stops at the first failure once crossdock is gone.
+      : >"${log}"; reachable=0
+      GAMES_INSTALL=(broken d)
+      GAMES_SIZE=([broken]=$GB [d]=$GB)
+      GAMES_NEEDS=()
+      ( install_games ) 2>/dev/null && fail "${script}: an unreachable repo stops the run"
+      [[ $(grep -v clear "${log}" | tr '\n' '|') == 'broken d|' ]] || fail "${script}: no retries once crossdock is gone"
+
+      # A small reserve shrinks the batches: 2 GiB kept free allows 1 GiB.
+      : >"${log}"; reachable=1
+      GAMES_SPACE="0 0 0 $((2 * GB))"
+      GAMES_INSTALL=(e f g)
+      GAMES_SIZE=([e]=$((GB / 2)) [f]=$((GB / 2)) [g]=$((GB / 2)))
+      install_games
+      [[ $(grep -v clear "${log}" | tr '\n' '|') == 'e f|g|' ]] || fail "${script}: batches stay within half the reserve (got: $(tr '\n' '|' <"${log}"))"
+    )
+  done
+}
+
 test_dry_runs() {
   local out script
   for script in setup-arch-workstation.sh setup-fedora-workstation.sh; do
@@ -200,5 +247,6 @@ test_dry_runs() {
 test_selector
 test_arch_records
 test_fedora_records
+test_batches
 test_dry_runs
 printf 'games profile: PASS (awk: %s)\n' "$(awk -W version 2>/dev/null | head -n 1 || awk --version | head -n 1)"

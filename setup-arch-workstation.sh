@@ -114,6 +114,8 @@ SELECT_GAMES_AWK=${SCRIPT_DIR}/lib/select-games.awk
 GAMES_EXCLUDE='(balun|carryout|crossdock|switchworks|tributary)(-bin)?|netatalk-appletalk|owntone-server|geysermc-bin|knockoutcity-server|agelanserver(-companion)?-bin|gamelaunch|gbe-fork-bin|xlln-bin|wine-ipv6only|umu-launcher|steamcmd|gconf|gtk2|openssl-1[.]0|xf86miscproto|lib[a-z0-9_.+-]*'
 GAMES_TARGET=/opt
 GAMES_RESERVE_PERCENT=20
+# Consecutive games share one transaction up to this many bytes.
+GAMES_BATCH_BYTES=$((16 * 1024 * 1024 * 1024))
 YAY_AUR_URL=https://aur.archlinux.org/yay-bin.git
 YAY_VCS_DB=${XDG_CACHE_HOME:-${HOME}/.cache}/yay/vcs.json
 WAZUH_MANAGER=${WAZUH_MANAGER:-}
@@ -761,7 +763,7 @@ GAMES_KEEP=()
 GAMES_INSTALL=()
 GAMES_SKIP=()
 GAMES_SPACE=
-declare -A GAMES_NEEDS=()
+declare -A GAMES_NEEDS=() GAMES_SIZE=()
 select_games() {
   local df_line total avail records output kind name rest
   df_line=$(df -B1 --output=size,avail -- "$(games_target_dir)" | tail -n 1) \
@@ -772,13 +774,13 @@ select_games() {
   output=$(awk -v exclude="${GAMES_EXCLUDE}" -v avail="${avail}" -v total="${total}" \
     -v reserve="${GAMES_RESERVE_PERCENT}" -f "${SELECT_GAMES_AWK}" <<<"${records}") \
     || die "could not select the games from the game-packages repository"
-  GAMES_KEEP=() GAMES_INSTALL=() GAMES_SKIP=() GAMES_SPACE='' GAMES_NEEDS=()
+  GAMES_KEEP=() GAMES_INSTALL=() GAMES_SKIP=() GAMES_SPACE='' GAMES_NEEDS=() GAMES_SIZE=()
   while read -r kind name rest; do
     case ${kind} in
       keep) GAMES_KEEP+=("${name}") ;;
       install)
         GAMES_INSTALL+=("${name}")
-        read -r _ GAMES_NEEDS["${name}"] <<<"${rest}"
+        read -r GAMES_SIZE["${name}"] GAMES_NEEDS["${name}"] <<<"${rest}"
         ;;
       skip) GAMES_SKIP+=("${name} ${rest}") ;;
       space) GAMES_SPACE="${name} ${rest}" ;;
@@ -807,8 +809,8 @@ print_games_plan() {
   printf 'PLAN: %s\n' "$( (( NO_UPGRADE )) && echo 'no pacman -Syu (--no-upgrade): install against the existing sync databases' || echo 'pacman -Syu')"
   printf 'PLAN: every game game-packages publishes except tools, servers, libraries and runtimes (%s),\n' "${GAMES_EXCLUDE}"
   printf '      one alternative per game (installed first, then GOG, Steam, other sources), dropping the largest\n'
-  printf '      until at least %s%% of the %s filesystem stays free; installed one at a time through a\n' "${GAMES_RESERVE_PERCENT}" "${GAMES_TARGET}"
-  printf '      download cache on that filesystem, emptied after each\n'
+  printf '      until at least %s%% of the %s filesystem stays free; installed in transactions of up to\n' "${GAMES_RESERVE_PERCENT}" "${GAMES_TARGET}"
+  printf '      %s GiB (a larger game alone) through a download cache on that filesystem, emptied after each\n' "$(( GAMES_BATCH_BYTES / 1024 / 1024 / 1024 ))"
 }
 
 # run_games_check: read-only state of the games profile against the existing
@@ -849,6 +851,108 @@ run_games_check() {
   (( CHECK_DRIFT == 0 )) || return 2
 }
 
+# games_sudo_keepalive: keep the sudo timestamp fresh for the whole games run;
+# a large game can take longer to install than sudo's timeout. Detached from
+# stdout/stderr so it never holds a pipe open after the script ends.
+GAMES_SUDO_KEEPALIVE=
+games_sudo_keepalive() {
+  ( while kill -0 "$$" 2>/dev/null; do sudo -n true || true; sleep 50; done ) >/dev/null 2>&1 &
+  GAMES_SUDO_KEEPALIVE=$!
+}
+
+# install_games: installs GAMES_INSTALL in its dependency order, as batches of
+# consecutive games of up to GAMES_BATCH_BYTES or half the space kept free,
+# whichever is smaller (a larger game goes alone), so
+# the per-transaction overhead is paid once per batch while the download
+# cache never holds more than one batch. A failed batch is retried one game
+# at a time, so one broken game costs only itself and the games needing it
+# (skipped rather than let the package manager pick another alternative).
+# Stops when crossdock stops answering. Fills GAMES_FAILED.
+GAMES_FAILED=()
+install_games() {
+  local -a batch=()
+  local name bytes=0 limit keep
+  GAMES_FAILED=()
+  # A transaction downloads its whole batch before installing it, and the
+  # reserve is the only room for that, so a batch takes at most half of it.
+  read -r _ _ _ keep <<<"${GAMES_SPACE}"
+  limit=$(( ${keep:-0} / 2 < GAMES_BATCH_BYTES ? ${keep:-0} / 2 : GAMES_BATCH_BYTES ))
+  for name in "${GAMES_INSTALL[@]}"; do
+    if (( ${#batch[@]} )) && (( bytes + ${GAMES_SIZE[${name}]:-0} > limit )); then
+      install_games_batch "${batch[@]}"
+      batch=() bytes=0
+    fi
+    batch+=("${name}")
+    bytes=$(( bytes + ${GAMES_SIZE[${name}]:-0} ))
+  done
+  (( ! ${#batch[@]} )) || install_games_batch "${batch[@]}"
+}
+
+# games_needs_failed <name>: prints a game it depends on that failed.
+games_needs_failed() {
+  local dep
+  for dep in ${GAMES_NEEDS[$1]:-}; do
+    [[ " ${GAMES_FAILED[*]} " == *" ${dep} "* ]] && { printf '%s\n' "${dep}"; return 0; }
+  done
+  return 1
+}
+
+install_games_batch() {
+  local -a ready=()
+  local name need
+  for name in "$@"; do
+    if need=$(games_needs_failed "${name}"); then
+      warn "${name}: skipped, it needs ${need}, which failed"
+      GAMES_FAILED+=("${name}")
+    else
+      ready+=("${name}")
+    fi
+  done
+  (( ${#ready[@]} )) || return 0
+  note "transaction: ${ready[*]}"
+  if games_install_cmd "${ready[@]}"; then
+    games_clear_cache
+    return 0
+  fi
+  games_clear_cache
+  games_repo_reachable \
+    || die "crossdock stopped answering; not installed: ${ready[*]} and the rest of the selection"
+  if (( ${#ready[@]} == 1 )); then
+    warn "${ready[0]}: install failed; continuing with the next game"
+    GAMES_FAILED+=("${ready[0]}")
+    return 0
+  fi
+  warn "the batch failed; installing its games one at a time"
+  for name in "${ready[@]}"; do
+    if need=$(games_needs_failed "${name}"); then
+      warn "${name}: skipped, it needs ${need}, which failed"
+      GAMES_FAILED+=("${name}")
+      continue
+    fi
+    note "transaction: ${name}"
+    if ! games_install_cmd "${name}"; then
+      GAMES_FAILED+=("${name}")
+      games_clear_cache
+      games_repo_reachable \
+        || die "crossdock stopped answering; not installed: ${GAMES_FAILED[*]} and the rest of the selection"
+      warn "${name}: install failed; continuing with the next game"
+      continue
+    fi
+    games_clear_cache
+  done
+}
+
+# games_install_cmd <name>...: one pacman transaction, repository-qualified
+# (an earlier repository with the same name would otherwise win, and
+# selection measured the game-packages package), through GAMES_CACHE.
+GAMES_CACHE=
+games_install_cmd() {
+  sudo pacman -S --needed --noconfirm --cachedir "${GAMES_CACHE}" -- "${@/#/game-packages/}"
+}
+games_clear_cache() {
+  sudo find "${GAMES_CACHE}" -mindepth 1 -delete
+}
+
 # games_repo_reachable: crossdock still answers with the game-packages database.
 games_repo_reachable() {
   curl -fsI --max-time 5 -o /dev/null http://192.168.1.11:8080/arch/game-packages/x86_64/game-packages.db
@@ -857,34 +961,35 @@ games_repo_reachable() {
 # run_games_apply: the games profile. Every download, the -Syu that updates
 # installed games included, goes through a cache on the games' filesystem that
 # is emptied after each transaction, so neither / nor the space check has to
-# hold the downloads. Each game installs from game-packages in its own pacman
-# transaction; the run stops if crossdock drops off the network.
+# hold the downloads. The games install from game-packages in batches
+# (install_games); the run stops if crossdock drops off the network.
 run_games_apply() {
-  local sync_db cache name need dep failed=()
+  local sync_db name
   log "Profile: games$( (( NO_UPGRADE )) && printf ' (--no-upgrade)' )"
   log "Authenticating sudo"
   sudo -v || die "sudo authentication failed"
+  games_sudo_keepalive
   ensure_multilib 1
   ensure_game_packages_repo
   grep -q '^\[game-packages\]' "${GAME_PACKAGES_CONF}" \
     || die "crossdock (http://192.168.1.11:8080) is unreachable; the games profile installs only from the LAN game-packages repository"
 
   sudo install -d -m 0755 -- "${GAMES_TARGET}"
-  cache=$(sudo mktemp -d -- "${GAMES_TARGET}/.game-packages-cache.XXXXXX") \
+  GAMES_CACHE=$(sudo mktemp -d -- "${GAMES_TARGET}/.game-packages-cache.XXXXXX") \
     || die "could not create a download cache under ${GAMES_TARGET}"
   # pacman downloads as its unprivileged DownloadUser, which must reach it.
-  sudo chmod 0755 -- "${cache}"
-  # shellcheck disable=SC2064 # expand ${cache} now, while it is set
-  trap "sudo rm -rf -- '${cache}'; cleanup" EXIT
+  sudo chmod 0755 -- "${GAMES_CACHE}"
+  # shellcheck disable=SC2064 # expand ${GAMES_CACHE} now, while it is set
+  trap "sudo rm -rf -- '${GAMES_CACHE}'; cleanup" EXIT
 
   if (( NO_UPGRADE )); then
     sync_dbs_present \
       || die "--no-upgrade needs an existing sync database for every enabled repository; rerun without --no-upgrade"
     warn "--no-upgrade: skipping pacman -Syu (a partial upgrade if the sync databases are stale)"
   else
-    log "Syncing databases and applying updates (pacman -Syu, downloads through ${cache})"
-    sudo pacman -Syu --noconfirm --cachedir "${cache}"
-    sudo find "${cache}" -mindepth 1 -delete
+    log "Syncing databases and applying updates (pacman -Syu, downloads through ${GAMES_CACHE})"
+    sudo pacman -Syu --noconfirm --cachedir "${GAMES_CACHE}"
+    sudo find "${GAMES_CACHE}" -mindepth 1 -delete
   fi
   sync_db=$(pacman-conf DBPath 2>/dev/null) || sync_db=/var/lib/pacman/
   sync_db=${sync_db%/}/sync/game-packages.db
@@ -896,35 +1001,15 @@ run_games_apply() {
   note "$(games_space_summary)"
   for name in "${GAMES_SKIP[@]}"; do note "skipped ${name%% *}: ${name#* }"; done
 
-  (( ! ${#GAMES_INSTALL[@]} )) || log "Installing ${#GAMES_INSTALL[@]} game(s)"
-  for name in "${GAMES_INSTALL[@]}"; do
-    note "${name}"
-    need=
-    for dep in ${GAMES_NEEDS[${name}]:-}; do
-      [[ " ${failed[*]} " == *" ${dep} "* ]] && { need=${dep}; break; }
-    done
-    if [[ -n ${need} ]]; then
-      warn "${name}: skipped, it needs ${need}, which failed (pacman would pick another alternative)"
-      failed+=("${name}")
-      continue
-    fi
-    # Repository-qualified: an earlier repository with the same name would
-    # otherwise win, and selection measured the game-packages package.
-    if ! sudo pacman -S --needed --noconfirm --cachedir "${cache}" -- "game-packages/${name}"; then
-      failed+=("${name}")
-      sudo find "${cache}" -mindepth 1 -delete
-      games_repo_reachable \
-        || die "crossdock stopped answering; not installed: ${failed[*]} and the rest of the selection"
-      warn "${name}: pacman failed; continuing with the next game"
-      continue
-    fi
-    sudo find "${cache}" -mindepth 1 -delete
-  done
-  sudo rm -rf -- "${cache}"
+  if (( ${#GAMES_INSTALL[@]} )); then
+    log "Installing ${#GAMES_INSTALL[@]} game(s)"
+    install_games
+  fi
+  sudo rm -rf -- "${GAMES_CACHE}"
   trap cleanup EXIT
 
-  log "Done: $(( ${#GAMES_INSTALL[@]} - ${#failed[@]} )) installed now, ${#GAMES_KEEP[@]} already installed, ${#GAMES_SKIP[@]} skipped, ${#failed[@]} failed"
-  (( ! ${#failed[@]} )) || die "not installed: ${failed[*]}"
+  log "Done: $(( ${#GAMES_INSTALL[@]} - ${#GAMES_FAILED[@]} )) installed now, ${#GAMES_KEEP[@]} already installed, ${#GAMES_SKIP[@]} skipped, ${#GAMES_FAILED[@]} failed"
+  (( ! ${#GAMES_FAILED[@]} )) || die "not installed: ${GAMES_FAILED[*]}"
 }
 
 # pacman_conf_has_game_packages_include [file]: true when the pacman config
@@ -2441,6 +2526,7 @@ if [[ ${PROFILE} == games ]]; then
   command -v bsdtar >/dev/null || die "bsdtar (libarchive) is required."
   WORK_DIR=$(mktemp -d)
   cleanup() {
+    [[ -z ${GAMES_SUDO_KEEPALIVE} ]] || kill "${GAMES_SUDO_KEEPALIVE}" 2>/dev/null || true
     rm -rf "${WORK_DIR}"
   }
   trap cleanup EXIT
