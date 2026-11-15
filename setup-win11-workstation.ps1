@@ -45,11 +45,16 @@ as presence-only or -NoUpgrade is given.
      Crush (charmbracelet.crush, Charm's own WinGet package; Crush has no
      desktop app). An update whose installer technology changed (LLVM 23
      moved from NSIS to MSI) is applied as an uninstall plus a fresh
-     install, as winget requires. Run from the WinGet-installed PowerShell
-     7, the Microsoft.PowerShell update is skipped (its MSI closes every
-     pwsh, ending the run); run from powershell.exe to update it. Every
-     PowerShell 7 install and update forces the MSI and opts it into
-     Microsoft Update, so Windows Update keeps it current in between.
+     install, as winget requires. PowerShell 7 is not a WinGet package: it
+     is the LTS MSI from the PowerShell/PowerShell GitHub release that
+     tools/metadata.json names as LTS (WinGet's Microsoft.PowerShell follows
+     the newer non-LTS line), SHA-256 checked against hashes.sha256 and the
+     asset digest, and opted into Microsoft Update, which keeps it on its LTS
+     line in between. A newer patch of the LTS line is kept; a newer line
+     (7.7 from WinGet) is uninstalled first (the MSI refuses downgrades),
+     after the LTS MSI is downloaded and verified. Run from that PowerShell
+     7, the switch is skipped (its MSI closes every pwsh, ending the run);
+     run from powershell.exe. A Store copy is removed once the MSI runs.
      "Already installed" and "reboot required"
      results count as success; any other failure is reported at the end
      (exit code 1) without stopping the run, so one broken installer never
@@ -173,7 +178,7 @@ $WingetPackages = @(
     'LLVM.LLVM'
     'MediaArea.MediaInfo.GUI'
     'Meld.Meld'
-    'Microsoft.PowerShell'
+    # PowerShell 7 is not here: it is the LTS MSI from GitHub (see below).
     'Microsoft.VisualStudio.Community'
     'Microsoft.VisualStudioCode'
     'Microsoft.WindowsTerminal'
@@ -245,14 +250,34 @@ $WingetLegacyPackages = @(
 $RustComponents = @('rustfmt', 'clippy', 'rust-analyzer')
 
 # Extra WinGet arguments by package ID, for every install, upgrade and
-# reinstall of it. PowerShell 7 stays the MSI (WinGet can otherwise pick or
-# match the Store build) and opts into Microsoft Update through the MSI's
-# documented USE_MU/ENABLE_MU properties, so Windows Update keeps it current
+# reinstall of it. None are needed at present.
+$WingetPackageArgs = @{}
+
+# PowerShell 7 is the LTS MSI from PowerShell/PowerShell's GitHub releases:
+# WinGet's Microsoft.PowerShell follows the newest stable line, which is not
+# always LTS (7.7 after 7.6 LTS). The current LTS tag comes from the repo's
+# tools/metadata.json (LTSReleaseTag, which the official install-powershell.ps1
+# -LTS also follows); the MSI is SHA-256 checked against the release's
+# hashes.sha256 and GitHub's asset digest. USE_MU/ENABLE_MU opt it into
+# Microsoft Update (ENABLE_MU turns Microsoft Update on machine-wide, for other
+# Microsoft products too), which services an LTS install within its LTS line
 # between runs - including the runs that skip its update because they execute
-# from that pwsh.
-$WingetPackageArgs = @{
-    'Microsoft.PowerShell' = @('--installer-type', 'wix', '--custom', 'USE_MU=1 ENABLE_MU=1')
-}
+# from that pwsh. WinGet still matches the MSI to Microsoft.PowerShell, so a
+# manual `winget upgrade --all` moves it to the non-LTS line; the next run
+# switches it back.
+$PowerShellRepo = 'PowerShell/PowerShell'
+$PowerShellMetadataUrl = "https://raw.githubusercontent.com/$PowerShellRepo/master/tools/metadata.json"
+$PowerShellMsiProperties = @('USE_MU=1', 'ENABLE_MU=1')
+# Verbose msiexec log of the last PowerShell MSI operation, kept for diagnosis.
+$PowerShellMsiLog = Join-Path ([IO.Path]::GetTempPath()) 'lan-ipxe-pwsh-msi.log'
+# msiexec results: success, reboot required (ERROR_SUCCESS_REBOOT_REQUIRED),
+# reboot initiated (ERROR_SUCCESS_REBOOT_INITIATED).
+$MsiOkCodes = @(0, 3010, 1641)
+$MsiRebootCodes = @(3010, 1641)
+# ERROR_INSTALL_ALREADY_RUNNING: another installation holds the msiexec mutex.
+$MsiBusyCode = 1618
+$MsiBusyAttempts = 6
+$MsiBusyRetrySeconds = 10
 
 # AI CLIs that update themselves come from each vendor's official per-user
 # installer: their WinGet portable/zip packages pin them to a WinGet-managed
@@ -630,7 +655,8 @@ function Invoke-WingetPackageSet {
         [string[]]$LegacyIds = @(),
 
         # Installed packages whose update would close the process running this
-        # script (the PowerShell 7 MSI shuts down every pwsh). Never upgraded here.
+        # script. Never upgraded here; none at present (PowerShell 7, the case
+        # this was for, is now the GitHub LTS MSI, which checks its host itself).
         [string[]]$HostIds = @(),
 
         # Install missing packages only; leave installed ones at their version.
@@ -929,38 +955,220 @@ function Invoke-NativeCliSet {
     }
 }
 
-#--- PowerShell 7: the MSI, not the Microsoft Store package -------------------
+#--- PowerShell 7: the LTS MSI from GitHub, not the Microsoft Store package --
 # The Store package runs through an app-execution alias that Codex's Windows
 # sandbox (a restricted token) cannot launch, so sandboxed agents can't run any
-# command. WinGet can count the Store copy as Microsoft.PowerShell, so a plain
-# install skips the MSI: force the MSI, verify it, then remove the Store copy.
-function Get-PowerShellMsiPath { Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe' }
+# command. Install the verified LTS MSI, check it runs, then remove the Store copy.
+function Get-PowerShellMsiPath {
+    # The 64-bit Program Files even from a 32-bit (WOW64) host.
+    $programFiles = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
+    Join-Path $programFiles 'PowerShell\7\pwsh.exe'
+}
 
 function Get-StorePowerShell {
     @(Get-AppxPackage -Name Microsoft.PowerShell -AllUsers -ErrorAction SilentlyContinue)
 }
 
+# False (rather than a terminating error) when the exe cannot even launch.
 function Test-PowerShellMsiRun {
     param([Parameter(Mandatory = $true)][string]$Path)
-    & $Path -NoProfile -Command 'exit 0'
-    return $LASTEXITCODE -eq 0
+    try {
+        & $Path -NoProfile -Command 'exit 0'
+        return $LASTEXITCODE -eq 0
+    }
+    catch {
+        return $false
+    }
 }
 
+# The MSI install in Program Files\PowerShell\7 as the MSI registers it under
+# PowerShellCore\InstalledVersions (SemanticVersion, ProductCode), read from the
+# 64-bit registry view even from a 32-bit host; $null when there is none
+# (preview installs live in 7-preview and are ignored).
+function Get-PowerShellMsiInstall {
+    $dir = (Split-Path -Parent (Get-PowerShellMsiPath)).TrimEnd('\')
+    $view = if ([Environment]::Is64BitOperatingSystem) { [Microsoft.Win32.RegistryView]::Registry64 } else { [Microsoft.Win32.RegistryView]::Default }
+    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $view)
+    try {
+        $root = $base.OpenSubKey('SOFTWARE\Microsoft\PowerShellCore\InstalledVersions')
+        if (-not $root) { return $null }
+        try {
+            foreach ($name in $root.GetSubKeyNames()) {
+                $key = $root.OpenSubKey($name)
+                if (-not $key) { continue }
+                try {
+                    $version = [string]$key.GetValue('SemanticVersion')
+                    $location = [string]$key.GetValue('InstallLocation')
+                    if (-not $version -or $location.TrimEnd('\') -ne $dir) { continue }
+                    return [pscustomobject]@{ Version = $version; ProductCode = [string]$key.GetValue('ProductCode') }
+                }
+                finally { $key.Close() }
+            }
+        }
+        finally { $root.Close() }
+    }
+    finally { $base.Close() }
+    return $null
+}
+
+# True when this run executes from the Program Files PowerShell 7, whose MSI
+# install shuts down every pwsh (ending the run and rolling back).
+function Test-PowerShellMsiHost {
+    if ($PSVersionTable.PSEdition -ne 'Core') { return $false }
+    return (Get-Process -Id $PID).Path -like (Join-Path (Split-Path -Parent (Get-PowerShellMsiPath)) '*')
+}
+
+# The newest tag metadata.json lists as LTS, without its leading v.
+function Get-PowerShellLtsVersion {
+    $metadata = Invoke-RestMethod -Uri $PowerShellMetadataUrl -Headers @{ 'User-Agent' = 'lan-ipxe-setup' }
+    $versions = @(@($metadata.LTSReleaseTag) | ForEach-Object { [string]$_ } |
+        Where-Object { $_ -match '^v\d+\.\d+\.\d+$' } | ForEach-Object { $_.Substring(1) })
+    if ($versions.Count -eq 0) {
+        throw "$PowerShellMetadataUrl lists no stable LTSReleaseTag"
+    }
+    return [string]($versions | Sort-Object { [version]$_ } -Descending | Select-Object -First 1)
+}
+
+# The LTS release's MSI for this architecture and its verified SHA-256.
+function Get-PowerShellLtsRelease {
+    $version = Get-PowerShellLtsVersion
+    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$PowerShellRepo/releases/tags/v$version" -Headers @{ 'User-Agent' = 'lan-ipxe-setup' }
+    if ($release.prerelease -or $release.draft) {
+        throw "$PowerShellRepo release v$version is not a stable release"
+    }
+    $native = Get-NativeProcessorArchitecture
+    $arch = switch ($native) {
+        'AMD64' { 'x64' }
+        'ARM64' { 'arm64' }
+        default { throw "PowerShell publishes no Windows MSI for architecture '$native'" }
+    }
+    $asset = Get-VerifiedReleaseAsset -Release $release -AssetName "PowerShell-$version-win-$arch.msi" -SumsName 'hashes.sha256'
+    return [pscustomobject]@{
+        Version = $version
+        Name = $asset.Name
+        Url = $asset.Url
+        Sha256 = $asset.Sha256
+    }
+}
+
+# Runs msiexec quietly with a verbose log; throws unless it succeeded (a
+# reboot request counts). 1618 (another installation is in progress - e.g.
+# a Windows Update scan right after the WinGet phase) is retried.
+function Invoke-Msiexec {
+    param([Parameter(Mandatory = $true)][string[]]$Arguments, [int[]]$ExtraOkCodes = @())
+    $all = @($Arguments) + @('/l*v', "`"$PowerShellMsiLog`"")
+    for ($attempt = 1; ; $attempt++) {
+        $code = (Start-Process -FilePath 'msiexec.exe' -ArgumentList $all -Wait -PassThru).ExitCode
+        if ($code -ne $MsiBusyCode -or $attempt -ge $MsiBusyAttempts) { break }
+        Write-Note "msiexec: another installation is in progress; retrying in $MsiBusyRetrySeconds s"
+        Start-Sleep -Seconds $MsiBusyRetrySeconds
+    }
+    if ($MsiRebootCodes -contains $code) { $script:RebootNeeded = $true }
+    if ($MsiOkCodes -notcontains $code -and $ExtraOkCodes -notcontains $code) {
+        throw "msiexec $($Arguments[0]) exited with $code (log: $PowerShellMsiLog)"
+    }
+}
+
+# Downloads the release MSI into a fresh temp directory and verifies it;
+# returns the directory and the MSI path. The caller removes the directory.
+function Save-PowerShellMsi {
+    param([Parameter(Mandatory = $true)]$Release)
+    $dir = Join-Path ([IO.Path]::GetTempPath()) ("pwsh-msi-{0}" -f [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $dir | Out-Null
+    try {
+        $package = Join-Path $dir $Release.Name
+        Invoke-WebRequest -Uri $Release.Url -OutFile $package -UseBasicParsing
+        $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $package).Hash.ToLowerInvariant()
+        if ($actual -ne $Release.Sha256) {
+            throw "PowerShell MSI checksum mismatch: expected $($Release.Sha256), got $actual"
+        }
+    }
+    catch {
+        Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+        throw
+    }
+    return [pscustomobject]@{ Directory = $dir; Path = $package }
+}
+
+function Install-PowerShellMsi {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    Invoke-Msiexec -Arguments (@('/i', "`"$Path`"", '/quiet', '/norestart') + $PowerShellMsiProperties)
+}
+
+# Installs the PowerShell 7 LTS MSI when missing and keeps an installed one on
+# the current LTS release: an older release is upgraded in place, a newer
+# patch of the same LTS line (Microsoft Update can be ahead of metadata.json)
+# is kept, and a newer line (7.7 from WinGet) or a registered install whose
+# files are gone is uninstalled first - the MSI refuses downgrades. The MSI is
+# downloaded and verified before anything is uninstalled. Then any Store copy
+# is removed. Returns 'current', 'installed', 'updated', 'store-removed',
+# 'store-kept', 'host-skipped' or 'failed'.
 function Invoke-PowerShellMsiSwitch {
+    param([switch]$NoUpgrade)
     $msi = Get-PowerShellMsiPath
     $status = 'current'
-    if (-not (Test-Path -LiteralPath $msi)) {
-        Write-Note 'PowerShell 7: installing the MSI (WinGet Microsoft.PowerShell, wix installer)'
-        # --installer-type wix and the Microsoft Update opt-in come from $WingetPackageArgs.
-        $extra = @(Get-WingetPackageArgument -Id 'Microsoft.PowerShell')
-        Invoke-Winget install --id Microsoft.PowerShell --exact --source winget --force --silent --accept-package-agreements --accept-source-agreements --disable-interactivity @extra | Out-Host
-        $code = $LASTEXITCODE
-        if ($WingetRebootCodes -contains $code) { $script:RebootNeeded = $true }
-        if (-not $WingetOkCodes.ContainsKey($code)) {
-            Write-Warning ("PowerShell 7 MSI: winget install exited with 0x{0:X8} ({0})" -f $code)
-            return 'failed'
+    try {
+        $existing = Get-PowerShellMsiInstall
+        $present = Test-Path -LiteralPath $msi
+        $installedVersion = $null
+        if ($existing) {
+            $parsed = $null
+            if ([version]::TryParse(($existing.Version -replace '-.*$', ''), [ref]$parsed)) { $installedVersion = $parsed }
         }
-        $status = 'installed'
+        $from = if ($existing) { $existing.Version } elseif ($present) { 'an unregistered copy' } else { $null }
+        if ($present -and $NoUpgrade) {
+            Write-Note "PowerShell 7 $(if ($existing) { $existing.Version } else { '(unregistered)' }): present; LTS line not checked (-NoUpgrade)"
+        }
+        else {
+            $release = Get-PowerShellLtsRelease
+            $target = [version]$release.Version
+            $sameLine = $null -ne $installedVersion -and $installedVersion.Major -eq $target.Major -and $installedVersion.Minor -eq $target.Minor
+            $newerLine = $null -ne $installedVersion -and ($installedVersion.Major -gt $target.Major -or
+                ($installedVersion.Major -eq $target.Major -and $installedVersion.Minor -gt $target.Minor))
+            if ($present -and $sameLine -and $installedVersion -ge $target) {
+                Write-Note "PowerShell 7 $($existing.Version): current (LTS $($release.Version))"
+            }
+            elseif ($present -and (Test-PowerShellMsiHost)) {
+                Write-Note "PowerShell 7: $from -> LTS $($release.Version) skipped - it hosts this run; run the script from Windows PowerShell (powershell.exe) to switch it"
+                $status = 'host-skipped'
+            }
+            else {
+                $removeFirst = $null -ne $existing -and ($newerLine -or -not $present)
+                if ($removeFirst -and -not $existing.ProductCode) {
+                    throw "PowerShell 7 $from must be uninstalled first, but it has no recorded ProductCode"
+                }
+                $saved = Save-PowerShellMsi -Release $release
+                try {
+                    $removed = $false
+                    if ($removeFirst) {
+                        $why = if ($present) { 'newer than LTS; the MSI refuses downgrades' } else { 'registered, but its files are gone' }
+                        Write-Note "PowerShell 7: uninstalling $from ($why)"
+                        # 1605: the product is already gone.
+                        Invoke-Msiexec -Arguments @('/x', $existing.ProductCode, '/quiet', '/norestart') -ExtraOkCodes @(1605)
+                        $removed = $true
+                    }
+                    $action = if ($present -and -not $removed) { "updating $from to" } else { 'installing' }
+                    Write-Note "PowerShell 7: $action the verified LTS MSI $($release.Version) ($($release.Name))"
+                    try {
+                        Install-PowerShellMsi -Path $saved.Path
+                    }
+                    catch {
+                        if ($removed) {
+                            throw "PowerShell 7 $from was uninstalled, but LTS $($release.Version) failed to install ($($_.Exception.Message)); PowerShell 7 is not installed - re-run from powershell.exe"
+                        }
+                        throw
+                    }
+                }
+                finally {
+                    Remove-Item -LiteralPath $saved.Directory -Recurse -Force -ErrorAction SilentlyContinue
+                }
+                $status = if ($present) { 'updated' } else { 'installed' }
+            }
+        }
+    }
+    catch {
+        Write-Warning "PowerShell 7 LTS MSI: $($_.Exception.Message); leaving any Store copy in place"
+        return 'failed'
     }
     if (-not (Test-Path -LiteralPath $msi)) {
         Write-Warning "PowerShell 7 MSI: $msi is missing after install; leaving any Store copy in place"
@@ -1088,6 +1296,48 @@ function Get-WindowsArchitectureName {
     }
 }
 
+# One GitHub release asset and the single SHA-256 that the release's checksum
+# file and (when present) GitHub's asset digest agree on.
+function Get-VerifiedReleaseAsset {
+    param(
+        [Parameter(Mandatory = $true)]$Release,
+        [Parameter(Mandatory = $true)][string]$AssetName,
+        [Parameter(Mandatory = $true)][string]$SumsName
+    )
+    $asset = @($Release.assets | Where-Object { $_.name -eq $AssetName })
+    $sums = @($Release.assets | Where-Object { $_.name -eq $SumsName })
+    if ($asset.Count -ne 1 -or $sums.Count -ne 1) {
+        throw "release $($Release.tag_name) lacks exactly one $AssetName and $SumsName"
+    }
+    # Saved to a file: release downloads are application/octet-stream, which
+    # Invoke-RestMethod does not reliably decode to text on 5.1, and Get-Content
+    # honors a byte-order mark (PowerShell's hashes.sha256 is UTF-16).
+    $sumsFile = Join-Path ([IO.Path]::GetTempPath()) ("release-sums-{0}.txt" -f [Guid]::NewGuid().ToString('N'))
+    try {
+        Invoke-WebRequest -Uri $sums[0].browser_download_url -OutFile $sumsFile -UseBasicParsing
+        $sumsText = Get-Content -Raw -LiteralPath $sumsFile
+    }
+    finally {
+        Remove-Item -LiteralPath $sumsFile -Force -ErrorAction SilentlyContinue
+    }
+    $lines = @($sumsText -split "`r?`n" | Where-Object { $_ -match ('^(?<Hash>[0-9a-fA-F]{64})\s+\*?' + [regex]::Escape($AssetName) + '\s*$') })
+    if ($lines.Count -ne 1) {
+        throw "$SumsName has no single entry for $AssetName"
+    }
+    $expected = ([regex]::Match($lines[0], '^[0-9a-fA-F]{64}')).Value.ToLowerInvariant()
+    $digest = [string]$asset[0].digest
+    if ($digest) {
+        if (-not $digest.StartsWith('sha256:') -or $digest.Substring(7).ToLowerInvariant() -ne $expected) {
+            throw "GitHub asset digest for $AssetName disagrees with $SumsName"
+        }
+    }
+    return [pscustomobject]@{
+        Name = $AssetName
+        Url = [string]$asset[0].browser_download_url
+        Sha256 = $expected
+    }
+}
+
 # Resolve the latest stable release asset for this architecture and the one
 # SHA-256 that SHA256SUMS.txt and (when present) GitHub's asset digest agree on.
 function Get-BalunRelease {
@@ -1096,37 +1346,12 @@ function Get-BalunRelease {
         throw "latest $BalunRepo release is not a stable release"
     }
     $assetName = 'balun-windows-{0}-setup.exe' -f (Get-WindowsArchitectureName)
-    $asset = @($release.assets | Where-Object { $_.name -eq $assetName })
-    $sums = @($release.assets | Where-Object { $_.name -eq 'SHA256SUMS.txt' })
-    if ($asset.Count -ne 1 -or $sums.Count -ne 1) {
-        throw "release $($release.tag_name) lacks exactly one $assetName and SHA256SUMS.txt"
-    }
-    # Saved to a file: release downloads are application/octet-stream, which
-    # Invoke-RestMethod does not reliably decode to text on 5.1.
-    $sumsFile = Join-Path ([IO.Path]::GetTempPath()) ("balun-sums-{0}.txt" -f [Guid]::NewGuid().ToString('N'))
-    try {
-        Invoke-WebRequest -Uri $sums[0].browser_download_url -OutFile $sumsFile -UseBasicParsing
-        $sumsText = Get-Content -Raw -LiteralPath $sumsFile
-    }
-    finally {
-        Remove-Item -LiteralPath $sumsFile -Force -ErrorAction SilentlyContinue
-    }
-    $lines = @($sumsText -split "`r?`n" | Where-Object { $_ -match ('^(?<Hash>[0-9a-fA-F]{64})\s+\*?' + [regex]::Escape($assetName) + '\s*$') })
-    if ($lines.Count -ne 1) {
-        throw "SHA256SUMS.txt has no single entry for $assetName"
-    }
-    $expected = ([regex]::Match($lines[0], '^[0-9a-fA-F]{64}')).Value.ToLowerInvariant()
-    $digest = [string]$asset[0].digest
-    if ($digest) {
-        if (-not $digest.StartsWith('sha256:') -or $digest.Substring(7).ToLowerInvariant() -ne $expected) {
-            throw "GitHub asset digest for $assetName disagrees with SHA256SUMS.txt"
-        }
-    }
+    $asset = Get-VerifiedReleaseAsset -Release $release -AssetName $assetName -SumsName 'SHA256SUMS.txt'
     return [pscustomobject]@{
         Version = ([string]$release.tag_name).TrimStart('v')
-        Name = $assetName
-        Url = [string]$asset[0].browser_download_url
-        Sha256 = $expected
+        Name = $asset.Name
+        Url = $asset.Url
+        Sha256 = $asset.Sha256
     }
 }
 
@@ -2633,6 +2858,10 @@ if ($DryRun) {
         Write-Note "Microsoft Store apps (WinGet msstore source; $updatePolicy):"
         foreach ($id in $WingetStorePackages) { Write-Note "    $id ($($WingetStorePackageNames[$id]))" }
     }
+    Write-Note "PowerShell 7: the LTS MSI from $PowerShellRepo releases (LTSReleaseTag in tools/metadata.json)"
+    Write-Note '    PowerShell-<version>-win-<x64|arm64>.msi, SHA-256 checked against hashes.sha256 and the asset digest,'
+    Write-Note "    msiexec /quiet $($PowerShellMsiProperties -join ' '); a newer non-LTS install is uninstalled first;"
+    Write-Note '    skipped while this run executes from that pwsh, and when present and -NoUpgrade; then any Store copy is removed'
     Write-Note "Balun: WinGet $BalunWingetId when it resolves; otherwise the latest stable $BalunRepo release"
     Write-Note '    balun-windows-<x86_64|aarch64>-setup.exe, SHA-256 checked against SHA256SUMS.txt and the asset digest,'
     Write-Note "    run silently ($($BalunInstallerArgs -join ' ')); skipped when present and -NoUpgrade"
@@ -2758,7 +2987,28 @@ if ($Check) {
     }
     $pwshMsi = Get-PowerShellMsiPath
     $hasMsi = Test-Path -LiteralPath $pwshMsi
-    Write-State $hasMsi 'PowerShell 7 (MSI)' $(if ($hasMsi) { $pwshMsi } else { 'not installed' })
+    if (-not $hasMsi) {
+        Write-State $false 'PowerShell 7 LTS (MSI)' 'not installed'
+    }
+    else {
+        $pwshInstall = Get-PowerShellMsiInstall
+        $pwshVersion = if ($pwshInstall) { $pwshInstall.Version } else { 'unregistered' }
+        try {
+            # CURRENT on the LTS line; newer LTS patches are applied on apply
+            # (and by Microsoft Update in between).
+            $ltsVersion = [version](Get-PowerShellLtsVersion)
+            $parsedPwsh = $null
+            $onLts = $pwshInstall -and [version]::TryParse(($pwshVersion -replace '-.*$', ''), [ref]$parsedPwsh) -and
+                $parsedPwsh.Major -eq $ltsVersion.Major -and $parsedPwsh.Minor -eq $ltsVersion.Minor
+            $detail = if ($onLts) { "$pwshVersion (LTS $ltsVersion; newer LTS patches applied on apply)" }
+                else { "$pwshVersion, not the LTS line ($ltsVersion); switched on apply" }
+            Write-State $onLts 'PowerShell 7 LTS (MSI)' $detail
+        }
+        catch {
+            Write-State $true 'PowerShell 7 (MSI)' $pwshVersion
+            Write-Note "NOTE    PowerShell 7 LTS line: not queried ($($_.Exception.Message))"
+        }
+    }
     $storePwsh = @(Get-StorePowerShell)
     if ($storePwsh.Count) {
         Write-State $false 'PowerShell 7 (Store package)' "$($storePwsh[0].Version); its alias can't run in Codex's sandbox; replaced by the MSI on apply"
@@ -2869,19 +3119,11 @@ Write-Note "Python 3: selected current WinGet channel $latestPythonPackageId"
 
 Write-Step "winget package set ($($WingetPackages.Count) entries)"
 $installedIds = Get-WingetInventory
-# Under the WinGet-installed PowerShell 7, its MSI update would close this run
-# mid-way (and roll back), so that one update is left to a powershell.exe run.
-$hostIds = @()
-if ($PSVersionTable.PSEdition -eq 'Core' -and $env:ProgramFiles -and
-    (Get-Process -Id $PID).Path -like (Join-Path $env:ProgramFiles 'PowerShell\*')) {
-    $hostIds += 'Microsoft.PowerShell'
-}
 $wingetResult = Invoke-WingetPackageSet `
     -InstalledIds $installedIds `
     -DesiredIds $WingetPackages `
     -PresenceOnlyIds $WingetPresenceOnlyPackages `
     -LegacyIds $WingetLegacyPackages `
-    -HostIds $hostIds `
     -NoUpgrade:$NoUpgrade
 
 if ($WingetStorePackages.Count) {
@@ -2911,8 +3153,8 @@ if ($WingetStorePackages.Count) {
 Write-Step 'OpenCode native installs (replaced by Goose and Crush)'
 $openCodeResult = Invoke-OpenCodeNativePurge
 
-Write-Step 'PowerShell 7 (MSI, not the Store package)'
-$pwshResult = Invoke-PowerShellMsiSwitch
+Write-Step 'PowerShell 7 (LTS MSI from GitHub, not the Store package)'
+$pwshResult = Invoke-PowerShellMsiSwitch -NoUpgrade:$NoUpgrade
 Write-Note "PowerShell 7: $pwshResult"
 
 Write-Step 'Balun (WinGet when published, otherwise verified GitHub release)'
@@ -2946,7 +3188,7 @@ Write-Step 'Summary'
 Write-Note "winget: $($wingetResult.Installed.Count) installed now, $($wingetResult.UpdatedOrCurrent.Count) updated/current, $($wingetResult.Present.Count) presence-only, $($wingetResult.RemovedLegacy.Count) legacy removed, $($wingetResult.Deferred.Count) deferred, $($wingetResult.Failed.Count) failed"
 if ($wingetResult.Deferred.Count) { Write-Note "deferred (re-run after a reboot): $($wingetResult.Deferred -join ', ')" }
 if ($wingetResult.Failed.Count)   { Write-Note "failed: $($wingetResult.Failed -join ', ')" }
-if ($wingetResult.HostSkipped.Count) { Write-Note "not updated (hosts this run; re-run from powershell.exe): $($wingetResult.HostSkipped -join ', ')" }
+if ($pwshResult -eq 'host-skipped') { Write-Note 'not switched (hosts this run; re-run from powershell.exe): PowerShell 7 LTS MSI' }
 if ($script:RebootNeeded) {
     Write-Warning 'A reboot is required to finish; re-run this script afterwards to pick up anything deferred.'
 }
