@@ -397,7 +397,8 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   installed directly from opencode.ai (through its own uninstaller; config and data
   stay), with
   Microsoft VS Code kept as the supported Windows editor. One `winget export` snapshot
-  decides the remaining state; `--include-unknown` keeps versionless registrations from
+  per source (winget, plus msstore for full's Store apps) decides the remaining state;
+  `--include-unknown` keeps versionless registrations from
   silently freezing, so those vendor installers may run again. "Already installed" /
   "reboot required" results count as success, and any other failure is reported at the
   end (exit code 1) without stopping the run. `-HyperV`
@@ -430,8 +431,10 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   `nanosaur2` and `ottomatic`. Each run installs what is missing and runs `googet
   install` over the rest so they move to the repo's latest (missing only with
   `-NoUpgrade`); while enthoo does not answer they are reported as deferred, not failed.
-  Full adds Steam, GOG Galaxy, the
-  SuperTux games, benchmarks, Plex, iTunes, HDHomeRun, MakeMKV, and Google Drive.
+  Full adds Steam, GOG Galaxy, the SuperTux games, benchmarks, Plex, HDHomeRun, MakeMKV,
+  and Google Drive from WinGet, plus Apple Music and Apple TV from the Microsoft Store
+  (WinGet's `msstore` source; per-user apps, installed for the account running apply).
+  iTunes is no longer installed; an existing copy is left in place.
 
 Missing package-set entries are installed and existing Arch/AUR packages are updated.
 Config files are rewritten only when their content, type, mode, or ownership differs;

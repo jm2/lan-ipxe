@@ -18,7 +18,7 @@ if ($parseErrors.Count) {
 }
 $tokens.Count | Out-Null
 
-foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetLegacyPackages', 'WingetPresenceOnlyPackages',
+foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetFullStorePackages', 'WingetStorePackageNames', 'WingetLegacyPackages', 'WingetPresenceOnlyPackages',
                               'RustComponents', 'BalunWingetId', 'BalunRepo', 'BalunDisplayName', 'BalunInstallerArgs', 'WingetOkCodes', 'WingetRebootCodes', 'WingetDeferredCodes', 'WingetRemoveOkCodes', 'WingetLaunchAttempts', 'WingetLaunchRetrySeconds', 'WingetInstallTechMismatchCode', 'WingetUninstallWaitSeconds', 'WingetUninstallPollSeconds', 'NativeCliTools', 'WingetPackageArgs', 'GooGetGitHubRepo', 'GooGetPatchedRepo', 'GooGetPatchedCommit', 'GooGetPatchedPulls', 'GooGetRepoName', 'GooGetRepoUrl', 'GooGetRetiredRepos', 'GooGetAclTrustedSids', 'GooGetPackages', 'GooGetFullPackages', 'GooGetProbeTimeoutSeconds',
                               'GamesExcludePattern', 'GamesReservePercent', 'GamesSizeFactor', 'GamesBootstrapWingetPackages')) {
     $assignmentAst = $ast.Find({
@@ -56,6 +56,13 @@ foreach ($id in @('Rustlang.Rustup', 'Google.Chrome', 'Mozilla.Firefox', 'LLVM.L
     Assert-True ($core -contains $id) "$id must be in core"
 }
 Assert-True (@($full | Select-Object -Unique).Count -eq $full.Count) 'core and full package IDs do not overlap'
+Assert-True ($full -notcontains 'Apple.iTunes') 'iTunes is replaced by the Store Apple Music and Apple TV apps'
+foreach ($id in @('9PFHDD62MXS1', '9NM4T8B9JQZ1')) {
+    Assert-True ($WingetFullStorePackages -contains $id) "Store app $id must be in full"
+}
+foreach ($id in $WingetFullStorePackages) {
+    Assert-True ([bool]$WingetStorePackageNames[$id]) "Store app $id has a display name"
+}
 Assert-True (@($full | Where-Object { $_ -like 'Rustlang.Rust.*' }).Count -eq 0) 'no standalone Rust MSI in any profile'
 foreach ($id in @('Rustlang.Rust.MSVC', 'Rustlang.Rust.GNU')) {
     Assert-True ($WingetLegacyPackages -contains $id) "$id is removed in favor of rustup"

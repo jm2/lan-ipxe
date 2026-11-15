@@ -10,7 +10,9 @@ unmaintained upstream). Apply from an elevated PowerShell; Windows PowerShell
 
 Profiles: core (the default) is every developer toolchain, editor, agent,
 browser and everyday utility. Full adds games/launchers and media
-servers/players/rippers. Games stands alone - it is not added on top of core
+servers/players/rippers, plus Apple Music and Apple TV from the Microsoft
+Store (WinGet's msstore source; per-user apps, so they install for the
+account running apply). Games stands alone - it is not added on top of core
 or full and touches nothing else: it installs Go and Git from WinGet if
 missing, builds GooGet with them (step 7) and installs every game the LAN
 game-packages GooGet repo publishes for this machine, one source per game
@@ -28,7 +30,9 @@ as presence-only or -NoUpgrade is given.
   2. Hyper-V via the supported Windows optional feature - only with -HyperV.
      Windows 11 Pro/Enterprise (not Home) and compatible hardware are required.
   3. The winget package set for the selected profile. One `winget export`
-     snapshot of what is installed decides what is missing. Installed desired
+     snapshot per source (winget, plus msstore for full's Store apps) decides
+     what is missing; an unavailable msstore source fails only the Store
+     apps. Installed desired
      packages are checked for updates every run, except for the explicitly
      presence-only Speedtest CLI and the Antigravity app, which updates
      itself. The legacy Antigravity IDE, VSCodium and
@@ -198,7 +202,6 @@ $WingetPackages = @(
 )
 # full adds games/launchers and media servers, players and rippers.
 $WingetFullPackages = @(
-    'Apple.iTunes'
     # 'Blizzard.BattleNet'            # broken: interactive installer
     'ExtremeTuxRacer.ExtremeTuxRacer'
     'GOG.Galaxy'
@@ -211,6 +214,17 @@ $WingetFullPackages = @(
     'Unigine.HeavenBenchmark'
     'Valve.Steam'
 )
+# full also installs these Microsoft Store apps (WinGet's msstore source, by
+# Store product ID). Apple Music and Apple TV replace iTunes on Windows.
+$WingetFullStorePackages = @(
+    '9PFHDD62MXS1'  # Apple Music
+    '9NM4T8B9JQZ1'  # Apple TV
+)
+$WingetStorePackageNames = @{
+    '9PFHDD62MXS1' = 'Apple Music'
+    '9NM4T8B9JQZ1' = 'Apple TV'
+}
+$WingetStorePackages = @()
 $WingetPresenceOnlyPackages = @(
     # The Antigravity app is a per-user installer that updates itself; WinGet
     # only installs it when missing.
@@ -431,11 +445,12 @@ function Get-WingetPackageArgument {
 # `winget export` is far cheaper than a `winget list` per package, and its
 # JSON is exact where the list's table output is truncated.
 function Get-WingetInventory {
+    param([ValidateSet('winget', 'msstore')][string]$Source = 'winget')
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("winget-export-{0}.json" -f [Guid]::NewGuid().ToString('N'))
     try {
         # 0x8A150035 means some unrelated installed applications could not be
         # matched to this source; the matched winget inventory is still valid.
-        Invoke-Winget export -o $tmp --source winget --accept-source-agreements --disable-interactivity | Out-Null
+        Invoke-Winget export -o $tmp --source $Source --accept-source-agreements --disable-interactivity | Out-Null
         $code = $LASTEXITCODE
         if ($WingetExportOkCodes -notcontains $code) {
             throw ("winget export failed with 0x{0:X8} ({0})" -f $code)
@@ -450,15 +465,18 @@ function Get-WingetInventory {
             throw "winget export produced invalid JSON: $($_.Exception.Message)"
         }
         if ($snapshot.PSObject.Properties.Name -notcontains 'Sources') {
+            # An export from the msstore source omits Sources when none of
+            # its apps is installed; the winget source always matches some.
+            if ($Source -ne 'winget') { return }
             throw 'winget export JSON has no Sources property'
         }
         $sources = @($snapshot.Sources)
         $ids = New-Object System.Collections.Generic.List[string]
-        foreach ($source in $sources) {
-            if ($source.PSObject.Properties.Name -notcontains 'Packages') {
+        foreach ($exportSource in $sources) {
+            if ($exportSource.PSObject.Properties.Name -notcontains 'Packages') {
                 throw 'winget export JSON contains a source without a Packages collection'
             }
-            $packages = @($source.Packages)
+            $packages = @($exportSource.Packages)
             if ($packages.Count -eq 0) {
                 throw 'winget export JSON contains an empty Packages collection'
             }
@@ -509,9 +527,12 @@ function Test-NsisExecutable {
 # waits on a confirmation dialog, so NSIS uninstallers are run with /S here.
 function Remove-WingetPackageForReinstall {
     [CmdletBinding(SupportsShouldProcess = $true)]
-    param([Parameter(Mandatory = $true)][string]$Id)
+    param(
+        [Parameter(Mandatory = $true)][string]$Id,
+        [ValidateSet('winget', 'msstore')][string]$Source = 'winget'
+    )
     if (-not $PSCmdlet.ShouldProcess($Id, 'uninstall ahead of a reinstall')) { return $false }
-    $entry = Get-WingetArpEntry -Id $Id
+    $entry = if ($Source -eq 'winget') { Get-WingetArpEntry -Id $Id } else { $null }
     if ($entry -and $entry.PSObject.Properties.Name -contains 'UninstallString' -and $entry.UninstallString -and
         -not ($entry.PSObject.Properties.Name -contains 'QuietUninstallString' -and $entry.QuietUninstallString)) {
         $parsed = Split-UninstallCommand -Command ([string]$entry.UninstallString)
@@ -522,7 +543,7 @@ function Remove-WingetPackageForReinstall {
             return ($code -eq 0)
         }
     }
-    Invoke-Winget uninstall --id $Id --exact --source winget --silent --accept-source-agreements --disable-interactivity | Out-Host
+    Invoke-Winget uninstall --id $Id --exact --source $Source --silent --accept-source-agreements --disable-interactivity | Out-Host
     $code = $LASTEXITCODE
     if ($WingetRebootCodes -contains $code) { $script:RebootNeeded = $true }
     if (-not $WingetRemoveOkCodes.ContainsKey($code)) {
@@ -534,10 +555,13 @@ function Remove-WingetPackageForReinstall {
 
 # $true once winget no longer lists $Id as installed; $false on timeout.
 function Wait-WingetPackageRemoved {
-    param([Parameter(Mandatory = $true)][string]$Id)
+    param(
+        [Parameter(Mandatory = $true)][string]$Id,
+        [ValidateSet('winget', 'msstore')][string]$Source = 'winget'
+    )
     $deadline = (Get-Date).AddSeconds($WingetUninstallWaitSeconds)
     while ($true) {
-        Invoke-Winget list --id $Id --exact --source winget --accept-source-agreements --disable-interactivity | Out-Null
+        Invoke-Winget list --id $Id --exact --source $Source --accept-source-agreements --disable-interactivity | Out-Null
         if ($LASTEXITCODE -ne 0) { return $true }
         if ((Get-Date) -ge $deadline) { return $false }
         Start-Sleep -Seconds $WingetUninstallPollSeconds
@@ -591,10 +615,15 @@ function Invoke-WingetPackageSet {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
         [string[]]$InstalledIds,
 
         [Parameter(Mandatory = $true)]
         [string[]]$DesiredIds,
+
+        # The WinGet source every ID belongs to (the inventory must match).
+        [ValidateSet('winget', 'msstore')]
+        [string]$Source = 'winget',
 
         [string[]]$PresenceOnlyIds = @(),
 
@@ -651,7 +680,7 @@ function Invoke-WingetPackageSet {
         if ($InstalledIds -notcontains $id) { continue }
 
         Write-Note "removing legacy $id"
-        Invoke-Winget uninstall --id $id --exact --source winget --silent --accept-source-agreements --disable-interactivity | Out-Host
+        Invoke-Winget uninstall --id $id --exact --source $Source --silent --accept-source-agreements --disable-interactivity | Out-Host
         $code = $LASTEXITCODE
         if ($WingetRebootCodes -contains $code) { $script:RebootNeeded = $true }
         if ($WingetRemoveOkCodes.ContainsKey($code)) {
@@ -671,7 +700,7 @@ function Invoke-WingetPackageSet {
     foreach ($id in $missing) {
         Write-Note "installing $id"
         $extra = @(Get-WingetPackageArgument -Id $id)
-        Invoke-Winget install --id $id --exact --source winget --no-upgrade --silent --accept-package-agreements --accept-source-agreements --disable-interactivity @extra | Out-Host
+        Invoke-Winget install --id $id --exact --source $Source --no-upgrade --silent --accept-package-agreements --accept-source-agreements --disable-interactivity @extra | Out-Host
         $code = $LASTEXITCODE
         if ($WingetRebootCodes -contains $code) { $script:RebootNeeded = $true }
         if ($WingetOkCodes.ContainsKey($code)) {
@@ -694,21 +723,21 @@ function Invoke-WingetPackageSet {
         # registered from silently freezing forever. Such a vendor installer
         # may be invoked again on a later setup run; Speedtest is exempt above.
         $extra = @(Get-WingetPackageArgument -Id $id)
-        Invoke-Winget upgrade --id $id --exact --source winget --include-unknown --silent --accept-package-agreements --accept-source-agreements --disable-interactivity @extra | Out-Host
+        Invoke-Winget upgrade --id $id --exact --source $Source --include-unknown --silent --accept-package-agreements --accept-source-agreements --disable-interactivity @extra | Out-Host
         $code = $LASTEXITCODE
         if ($code -eq $WingetInstallTechMismatchCode) {
             Write-Note "$id`: the update uses a different installer technology; reinstalling"
-            if (-not (Remove-WingetPackageForReinstall -Id $id)) {
+            if (-not (Remove-WingetPackageForReinstall -Id $id -Source $Source)) {
                 $failed += "upgrade $id"
                 continue
             }
-            if (-not (Wait-WingetPackageRemoved -Id $id)) {
+            if (-not (Wait-WingetPackageRemoved -Id $id -Source $Source)) {
                 $failed += "upgrade $id"
                 Write-Warning "$id`: still installed $WingetUninstallWaitSeconds s after its uninstaller returned; re-run to reinstall"
                 continue
             }
             # A failed install leaves the package missing; the next run installs it.
-            Invoke-Winget install --id $id --exact --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity @extra | Out-Host
+            Invoke-Winget install --id $id --exact --source $Source --silent --accept-package-agreements --accept-source-agreements --disable-interactivity @extra | Out-Host
             $code = $LASTEXITCODE
         }
         if ($WingetRebootCodes -contains $code) { $script:RebootNeeded = $true }
@@ -2548,6 +2577,7 @@ if ($Check -and $DryRun) {
 $mode = if ($DryRun) { 'dry-run' } elseif ($Check) { 'check' } else { 'apply' }
 if ($WorkstationProfile -eq 'full') {
     $WingetPackages += $WingetFullPackages
+    $WingetStorePackages += $WingetFullStorePackages
     $GooGetPackages += $GooGetFullPackages
 }
 Write-Step "Profile: $WorkstationProfile; mode: $mode"
@@ -2598,6 +2628,10 @@ if ($DryRun) {
     foreach ($id in $WingetPackages) {
         $suffix = if ($WingetPresenceOnlyPackages -contains $id) { ' (presence-only)' } else { '' }
         Write-Note "    $id$suffix"
+    }
+    if ($WingetStorePackages.Count) {
+        Write-Note "Microsoft Store apps (WinGet msstore source; $updatePolicy):"
+        foreach ($id in $WingetStorePackages) { Write-Note "    $id ($($WingetStorePackageNames[$id]))" }
     }
     Write-Note "Balun: WinGet $BalunWingetId when it resolves; otherwise the latest stable $BalunRepo release"
     Write-Note '    balun-windows-<x86_64|aarch64>-setup.exe, SHA-256 checked against SHA256SUMS.txt and the asset digest,'
@@ -2687,6 +2721,18 @@ if ($Check) {
     Write-State ($python.Count -gt 0) 'Python 3' $(if ($python.Count) { ($python -join ', ') + ' (latest channel checked on apply)' } else { 'no Python.Python.3.N installed' })
     foreach ($id in $WingetLegacyPackages) {
         if ($installedIds -contains $id) { Write-State $false $id 'legacy package still installed' }
+    }
+    if ($WingetStorePackages.Count) {
+        try {
+            $installedStoreIds = @(Get-WingetInventory -Source msstore)
+            foreach ($id in $WingetStorePackages) {
+                $label = "$($WingetStorePackageNames[$id]) [$id] (Store)"
+                Write-State ($installedStoreIds -contains $id) $label $(if ($installedStoreIds -contains $id) { '' } else { 'not installed' })
+            }
+        }
+        catch {
+            Write-Note "NOTE    Microsoft Store apps: not queried ($($_.Exception.Message))"
+        }
     }
     foreach ($tool in $NativeCliTools) {
         if (-not (Test-NativeCliSupported -Tool $tool)) {
@@ -2837,6 +2883,30 @@ $wingetResult = Invoke-WingetPackageSet `
     -LegacyIds $WingetLegacyPackages `
     -HostIds $hostIds `
     -NoUpgrade:$NoUpgrade
+
+if ($WingetStorePackages.Count) {
+    Write-Step "Microsoft Store apps ($($WingetStorePackages.Count) entries, WinGet msstore source)"
+    # The msstore source can be disabled by policy or unreachable; that fails
+    # these apps without stopping the rest of the run.
+    $installedStoreIds = $null
+    try {
+        $installedStoreIds = @(Get-WingetInventory -Source msstore)
+    }
+    catch {
+        Write-Warning "Microsoft Store apps: msstore inventory failed ($($_.Exception.Message)); skipping them"
+        $wingetResult.Failed = @($wingetResult.Failed) + @($WingetStorePackages | ForEach-Object { "install $_" })
+    }
+    if ($null -ne $installedStoreIds) {
+        $storeResult = Invoke-WingetPackageSet `
+            -InstalledIds $installedStoreIds `
+            -DesiredIds $WingetStorePackages `
+            -Source msstore `
+            -NoUpgrade:$NoUpgrade
+        foreach ($key in 'Present', 'Installed', 'UpdatedOrCurrent', 'Deferred', 'Failed') {
+            $wingetResult.$key = @($wingetResult.$key) + @($storeResult.$key)
+        }
+    }
+}
 
 Write-Step 'OpenCode native installs (replaced by Goose and Crush)'
 $openCodeResult = Invoke-OpenCodeNativePurge

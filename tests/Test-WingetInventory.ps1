@@ -112,14 +112,15 @@ function Invoke-Case {
     param(
         [string]$Name,
         [bool]$ShouldThrow,
-        [string]$ExpectedIds = ''
+        [string]$ExpectedIds = '',
+        [string]$Source = 'winget'
     )
     $script:Scenario = $Name
     $script:LastExportPath = $null
     $caught = $null
     $ids = @()
     try {
-        $ids = @(Get-WingetInventory)
+        $ids = @(Get-WingetInventory -Source $Source)
     }
     catch {
         $caught = $_
@@ -157,6 +158,15 @@ $results += Invoke-Case empty-sources $false ''
 $results += Invoke-Case no-packages-property $true
 $results += Invoke-Case empty-packages $true
 $results += Invoke-Case missing-package-id $true
+
+# The msstore export omits Sources when none of its apps is installed: an
+# empty inventory there, still an error for the winget source above.
+$results += Invoke-Case no-sources $false '' msstore
+$expectedArgs = 'export|-o|{PATH}|--source|msstore|--accept-source-agreements|--disable-interactivity'
+$actualArgs = (@($script:LastWingetArgs) -join '|').Replace([string]$script:LastExportPath, '{PATH}')
+Assert-Equal $actualArgs $expectedArgs 'winget msstore export arguments'
+$results += Invoke-Case valid $false 'Git.Git,GitHub.cli' msstore
+$results += Invoke-Case bad-exit $true '' msstore
 
 $results | Format-Table -AutoSize
 Write-Output 'ALL ASSERTIONS PASSED'
