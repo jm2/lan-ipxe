@@ -195,7 +195,8 @@ $WingetPackages = @(
     # Rust comes only from rustup; the toolchain is initialized per user below.
     'Rustlang.Rustup'
     'Tailscale.Tailscale'
-    'Ventoy.Ventoy'
+    # Ventoy is not here: WinGet's portable install of it fails ("Hash not
+    # found for hardlink target"), so it is the verified GitHub release (below).
     'VideoLAN.VLC'
     'WinDirStat.WinDirStat'
     'WinSCP.WinSCP'
@@ -246,6 +247,8 @@ $WingetLegacyPackages = @(
     # Standalone Rust installers conflict with the rustup-managed toolchain.
     'Rustlang.Rust.GNU'
     'Rustlang.Rust.MSVC'
+    # Replaced by the verified GitHub release in %ProgramFiles%\Ventoy.
+    'Ventoy.Ventoy'
 )
 $RustComponents = @('rustfmt', 'clippy', 'rust-analyzer')
 
@@ -337,6 +340,14 @@ $GooseDesktopAsset = 'Goose-win32-x64.zip'
 $GooseDesktopArchitectures = @('AMD64')
 $GooseDesktopMarkerName = '.lan-ipxe-release'
 
+# Ventoy (core): the latest stable ventoy/Ventoy release's
+# ventoy-X.Y.Z-windows.zip, SHA-256 checked against the release's sha256.txt
+# and GitHub's asset digest, unpacked to %ProgramFiles%\Ventoy with an
+# all-users Start menu shortcut to the native Ventoy2Disk build. Replaced
+# whenever the latest stable release differs from the recorded one.
+$VentoyRepo = 'ventoy/Ventoy'
+$VentoyMarkerName = '.lan-ipxe-release'
+
 # Git Bash rc files OpenCode's own install script appends its PATH line to.
 $OpenCodeRcFiles = @('.bashrc', '.bash_profile', '.profile')
 
@@ -416,6 +427,10 @@ $WingetOkCodes = @{
     0x8A150109 = 'installed - reboot required to finish'       # INSTALL_REBOOT_REQUIRED_TO_FINISH
     0x8A15010B = 'installed - the installer initiated a reboot' # INSTALL_REBOOT_INITIATED
 }
+# winget upgrade declines a package whose manifest leaves updates to its own
+# updater (Android Studio). Accepted as current on the upgrade path only: on an
+# install it would mean nothing was installed.
+$WingetSelfUpdatingCode = 0x8A150114 # INSTALL_UPGRADE_NOT_SUPPORTED
 $WingetRebootCodes = @(0x8A150109, 0x8A15010A, 0x8A15010B)
 # Not installed yet, but only a reboot stands in the way: re-run afterwards
 $WingetDeferredCodes = @{
@@ -428,6 +443,12 @@ $WingetRemoveOkCodes = @{
     0x8A15010B = 'removed - the uninstaller initiated a reboot' # INSTALL_REBOOT_INITIATED
 }
 $WingetExportOkCodes = @(0, 0x8A150035) # success, or NOT_ALL_PACKAGES_FOUND
+# winget refuses to uninstall a user-scope package from an elevated process.
+# Such a package belongs to this account, so the uninstall is retried from a
+# one-shot scheduled task that runs winget unelevated in this account's
+# interactive session.
+$WingetUserScopeElevatedCode = 0x8A15007D
+$WingetUnelevatedTimeoutSeconds = 600
 # The newer version uses a different installer technology (LLVM 23 moved from
 # NSIS to MSI); winget asks for an uninstall followed by a fresh install.
 $WingetInstallTechMismatchCode = 0x8A15008E # INSTALL_TECHNOLOGY_MISMATCH
@@ -537,6 +558,108 @@ function Get-WingetArpEntry {
     return Get-ItemProperty -LiteralPath "$path\$($match.Groups['Key'].Value)" -ErrorAction SilentlyContinue
 }
 
+# Runs `winget uninstall` for $Id unelevated, as this account in its interactive
+# session, and returns winget's exit code; $null when that is not possible (no
+# interactive session for this account, or the task never reported back).
+function Invoke-WingetUninstallUnelevated {
+    param(
+        [Parameter(Mandatory = $true)][string]$Id,
+        [ValidateSet('winget', 'msstore')][string]$Source = 'winget'
+    )
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $user = $identity.Name
+    # An Interactive-logon task runs only while this account has a desktop
+    # session, console or RDP; its explorer.exe shows that, by SID.
+    $sessionSids = @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'explorer.exe'" | ForEach-Object {
+        try { (Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid).Sid } catch { $null }
+    })
+    if ($sessionSids -notcontains $identity.User.Value) {
+        Write-Warning "$Id`: installed for $user only, who has no interactive session here to remove it unelevated"
+        return $null
+    }
+    $tag = [Guid]::NewGuid().ToString('N')
+    $dir = Join-Path ([IO.Path]::GetTempPath()) "winget-unelevated-$tag"
+    $taskName = "lan-ipxe-winget-uninstall-$tag"
+    New-Item -ItemType Directory -Path $dir | Out-Null
+    try {
+        $log = Join-Path $dir 'winget.log'
+        $codeFile = Join-Path $dir 'exitcode.txt'
+        $runner = Join-Path $dir 'uninstall.ps1'
+        $quote = { param([string]$Text) "'" + $Text.Replace("'", "''") + "'" }
+        # The exit code is written to a temporary name and renamed into place,
+        # so the poll below never reads a half-written file. A winget that
+        # could not be launched writes 'not-run' instead of a stale or empty
+        # $LASTEXITCODE.
+        @(
+            "`$result = 'not-run'"
+            "try {"
+            "    & winget uninstall --id $(& $quote $Id) --exact --source $(& $quote $Source) --silent --accept-source-agreements --disable-interactivity *> $(& $quote $log)"
+            "    if (`$null -ne `$LASTEXITCODE) { `$result = [string]`$LASTEXITCODE }"
+            "}"
+            "catch { `$_ | Out-File -LiteralPath $(& $quote $log) -Append }"
+            "Set-Content -LiteralPath $(& $quote "$codeFile.tmp") -Value `$result -Encoding ASCII"
+            "Move-Item -LiteralPath $(& $quote "$codeFile.tmp") -Destination $(& $quote $codeFile)"
+        ) | Set-Content -LiteralPath $runner -Encoding UTF8
+        $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $action = New-ScheduledTaskAction -Execute $powershell -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$runner`""
+        # By SID: account names (AzureAD\..., renamed accounts) may not resolve.
+        $principal = New-ScheduledTaskPrincipal -UserId $identity.User.Value -LogonType Interactive -RunLevel Limited
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Seconds $WingetUnelevatedTimeoutSeconds)
+        Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings | Out-Null
+        Write-Note "$Id`: user-scope package; retrying the uninstall unelevated"
+        $started = Get-Date
+        Start-ScheduledTask -TaskName $taskName
+        $deadline = $started.AddSeconds($WingetUnelevatedTimeoutSeconds + 30)
+        while (-not (Test-Path -LiteralPath $codeFile)) {
+            $task = Get-ScheduledTask -TaskName $taskName
+            $info = Get-ScheduledTaskInfo -TaskName $taskName
+            $finished = $task.State -eq 'Ready' -and $info.LastRunTime -and $info.LastRunTime -ge $started.AddSeconds(-1)
+            if ($finished -or (Get-Date) -ge $deadline) {
+                # The exit-code line can trail the task's completion by a moment.
+                Start-Sleep -Seconds 2
+                if (Test-Path -LiteralPath $codeFile) { break }
+                Write-Warning ("{0}: the unelevated uninstall task ended without an exit code (task result 0x{1:X8})" -f $Id, $info.LastTaskResult)
+                return $null
+            }
+            Start-Sleep -Seconds 2
+        }
+        if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log | Out-Host }
+        $text = ([string](Get-Content -Raw -LiteralPath $codeFile)).Trim()
+        $code = 0
+        if (-not [int]::TryParse($text, [ref]$code)) {
+            Write-Warning "$Id`: winget did not run in the unelevated task ($text)"
+            return $null
+        }
+        return $code
+    }
+    catch {
+        Write-Warning "$Id`: unelevated uninstall failed: $($_.Exception.Message)"
+        return $null
+    }
+    finally {
+        # Ends a winget still running after a timeout before the task goes.
+        Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# `winget uninstall` for $Id, retried unelevated when winget refuses to remove
+# a user-scope package from this elevated run. Returns winget's exit code.
+function Invoke-WingetUninstall {
+    param(
+        [Parameter(Mandatory = $true)][string]$Id,
+        [ValidateSet('winget', 'msstore')][string]$Source = 'winget'
+    )
+    Invoke-Winget uninstall --id $Id --exact --source $Source --silent --accept-source-agreements --disable-interactivity | Out-Host
+    $code = $LASTEXITCODE
+    if ($code -eq $WingetUserScopeElevatedCode) {
+        $retry = Invoke-WingetUninstallUnelevated -Id $Id -Source $Source
+        if ($null -ne $retry) { $code = $retry }
+    }
+    return $code
+}
+
 # NSIS-built executables (installers and uninstallers) carry this signature in
 # their first header.
 function Test-NsisExecutable {
@@ -568,8 +691,7 @@ function Remove-WingetPackageForReinstall {
             return ($code -eq 0)
         }
     }
-    Invoke-Winget uninstall --id $Id --exact --source $Source --silent --accept-source-agreements --disable-interactivity | Out-Host
-    $code = $LASTEXITCODE
+    $code = Invoke-WingetUninstall -Id $Id -Source $Source
     if ($WingetRebootCodes -contains $code) { $script:RebootNeeded = $true }
     if (-not $WingetRemoveOkCodes.ContainsKey($code)) {
         Write-Warning ("{0}: winget uninstall before reinstall exited with 0x{1:X8} ({1})" -f $Id, $code)
@@ -706,8 +828,7 @@ function Invoke-WingetPackageSet {
         if ($InstalledIds -notcontains $id) { continue }
 
         Write-Note "removing legacy $id"
-        Invoke-Winget uninstall --id $id --exact --source $Source --silent --accept-source-agreements --disable-interactivity | Out-Host
-        $code = $LASTEXITCODE
+        $code = Invoke-WingetUninstall -Id $id -Source $Source
         if ($WingetRebootCodes -contains $code) { $script:RebootNeeded = $true }
         if ($WingetRemoveOkCodes.ContainsKey($code)) {
             $removedLegacy += $id
@@ -749,6 +870,7 @@ function Invoke-WingetPackageSet {
         # registered from silently freezing forever. Such a vendor installer
         # may be invoked again on a later setup run; Speedtest is exempt above.
         $extra = @(Get-WingetPackageArgument -Id $id)
+        $reinstalled = $false
         Invoke-Winget upgrade --id $id --exact --source $Source --include-unknown --silent --accept-package-agreements --accept-source-agreements --disable-interactivity @extra | Out-Host
         $code = $LASTEXITCODE
         if ($code -eq $WingetInstallTechMismatchCode) {
@@ -765,9 +887,14 @@ function Invoke-WingetPackageSet {
             # A failed install leaves the package missing; the next run installs it.
             Invoke-Winget install --id $id --exact --source $Source --silent --accept-package-agreements --accept-source-agreements --disable-interactivity @extra | Out-Host
             $code = $LASTEXITCODE
+            $reinstalled = $true
         }
         if ($WingetRebootCodes -contains $code) { $script:RebootNeeded = $true }
-        if ($WingetOkCodes.ContainsKey($code)) {
+        if ($code -eq $WingetSelfUpdatingCode -and -not $reinstalled) {
+            $updatedOrCurrent += $id
+            Write-Note "$id`: current - updated by its own updater, not WinGet"
+        }
+        elseif ($WingetOkCodes.ContainsKey($code)) {
             $updatedOrCurrent += $id
             Write-Note "$id`: $($WingetOkCodes[$code])"
         }
@@ -934,8 +1061,7 @@ function Invoke-NativeCliSet {
         }
         if (-not $tool.WingetId -or $InstalledIds -notcontains $tool.WingetId) { continue }
         Write-Note "removing $($tool.WingetId) (replaced by the self-updating native install)"
-        Invoke-Winget uninstall --id $tool.WingetId --exact --source winget --silent --accept-source-agreements --disable-interactivity | Out-Host
-        $code = $LASTEXITCODE
+        $code = Invoke-WingetUninstall -Id $tool.WingetId -Source winget
         if ($WingetRebootCodes -contains $code) { $script:RebootNeeded = $true }
         if ($WingetRemoveOkCodes.ContainsKey($code)) {
             $retired += $tool.WingetId
@@ -1658,6 +1784,71 @@ function Invoke-OpenCodeNativePurge {
     return [pscustomobject]@{ Removed = @($removed); Failed = @($failed) }
 }
 
+#--- Release trees unpacked in place (Goose Desktop, Ventoy) ----------------
+# A release tree is staged at <root>.lan-ipxe-new and swapped in with two
+# renames, keeping the old tree at <root>.lan-ipxe-old until the new one is in
+# place.
+
+# An interrupted swap can leave only the previous tree (the root renamed away,
+# then the new tree's rename and the rename back both failed). Put it back
+# before anything else, so it is neither lost nor deleted as stale.
+function Restore-InterruptedTreeSwap {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    $previous = "$Root.lan-ipxe-old"
+    if (-not (Test-Path -LiteralPath $Root) -and (Test-Path -LiteralPath $previous)) {
+        Rename-Item -LiteralPath $previous -NewName (Split-Path -Leaf $Root)
+        Write-Note "$Label`: restored the previous copy from an interrupted update"
+    }
+}
+
+# Swaps the complete $Staging tree in at $Root. A running app blocks the
+# first rename ($CloseHint names what to close). Removing the previous tree
+# afterwards only warns: the new tree is already in place, and a leftover is
+# removed by the next update.
+function Switch-StagedTree {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Staging,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [Parameter(Mandatory = $true)][string]$CloseHint
+    )
+    $previous = "$Root.lan-ipxe-old"
+    if (Test-Path -LiteralPath $Root) {
+        try { Rename-Item -LiteralPath $Root -NewName (Split-Path -Leaf $previous) }
+        catch { throw "could not replace $Root (close $CloseHint and re-run): $($_.Exception.Message)" }
+    }
+    try { Rename-Item -LiteralPath $Staging -NewName (Split-Path -Leaf $Root) }
+    catch {
+        if (Test-Path -LiteralPath $previous) { Rename-Item -LiteralPath $previous -NewName (Split-Path -Leaf $Root) }
+        throw
+    }
+    if (Test-Path -LiteralPath $previous) {
+        try { Remove-Item -LiteralPath $previous -Recurse -Force }
+        catch { Write-Warning "$Label`: updated, but the previous copy $previous could not be removed yet: $($_.Exception.Message)" }
+    }
+}
+
+# Writes <Start menu Programs>\$Name.lnk to $Target, per user or for all users.
+function Install-StartMenuShortcut {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Target,
+        [switch]$AllUsers
+    )
+    $folder = if ($AllUsers) { 'CommonPrograms' } else { 'Programs' }
+    $programs = [Environment]::GetFolderPath($folder)
+    if ([string]::IsNullOrWhiteSpace($programs)) { throw "the Start menu folder $folder is unknown" }
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut((Join-Path $programs "$Name.lnk"))
+    $shortcut.TargetPath = $Target
+    $shortcut.WorkingDirectory = Split-Path -Parent $Target
+    $shortcut.IconLocation = "$Target,0"
+    $shortcut.Save()
+}
+
 #--- Goose Desktop (verified GitHub release zip) ----------------------------
 function Get-GooseDesktopRoot {
     if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { return $null }
@@ -1731,21 +1922,8 @@ function Find-GooseDesktopAppDirectory {
     return $roots[0].DirectoryName
 }
 
-function Install-GooseDesktopShortcut {
-    param([Parameter(Mandatory = $true)][string]$Target)
-    $programs = [Environment]::GetFolderPath('Programs')
-    if ([string]::IsNullOrWhiteSpace($programs)) { throw 'the per-user Start menu Programs folder is unknown' }
-    $shell = New-Object -ComObject WScript.Shell
-    $shortcut = $shell.CreateShortcut((Join-Path $programs 'Goose.lnk'))
-    $shortcut.TargetPath = $Target
-    $shortcut.WorkingDirectory = Split-Path -Parent $Target
-    $shortcut.IconLocation = "$Target,0"
-    $shortcut.Save()
-}
-
 # Downloads and verifies the zip, unpacks it beside the install directory, and
-# swaps the new tree in only once it is complete; the previous copy is kept
-# until the swap succeeds (a running Goose blocks the rename).
+# swaps the new tree in only once it is complete (Switch-StagedTree).
 function Install-GooseDesktop {
     param([Parameter(Mandatory = $true)]$Release)
     $root = Get-GooseDesktopRoot
@@ -1775,22 +1953,13 @@ function Install-GooseDesktop {
             "source-url=$($Release.Url)"
             "sha256=$($Release.Sha256)"
         )
-        if (Test-Path -LiteralPath $root) {
-            try { Rename-Item -LiteralPath $root -NewName (Split-Path -Leaf $previous) }
-            catch { throw "could not replace $root (close Goose and re-run): $($_.Exception.Message)" }
-        }
-        try { Rename-Item -LiteralPath $staging -NewName (Split-Path -Leaf $root) }
-        catch {
-            if (Test-Path -LiteralPath $previous) { Rename-Item -LiteralPath $previous -NewName (Split-Path -Leaf $root) }
-            throw
-        }
-        if (Test-Path -LiteralPath $previous) { Remove-Item -LiteralPath $previous -Recurse -Force }
+        Switch-StagedTree -Root $root -Staging $staging -Label 'Goose Desktop' -CloseHint 'Goose'
     }
     finally {
         Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
     }
-    Install-GooseDesktopShortcut -Target (Join-Path $root 'Goose.exe')
+    Install-StartMenuShortcut -Name 'Goose' -Target (Join-Path $root 'Goose.exe')
 }
 
 # Returns 'current', 'installed', 'updated', 'skipped' or 'failed'.
@@ -1800,8 +1969,10 @@ function Invoke-GooseDesktopStep {
         Write-Note "Goose Desktop: skipped (upstream publishes no $(Get-NativeProcessorArchitecture) Windows build)"
         return 'skipped'
     }
-    $existing = Get-GooseDesktopInstall
     try {
+        $gooseRoot = Get-GooseDesktopRoot
+        if ($gooseRoot) { Restore-InterruptedTreeSwap -Root $gooseRoot -Label 'Goose Desktop' }
+        $existing = Get-GooseDesktopInstall
         if ($existing -and $NoUpgrade) {
             Write-Note "Goose Desktop $($existing.Version): present (-NoUpgrade)"
             return 'current'
@@ -1818,6 +1989,198 @@ function Invoke-GooseDesktopStep {
     }
     catch {
         Write-Warning "Goose Desktop: $($_.Exception.Message)"
+        return 'failed'
+    }
+}
+
+#--- Ventoy (verified GitHub release zip) -----------------------------------
+function Get-VentoyRoot {
+    if ([string]::IsNullOrWhiteSpace($env:ProgramFiles)) { return $null }
+    return Join-Path $env:ProgramFiles 'Ventoy'
+}
+
+# The Ventoy in %ProgramFiles%\Ventoy, $null when absent. Version and Sha256
+# come from the marker this script writes; both are empty (Managed $false) for
+# a copy unpacked there by hand, which apply replaces unless -NoUpgrade.
+function Get-VentoyInstall {
+    $root = Get-VentoyRoot
+    if (-not $root) { return $null }
+    $exe = Join-Path $root 'Ventoy2Disk.exe'
+    if (-not (Test-Path -LiteralPath $exe)) { return $null }
+    $marker = Join-Path $root $VentoyMarkerName
+    $fields = @{}
+    if (Test-Path -LiteralPath $marker) {
+        foreach ($line in @(Get-Content -LiteralPath $marker)) {
+            if ($line -match '^(?<Key>[a-z0-9-]+)=(?<Value>.*)$') { $fields[$Matches.Key] = $Matches.Value }
+        }
+    }
+    $version = [string]$fields['version']
+    return [pscustomobject]@{
+        Version = $version
+        Sha256 = [string]$fields['sha256']
+        Managed = [bool]$version
+        Label = $(if ($version) { $version } else { '(not installed by this script)' })
+        Exe = $exe
+    }
+}
+
+
+# Pure selection over GitHub's latest-release JSON: one stable vX.Y.Z release
+# with exactly one ventoy-X.Y.Z-windows.zip under its own download path.
+# Returns the version and the asset name.
+function Select-VentoyAsset {
+    param([Parameter(Mandatory = $true)]$Release)
+    if ($Release.prerelease -or $Release.draft) {
+        throw "latest $VentoyRepo release is not a stable release"
+    }
+    $tag = [string]$Release.tag_name
+    if ($tag -notmatch '^v(?<Version>\d+\.\d+\.\d+)$') {
+        throw "latest $VentoyRepo release has an unsupported tag '$tag'"
+    }
+    $version = $Matches.Version
+    $name = "ventoy-$version-windows.zip"
+    $asset = @($Release.assets | Where-Object { $_.name -eq $name })
+    if ($asset.Count -ne 1) {
+        throw "release $tag lacks exactly one $name"
+    }
+    if ([string]$asset[0].browser_download_url -ne "https://github.com/$VentoyRepo/releases/download/$tag/$name") {
+        throw "$name URL is outside the expected GitHub release path"
+    }
+    return [pscustomobject]@{ Version = $version; Name = $name }
+}
+
+# The latest stable release zip and the one SHA-256 that the release's
+# sha256.txt and GitHub's asset digest agree on.
+function Get-VentoyRelease {
+    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$VentoyRepo/releases/latest" -Headers @{ 'User-Agent' = 'lan-ipxe-setup' }
+    $selected = Select-VentoyAsset -Release $release
+    $asset = Get-VerifiedReleaseAsset -Release $release -AssetName $selected.Name -SumsName 'sha256.txt'
+    return [pscustomobject]@{
+        Version = $selected.Version
+        Name = $asset.Name
+        Url = $asset.Url
+        Sha256 = $asset.Sha256
+    }
+}
+
+# The unpacked tree's root: the one directory holding Ventoy2Disk.exe beside
+# the boot\ and ventoy\ folders it writes to the USB drive.
+function Find-VentoyAppDirectory {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $roots = @(Get-ChildItem -LiteralPath $Path -Recurse -File |
+        Where-Object {
+            $_.Name -ieq 'Ventoy2Disk.exe' -and
+            (Test-Path -LiteralPath (Join-Path $_.DirectoryName 'boot') -PathType Container) -and
+            (Test-Path -LiteralPath (Join-Path $_.DirectoryName 'ventoy') -PathType Container)
+        })
+    if ($roots.Count -ne 1) {
+        throw 'the Ventoy archive does not contain exactly one Ventoy2Disk.exe app directory'
+    }
+    return $roots[0].DirectoryName
+}
+
+# Ventoy2Disk.exe is x86; the release's altexe\ holds native builds, which
+# Ventoy's docs say to run from beside Ventoy2Disk.exe. $null when there is no
+# native build for this machine (the x86 one then runs as is).
+function Get-VentoyNativeExeName {
+    switch (Get-NativeProcessorArchitecture) {
+        'AMD64' { return 'Ventoy2Disk_X64.exe' }
+        'ARM64' { return 'Ventoy2Disk_ARM64.exe' }
+        default { return $null }
+    }
+}
+
+# The Start menu target: the native build when it sits beside Ventoy2Disk.exe.
+function Get-VentoyShortcutTarget {
+    $root = Get-VentoyRoot
+    $native = Get-VentoyNativeExeName
+    if ($native -and (Test-Path -LiteralPath (Join-Path $root $native))) { return Join-Path $root $native }
+    return Join-Path $root 'Ventoy2Disk.exe'
+}
+
+# Downloads and verifies the zip, unpacks it beside %ProgramFiles%\Ventoy, and
+# swaps the new tree in only once it is complete (Switch-StagedTree).
+# Ventoy2Disk.ini (its saved language and options) carries over. A release
+# without this machine's native Ventoy2Disk build falls back to the x86 one.
+function Install-Ventoy {
+    param([Parameter(Mandatory = $true)]$Release)
+    $root = Get-VentoyRoot
+    if (-not $root) { throw '%ProgramFiles% is not set' }
+    $dir = Join-Path ([IO.Path]::GetTempPath()) ("ventoy-{0}" -f [Guid]::NewGuid().ToString('N'))
+    $staging = "$root.lan-ipxe-new"
+    $previous = "$root.lan-ipxe-old"
+    New-Item -ItemType Directory -Path $dir | Out-Null
+    try {
+        $archive = Join-Path $dir $Release.Name
+        Invoke-WebRequest -Uri $Release.Url -OutFile $archive -UseBasicParsing
+        $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+        if ($actual -ne $Release.Sha256) {
+            throw "Ventoy archive checksum mismatch: expected $($Release.Sha256), got $actual"
+        }
+        $extract = Join-Path $dir 'extract'
+        Expand-Archive -LiteralPath $archive -DestinationPath $extract
+        $appDirectory = Find-VentoyAppDirectory -Path $extract
+        foreach ($path in @($staging, $previous)) {
+            if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
+        }
+        Copy-Item -LiteralPath $appDirectory -Destination $staging -Recurse
+        $native = Get-VentoyNativeExeName
+        if ($native) {
+            $nativeSource = Join-Path (Join-Path $staging 'altexe') $native
+            if (Test-Path -LiteralPath $nativeSource) {
+                Copy-Item -LiteralPath $nativeSource -Destination (Join-Path $staging $native)
+            }
+            else {
+                Write-Warning "Ventoy: release $($Release.Version) has no altexe\$native; the Start menu shortcut uses the x86 Ventoy2Disk.exe"
+            }
+        }
+        $settings = Join-Path $root 'Ventoy2Disk.ini'
+        if (Test-Path -LiteralPath $settings) { Copy-Item -LiteralPath $settings -Destination $staging }
+        Set-Content -LiteralPath (Join-Path $staging $VentoyMarkerName) -Value @(
+            'managed-by=lan-ipxe/setup-win11-workstation.ps1'
+            "version=$($Release.Version)"
+            "source-url=$($Release.Url)"
+            "sha256=$($Release.Sha256)"
+        )
+        Switch-StagedTree -Root $root -Staging $staging -Label 'Ventoy' -CloseHint 'Ventoy2Disk'
+    }
+    finally {
+        Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# Returns 'current', 'installed', 'updated' or 'failed'. The Start menu
+# shortcut is rewritten on every run Ventoy is present, so one lost to an
+# earlier failure or deleted by hand comes back.
+function Invoke-VentoyStep {
+    param([switch]$NoUpgrade)
+    try {
+        $ventoyRoot = Get-VentoyRoot
+        if (-not $ventoyRoot) { throw '%ProgramFiles% is not set' }
+        Restore-InterruptedTreeSwap -Root $ventoyRoot -Label 'Ventoy'
+        $existing = Get-VentoyInstall
+        if ($existing -and $NoUpgrade) {
+            Write-Note "Ventoy $($existing.Label): present (-NoUpgrade)"
+            $status = 'current'
+        }
+        else {
+            $release = Get-VentoyRelease
+            if ($existing -and $existing.Version -eq $release.Version -and $existing.Sha256 -eq $release.Sha256) {
+                Write-Note "Ventoy $($existing.Version): current"
+                $status = 'current'
+            }
+            else {
+                Write-Note "Ventoy: installing verified release $($release.Version) ($($release.Name))"
+                Install-Ventoy -Release $release
+                $status = if ($existing) { 'updated' } else { 'installed' }
+            }
+        }
+        Install-StartMenuShortcut -Name 'Ventoy2Disk' -Target (Get-VentoyShortcutTarget) -AllUsers
+        return $status
+    }
+    catch {
+        Write-Warning "Ventoy: $($_.Exception.Message)"
         return 'failed'
     }
 }
@@ -2106,7 +2469,9 @@ function New-GooGetRootDirectory {
     $inherit = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
     foreach ($grant in @(@('S-1-5-32-544', 'FullControl'), @('S-1-5-18', 'FullControl'), @('S-1-5-32-545', 'ReadAndExecute'))) {
         $sid = New-Object Security.Principal.SecurityIdentifier $grant[0]
-        $security.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule $sid, $grant[1], $inherit, [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow))
+        # ::new, not New-Object: in New-Object's argument mode the enum
+        # expressions reach the constructor as literal strings.
+        $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid, $grant[1], $inherit, [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow))
     }
     $security.SetOwner((New-Object Security.Principal.SecurityIdentifier 'S-1-5-32-544'))
     if ($PSVersionTable.PSEdition -eq 'Core') {
@@ -2865,6 +3230,10 @@ if ($DryRun) {
     Write-Note "Balun: WinGet $BalunWingetId when it resolves; otherwise the latest stable $BalunRepo release"
     Write-Note '    balun-windows-<x86_64|aarch64>-setup.exe, SHA-256 checked against SHA256SUMS.txt and the asset digest,'
     Write-Note "    run silently ($($BalunInstallerArgs -join ' ')); skipped when present and -NoUpgrade"
+    Write-Note "Ventoy: latest stable $VentoyRepo release ventoy-<version>-windows.zip, SHA-256 checked against sha256.txt and the asset digest,"
+    Write-Note '    unpacked to %ProgramFiles%\Ventoy + all-users Start menu shortcut to the native Ventoy2Disk;'
+    Write-Note '    replaced whenever the latest release differs from the recorded one (a copy this script did not'
+    Write-Note '    install included); left alone when present and -NoUpgrade'
     Write-Note 'Legacy packages removed if installed:'
     foreach ($id in $WingetLegacyPackages) { Write-Note "    $id" }
     Write-Note 'Native OpenCode installs removed after the WinGet legacy packages:'
@@ -3016,6 +3385,8 @@ if ($Check) {
     $balun = Get-BalunInstall
     $balunOwner = if ($installedIds -contains $BalunWingetId) { "WinGet $BalunWingetId" } else { 'GitHub release' }
     Write-State ($null -ne $balun) 'Balun' $(if ($balun) { "$($balun.Version) via $balunOwner" } else { 'not installed' })
+    $ventoy = Get-VentoyInstall
+    Write-State ($null -ne $ventoy) 'Ventoy' $(if ($ventoy) { "$($ventoy.Label) (newer releases checked on apply)" } else { 'not installed' })
 
     Write-Step 'Rust (rustup)'
     $rustup = Get-RustupPath
@@ -3161,6 +3532,10 @@ Write-Step 'Balun (WinGet when published, otherwise verified GitHub release)'
 $balunResult = Invoke-BalunStep -InstalledIds $installedIds -NoUpgrade:$NoUpgrade
 Write-Note "Balun: $balunResult"
 
+Write-Step 'Ventoy (verified GitHub release)'
+$ventoyResult = Invoke-VentoyStep -NoUpgrade:$NoUpgrade
+Write-Note "Ventoy: $ventoyResult"
+
 #--- 4. Self-updating native CLIs ------------------------------------------
 Write-Step 'Claude Code, Codex CLI, Antigravity CLI and goose CLI (official native installers)'
 $nativeResult = Invoke-NativeCliSet -InstalledIds $installedIds -NoUpgrade:$NoUpgrade
@@ -3201,4 +3576,4 @@ if ($googetResult -eq 'deferred') { Write-Note 'deferred (re-run once Go is inst
 Write-Note "game-packages: $($gooResult.Installed.Count) installed now, $($gooResult.Current.Count) current, $($gooResult.Deferred.Count) deferred, $($gooResult.Failed.Count) failed"
 if ($gooResult.Deferred.Count) { Write-Note "deferred (install once enthoo answers): $($gooResult.Deferred -join ', ')" }
 if ($gooResult.Failed.Count) { Write-Note "failed: $($gooResult.Failed -join ', ')" }
-if ($wingetResult.Failed.Count -or $openCodeResult.Failed.Count -or $nativeResult.Failed.Count -or $rustResult -eq 'failed' -or $balunResult -eq 'failed' -or $gooseDesktopResult -eq 'failed' -or $pwshResult -eq 'failed' -or $googetResult -eq 'failed' -or $gooResult.Failed.Count) { exit 1 }
+if ($wingetResult.Failed.Count -or $openCodeResult.Failed.Count -or $nativeResult.Failed.Count -or $rustResult -eq 'failed' -or $balunResult -eq 'failed' -or $ventoyResult -eq 'failed' -or $gooseDesktopResult -eq 'failed' -or $pwshResult -eq 'failed' -or $googetResult -eq 'failed' -or $gooResult.Failed.Count) { exit 1 }

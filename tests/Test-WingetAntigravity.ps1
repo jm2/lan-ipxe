@@ -26,6 +26,8 @@ $assignmentNames = @(
     'WingetRebootCodes'
     'WingetDeferredCodes'
     'WingetRemoveOkCodes'
+    'WingetUserScopeElevatedCode'
+    'WingetSelfUpdatingCode'
     'WingetLaunchAttempts'
     'WingetLaunchRetrySeconds'
     'WingetPackageArgs'
@@ -46,9 +48,9 @@ foreach ($assignmentName in $assignmentNames) {
     . ([scriptblock]::Create($assignmentAst.Extent.Text))
 }
 
-foreach ($functionName in @('Invoke-Winget', 'Get-WingetPackageArgument', 'Resolve-LatestPythonWingetPackageId', 'Invoke-WingetPackageSet',
+foreach ($functionName in @('Invoke-Winget', 'Invoke-WingetUninstall', 'Get-WingetPackageArgument', 'Resolve-LatestPythonWingetPackageId', 'Invoke-WingetPackageSet',
         'Get-NativeProcessorArchitecture', 'Test-NativeCliSupported', 'Get-NativeCliPath', 'Invoke-NativeCliSet',
-        'Get-GooseDesktopRoot', 'Get-GooseDesktopInstall', 'Select-GooseDesktopAsset', 'Find-GooseDesktopAppDirectory', 'Invoke-GooseDesktopStep')) {
+        'Restore-InterruptedTreeSwap', 'Switch-StagedTree', 'Install-StartMenuShortcut', 'Get-GooseDesktopRoot', 'Get-GooseDesktopInstall', 'Select-GooseDesktopAsset', 'Find-GooseDesktopAppDirectory', 'Invoke-GooseDesktopStep')) {
     $functionAst = $ast.Find({
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
@@ -304,6 +306,58 @@ try {
     Assert-Equal ($result.Failed -join ',') 'uninstall VSCodium.VSCodium' 'failed purge is reported'
     Assert-Equal ($result.Installed -join ',') 'Microsoft.VisualStudioCode' 'replacement still installs after a failed purge'
 
+    # winget refuses to remove a user-scope package from an elevated run; the
+    # uninstall is retried unelevated and that result is what counts.
+    $script:UnelevatedCalls = @()
+    $script:UnelevatedResult = 0
+    function Invoke-WingetUninstallUnelevated {
+        param([string]$Id, [string]$Source)
+        $script:UnelevatedCalls += "$Source|$Id"
+        return $script:UnelevatedResult
+    }
+    $script:WingetCalls = @()
+    $script:ExitCodes = @{ 'uninstall|VSCodium.VSCodium' = [int]$WingetUserScopeElevatedCode }
+    $result = Invoke-WingetPackageSet `
+        -InstalledIds @('VSCodium.VSCodium') `
+        -DesiredIds @('Microsoft.VisualStudioCode') `
+        -LegacyIds @('VSCodium.VSCodium')
+    Assert-Equal ($script:UnelevatedCalls -join ',') 'winget|VSCodium.VSCodium' 'user-scope refusal is retried unelevated'
+    Assert-Equal ($result.RemovedLegacy -join ',') 'VSCodium.VSCodium' 'unelevated retry removes the user-scope package'
+    Assert-Equal $result.Failed.Count 0 'a successful unelevated retry is not a failure'
+    # When no unelevated retry is possible, the original refusal is reported.
+    $script:UnelevatedCalls = @()
+    $script:UnelevatedResult = $null
+    $result = Invoke-WingetPackageSet `
+        -InstalledIds @('VSCodium.VSCodium') `
+        -DesiredIds @('Microsoft.VisualStudioCode') `
+        -LegacyIds @('VSCodium.VSCodium')
+    Assert-Equal ($result.Failed -join ',') 'uninstall VSCodium.VSCodium' 'impossible unelevated retry still fails visibly'
+    # Other uninstall failures are not retried.
+    $script:UnelevatedCalls = @()
+    $script:ExitCodes = @{ 'uninstall|VSCodium.VSCodium' = 7 }
+    $result = Invoke-WingetPackageSet `
+        -InstalledIds @('VSCodium.VSCodium') `
+        -DesiredIds @('Microsoft.VisualStudioCode') `
+        -LegacyIds @('VSCodium.VSCodium')
+    Assert-Equal $script:UnelevatedCalls.Count 0 'only the user-scope refusal is retried unelevated'
+
+    # A package whose manifest leaves updates to its own updater (Android
+    # Studio) is current, not a failed upgrade.
+    $script:WingetCalls = @()
+    $script:ExitCodes = @{ 'upgrade|Google.AndroidStudio' = [int]0x8A150114 }
+    $result = Invoke-WingetPackageSet `
+        -InstalledIds @('Google.AndroidStudio') `
+        -DesiredIds @('Google.AndroidStudio')
+    Assert-Equal ($result.UpdatedOrCurrent -join ',') 'Google.AndroidStudio' 'self-updating package is reported current'
+    Assert-Equal $result.Failed.Count 0 'self-updating package is not a failed upgrade'
+    # On an install the same code means nothing was installed.
+    $script:WingetCalls = @()
+    $script:ExitCodes = @{ 'install|Google.AndroidStudio' = [int]0x8A150114 }
+    $result = Invoke-WingetPackageSet `
+        -InstalledIds @() `
+        -DesiredIds @('Google.AndroidStudio')
+    Assert-Equal ($result.Failed -join ',') 'install Google.AndroidStudio' 'upgrade-not-supported on an install is a failure'
+
     # Store apps: an empty msstore inventory binds, and every command names
     # the msstore source.
     $script:WingetCalls = @()
@@ -455,6 +509,13 @@ try {
         Assert-Equal (Invoke-GooseDesktopStep -NoUpgrade) 'current' '-NoUpgrade keeps an installed Goose Desktop'
         Assert-Equal (Invoke-GooseDesktopStep) 'updated' 'newer Goose Desktop release replaces the zip build'
         Assert-Equal ($script:DesktopInstalls -join ',') '1.55.0,1.56.0' 'Goose Desktop installs only when missing or outdated'
+        # An interrupted swap left only the previous tree: it is restored and
+        # found current, not deleted and reinstalled.
+        $gooseRoot = Get-GooseDesktopRoot
+        Rename-Item -LiteralPath $gooseRoot -NewName "$(Split-Path -Leaf $gooseRoot).lan-ipxe-old"
+        Assert-Equal (Invoke-GooseDesktopStep) 'current' 'an interrupted Goose Desktop swap is restored'
+        Assert-Equal (Test-Path -LiteralPath "$gooseRoot.lan-ipxe-old") $false 'no previous Goose Desktop tree is left behind'
+        Assert-Equal ($script:DesktopInstalls -join ',') '1.55.0,1.56.0' 'a restored Goose Desktop is not reinstalled'
         $env:PROCESSOR_ARCHITEW6432 = 'ARM64'
         Assert-Equal (Invoke-GooseDesktopStep) 'skipped' 'ARM64 skips Goose Desktop'
         $env:PROCESSOR_ARCHITEW6432 = $null

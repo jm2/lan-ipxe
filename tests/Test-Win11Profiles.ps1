@@ -19,8 +19,8 @@ if ($parseErrors.Count) {
 $tokens.Count | Out-Null
 
 foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetFullStorePackages', 'WingetStorePackageNames', 'WingetLegacyPackages', 'WingetPresenceOnlyPackages',
-                              'RustComponents', 'BalunWingetId', 'BalunRepo', 'BalunDisplayName', 'BalunInstallerArgs', 'PowerShellRepo', 'PowerShellMetadataUrl', 'PowerShellMsiProperties', 'PowerShellMsiLog', 'MsiOkCodes', 'MsiRebootCodes', 'MsiBusyCode', 'MsiBusyAttempts', 'MsiBusyRetrySeconds', 'WingetOkCodes', 'WingetRebootCodes', 'WingetDeferredCodes', 'WingetRemoveOkCodes', 'WingetLaunchAttempts', 'WingetLaunchRetrySeconds', 'WingetInstallTechMismatchCode', 'WingetUninstallWaitSeconds', 'WingetUninstallPollSeconds', 'NativeCliTools', 'WingetPackageArgs', 'GooGetGitHubRepo', 'GooGetPatchedRepo', 'GooGetPatchedCommit', 'GooGetPatchedPulls', 'GooGetRepoName', 'GooGetRepoUrl', 'GooGetRetiredRepos', 'GooGetAclTrustedSids', 'GooGetPackages', 'GooGetFullPackages', 'GooGetProbeTimeoutSeconds',
-                              'GamesExcludePattern', 'GamesReservePercent', 'GamesSizeFactor', 'GamesBootstrapWingetPackages')) {
+                              'RustComponents', 'BalunWingetId', 'BalunRepo', 'BalunDisplayName', 'BalunInstallerArgs', 'PowerShellRepo', 'PowerShellMetadataUrl', 'PowerShellMsiProperties', 'PowerShellMsiLog', 'MsiOkCodes', 'MsiRebootCodes', 'MsiBusyCode', 'MsiBusyAttempts', 'MsiBusyRetrySeconds', 'WingetOkCodes', 'WingetRebootCodes', 'WingetDeferredCodes', 'WingetRemoveOkCodes', 'WingetUserScopeElevatedCode', 'WingetSelfUpdatingCode', 'WingetLaunchAttempts', 'WingetLaunchRetrySeconds', 'WingetInstallTechMismatchCode', 'WingetUninstallWaitSeconds', 'WingetUninstallPollSeconds', 'NativeCliTools', 'WingetPackageArgs', 'GooGetGitHubRepo', 'GooGetPatchedRepo', 'GooGetPatchedCommit', 'GooGetPatchedPulls', 'GooGetRepoName', 'GooGetRepoUrl', 'GooGetRetiredRepos', 'GooGetAclTrustedSids', 'GooGetPackages', 'GooGetFullPackages', 'GooGetProbeTimeoutSeconds',
+                              'GamesExcludePattern', 'GamesReservePercent', 'GamesSizeFactor', 'GamesBootstrapWingetPackages', 'VentoyRepo', 'VentoyMarkerName')) {
     $assignmentAst = $ast.Find({
         param($node)
         $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
@@ -30,9 +30,9 @@ foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetFul
     if (-not $assignmentAst) { throw "$assignmentName declaration not found" }
     . ([scriptblock]::Create($assignmentAst.Extent.Text))
 }
-foreach ($functionName in @('Write-Note', 'Invoke-Winget', 'Get-WingetPackageArgument', 'Get-WingetArpEntry', 'Test-NsisExecutable', 'Remove-WingetPackageForReinstall', 'Wait-WingetPackageRemoved', 'Split-UninstallCommand', 'Invoke-UninstallCommand', 'Invoke-WingetPackageSet', 'Get-RustupStableComponent',
+foreach ($functionName in @('Write-Note', 'Invoke-Winget', 'Invoke-WingetUninstall', 'Get-WingetPackageArgument', 'Get-WingetArpEntry', 'Test-NsisExecutable', 'Remove-WingetPackageForReinstall', 'Wait-WingetPackageRemoved', 'Split-UninstallCommand', 'Invoke-UninstallCommand', 'Invoke-WingetPackageSet', 'Get-RustupStableComponent',
                             'Test-RustupDefaultToolchain', 'Initialize-RustupToolchain',
-                            'Get-NativeProcessorArchitecture', 'Get-WindowsArchitectureName', 'Get-VerifiedReleaseAsset', 'Get-BalunRelease', 'Invoke-BalunStep', 'Get-PowerShellLtsVersion', 'Get-PowerShellLtsRelease', 'Invoke-Msiexec',
+                            'Get-NativeProcessorArchitecture', 'Get-WindowsArchitectureName', 'Get-VerifiedReleaseAsset', 'Get-BalunRelease', 'Invoke-BalunStep', 'Get-VentoyRoot', 'Get-VentoyInstall', 'Restore-InterruptedTreeSwap', 'Switch-StagedTree', 'Get-VentoyShortcutTarget', 'Select-VentoyAsset', 'Get-VentoyRelease', 'Find-VentoyAppDirectory', 'Get-VentoyNativeExeName', 'Install-Ventoy', 'Invoke-VentoyStep', 'Get-PowerShellLtsVersion', 'Get-PowerShellLtsRelease', 'Invoke-Msiexec',
                             'Invoke-PowerShellMsiSwitch', 'Select-GooGetSource', 'Test-GooGetPatchPending', 'Get-GooGetConfText', 'Get-GooGetRepoFileText', 'Get-GooGetRetiredRepoFile', 'Read-TextOrEmpty', 'Test-GooGetWriteRight',
                             'Get-GooGetInstalledName', 'Get-GooGetInstalledPackage', 'Invoke-GooGetPackageSet',
                             'Get-GameSourceRank', 'Get-GameKey', 'Select-GamePackage', 'Get-GooGetArchPreference', 'Compare-GooGetVersion', 'Select-GooGetIndexEntry')) {
@@ -43,6 +43,10 @@ foreach ($functionName in @('Write-Note', 'Invoke-Winget', 'Get-WingetPackageArg
     if (-not $functionAst) { throw "$functionName function not found" }
     . ([scriptblock]::Create($functionAst.Extent.Text))
 }
+
+# The scheduled-task retry is exercised in Test-WingetAntigravity; here a
+# user-scope refusal simply has no unelevated retry available.
+function Invoke-WingetUninstallUnelevated { param($Id, $Source) return $null }
 
 # --- Profile contents --------------------------------------------------------
 $core = @($WingetPackages)
@@ -72,6 +76,11 @@ Assert-True ((Get-Content -Raw -LiteralPath $ScriptPath) -notmatch '(?i)r8152') 
 Assert-True ((Get-Content -Raw -LiteralPath $ScriptPath) -notmatch '(?m)^#Requires\s+-RunAsAdministrator') 'elevation is a runtime check so previews run unelevated'
 $scriptText = Get-Content -Raw -LiteralPath $ScriptPath
 Assert-True ($core -contains 'jm2.Tributary') 'Tributary is in core'
+Assert-True ($full -notcontains 'Ventoy.Ventoy') 'Ventoy is the GitHub release, not the broken WinGet portable package'
+Assert-True ($WingetLegacyPackages -contains 'Ventoy.Ventoy') 'a WinGet Ventoy is removed in favor of the release'
+Assert-True ($scriptText -match '(?m)^\$ventoyResult = Invoke-VentoyStep ') 'Ventoy step runs in core and full'
+Assert-True ($scriptText.IndexOf('Invoke-VentoyStep -NoUpgrade') -lt $scriptText.IndexOf('#--- 4. Self-updating native CLIs')) 'Ventoy step is part of the package phase'
+Assert-True ($scriptText.Contains("-or `$ventoyResult -eq 'failed'")) 'a failed Ventoy step fails the run'
 Assert-True ($scriptText -match '(?m)^\$balunResult = Invoke-BalunStep ') 'Balun step runs in every profile (core)'
 Assert-True ($scriptText.IndexOf('Invoke-BalunStep -InstalledIds') -lt $scriptText.IndexOf('#--- 4. Self-updating native CLIs')) 'Balun step is part of the package phase'
 Assert-True (($BalunInstallerArgs -join ' ') -eq '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-') 'Balun uses Inno Setup silent switches'
@@ -110,6 +119,8 @@ try {
         Assert-True ($text -match 'Rustlang\.Rustup') "$profileName dry run lists rustup"
         Assert-True ($text -match 'Balun: WinGet jm2\.Balun when it resolves') "$profileName dry run lists the Balun plan"
         Assert-True ($text -match 'Hyper-V: enable') "$profileName dry run lists the Hyper-V step"
+        Assert-True ($text -match 'Ventoy: latest stable ventoy/Ventoy release ventoy-<version>-windows\.zip') "$profileName dry run lists the Ventoy release plan"
+        Assert-True ($text -match 'a copy this script did not') "$profileName dry run says an unrecorded Ventoy is replaced"
         Assert-True ($text -match 'goose CLI: https://raw\.githubusercontent\.com/aaif-goose/goose/main/download_cli\.ps1 .*AMD64 only') "$profileName dry run lists the x64-only goose CLI"
         Assert-True ($text -match 'Goose Desktop \(AMD64 only; skipped elsewhere\)') "$profileName dry run lists the x64-only Goose Desktop"
         Assert-True ($text -match 'charmbracelet\.crush') "$profileName dry run lists Crush"
@@ -301,11 +312,13 @@ Write-Output 'NO-UPGRADE PASSED'
 # an ARP entry only when $script:ArpDetails is set.
 $script:ArpDetails = $false
 $script:UninstallExit = 0
+$script:InstallExit = 0
 $statefulWinget = {
     $script:WingetCalls += ($args -join '|')
     switch ($args[0]) {
         'upgrade' { $global:LASTEXITCODE = 0x8A15008E }
         'uninstall' { if ($script:UninstallExit -eq 0) { $script:PackageListed = $false }; $global:LASTEXITCODE = $script:UninstallExit }
+        'install' { $global:LASTEXITCODE = $script:InstallExit }
         'list' {
             if ($args -contains '--details') {
                 if ($script:ArpDetails) { 'LLVM [LLVM.LLVM]'; 'Local Identifier: ARP\Machine\X86\LLVM'; 'Installer Category: exe' }
@@ -329,6 +342,13 @@ try {
     $verbs = @($script:WingetCalls | ForEach-Object { ($_ -split '\|')[0] } | Where-Object { $_ -ne 'list' })
     Assert-True (($verbs -join ',') -eq 'upgrade,uninstall,install') "an installer-technology mismatch reinstalls (got $($verbs -join ','))"
     Assert-True ($result.UpdatedOrCurrent -contains 'LLVM.LLVM' -and $result.Failed.Count -eq 0) 'a successful reinstall counts as updated'
+
+    # Upgrade-not-supported from the reinstall's install means nothing was
+    # installed; it is not the self-updating 'current' of a plain upgrade.
+    $script:WingetCalls = @(); $script:PackageListed = $true; $script:InstallExit = $WingetSelfUpdatingCode
+    $result = Invoke-WingetPackageSet -InstalledIds @('LLVM.LLVM') -DesiredIds @('LLVM.LLVM') 3>$null 6>$null
+    Assert-True ($result.Failed -contains 'upgrade LLVM.LLVM' -and $result.UpdatedOrCurrent -notcontains 'LLVM.LLVM') 'upgrade-not-supported after a reinstall is a failure'
+    $script:InstallExit = 0
 
     $script:WingetCalls = @(); $script:PackageListed = $true; $script:UninstallExit = 1
     $result = Invoke-WingetPackageSet -InstalledIds @('LLVM.LLVM') -DesiredIds @('LLVM.LLVM') 3>$null 6>$null
@@ -571,6 +591,141 @@ finally {
     Remove-Item -Path function:Invoke-RestMethod, function:Invoke-WebRequest -ErrorAction SilentlyContinue
 }
 Write-Output 'BALUN PASSED'
+
+# --- Ventoy: verified GitHub release zip ------------------------------------
+$ventoySum = 'a' * 64
+$script:VentoyDigest = "sha256:$ventoySum"
+$script:VentoyTag = 'v1.1.18'
+$script:VentoyUrl = 'https://github.com/ventoy/Ventoy/releases/download/v1.1.18/ventoy-1.1.18-windows.zip'
+Set-Item -Path function:Invoke-RestMethod -Value {
+    [pscustomobject]@{
+        tag_name = $script:VentoyTag; prerelease = $false; draft = $false
+        assets = @(
+            [pscustomobject]@{ name = 'ventoy-1.1.18-linux.tar.gz'; browser_download_url = 'linux'; digest = "sha256:$('b' * 64)" }
+            [pscustomobject]@{ name = 'ventoy-1.1.18-windows.zip'; browser_download_url = $script:VentoyUrl; digest = $script:VentoyDigest }
+            [pscustomobject]@{ name = 'sha256.txt'; browser_download_url = 'sums'; digest = '' }
+        )
+    }
+}
+Set-Item -Path function:Invoke-WebRequest -Value {
+    $outFile = $args[[Array]::IndexOf([object[]]$args, '-OutFile') + 1]
+    Set-Content -LiteralPath $outFile -NoNewline -Value "$('b' * 64)  ventoy-1.1.18-linux.tar.gz`n$ventoySum  ventoy-1.1.18-windows.zip`n"
+}
+try {
+    $release = Get-VentoyRelease
+    Assert-True ($release.Version -eq '1.1.18' -and $release.Name -eq 'ventoy-1.1.18-windows.zip' -and $release.Sha256 -eq $ventoySum -and $release.Url -eq $script:VentoyUrl) 'Ventoy release zip and checksum resolved'
+    $script:VentoyDigest = "sha256:$('e' * 64)"
+    $threw = $false
+    try { Get-VentoyRelease | Out-Null } catch { $threw = $_.Exception.Message -match 'disagrees' }
+    Assert-True $threw 'Ventoy digest/sha256.txt disagreement is rejected'
+    $script:VentoyDigest = "sha256:$ventoySum"
+    $script:VentoyTag = 'v1.1.18-beta'
+    $threw = $false
+    try { Get-VentoyRelease | Out-Null } catch { $threw = $_.Exception.Message -match 'unsupported tag' }
+    Assert-True $threw 'non-X.Y.Z Ventoy tags are rejected'
+    $script:VentoyTag = 'v1.1.18'
+    $script:VentoyUrl = 'https://example.invalid/ventoy-1.1.18-windows.zip'
+    $threw = $false
+    try { Get-VentoyRelease | Out-Null } catch { $threw = $_.Exception.Message -match 'outside the expected' }
+    Assert-True $threw 'a Ventoy asset outside its release download path is rejected'
+}
+finally {
+    Remove-Item -Path function:Invoke-RestMethod, function:Invoke-WebRequest -ErrorAction SilentlyContinue
+}
+
+# Install: unpack, put the native Ventoy2Disk beside the x86 one, keep the
+# saved settings, record the release, and swap the tree in.
+$ventoyTemp = Join-Path ([IO.Path]::GetTempPath()) ("ventoy-test-{0}" -f [Guid]::NewGuid().ToString('N'))
+$savedProgramFiles = $env:ProgramFiles; $savedArch = $env:PROCESSOR_ARCHITECTURE; $savedWow = $env:PROCESSOR_ARCHITEW6432
+try {
+    $tree = Join-Path (Join-Path $ventoyTemp 'src') 'ventoy-1.1.18'
+    foreach ($sub in 'boot', 'ventoy', 'altexe') { New-Item -ItemType Directory -Force -Path (Join-Path $tree $sub) | Out-Null }
+    Set-Content -LiteralPath (Join-Path $tree 'Ventoy2Disk.exe') -Value 'x86'
+    Set-Content -LiteralPath (Join-Path (Join-Path $tree 'altexe') 'Ventoy2Disk_X64.exe') -Value 'x64'
+    Set-Content -LiteralPath (Join-Path (Join-Path $tree 'altexe') 'Ventoy2Disk_ARM64.exe') -Value 'arm64'
+    $zip = Join-Path $ventoyTemp 'ventoy-1.1.18-windows.zip'
+    Compress-Archive -LiteralPath $tree -DestinationPath $zip
+    $zipSum = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+    $env:ProgramFiles = Join-Path $ventoyTemp 'pf'
+    $root = Join-Path $env:ProgramFiles 'Ventoy'
+    New-Item -ItemType Directory -Path $root | Out-Null
+    Set-Content -LiteralPath (Join-Path $root 'Ventoy2Disk.exe') -Value 'old'
+    Set-Content -LiteralPath (Join-Path $root 'Ventoy2Disk.ini') -Value 'Language=English'
+    Set-Content -LiteralPath (Join-Path $root 'log.txt') -Value 'old log'
+    $env:PROCESSOR_ARCHITECTURE = 'AMD64'; $env:PROCESSOR_ARCHITEW6432 = $null
+    $script:VentoyShortcut = $null
+    function Install-StartMenuShortcut { param($Name, $Target, [switch]$AllUsers) $script:VentoyShortcut = "$Name|$Target|$AllUsers" }
+    Set-Item -Path function:Invoke-WebRequest -Value {
+        $outFile = $args[[Array]::IndexOf([object[]]$args, '-OutFile') + 1]
+        Copy-Item -LiteralPath $zip -Destination $outFile
+    }
+    $ventoyRelease = [pscustomobject]@{ Version = '1.1.18'; Name = 'ventoy-1.1.18-windows.zip'; Url = 'u'; Sha256 = $zipSum }
+    Install-Ventoy -Release $ventoyRelease
+    Assert-True ((Get-Content -LiteralPath (Join-Path $root 'Ventoy2Disk.exe')) -eq 'x86') 'Ventoy tree replaced from the release'
+    Assert-True ((Get-Content -LiteralPath (Join-Path $root 'Ventoy2Disk_X64.exe')) -eq 'x64') 'native x64 Ventoy2Disk placed beside the x86 one'
+    Assert-True ((Get-Content -LiteralPath (Join-Path $root 'Ventoy2Disk.ini')) -eq 'Language=English') 'Ventoy2Disk settings carried over'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $root 'log.txt'))) 'other files from the previous tree are dropped'
+    Assert-True ((Get-VentoyShortcutTarget) -eq (Join-Path $root 'Ventoy2Disk_X64.exe')) 'Start menu shortcut targets the native build'
+    Assert-True (-not (Test-Path -LiteralPath "$root.lan-ipxe-new") -and -not (Test-Path -LiteralPath "$root.lan-ipxe-old")) 'no staging or previous tree left behind'
+    $installed = Get-VentoyInstall
+    Assert-True ($installed.Version -eq '1.1.18' -and $installed.Sha256 -eq $zipSum) 'installed Ventoy release recorded'
+
+    $env:PROCESSOR_ARCHITEW6432 = 'ARM64'
+    Remove-Item -LiteralPath (Join-Path (Join-Path $tree 'altexe') 'Ventoy2Disk_ARM64.exe')
+    Move-Item -LiteralPath $zip -Destination "$zip.orig"
+    Compress-Archive -LiteralPath $tree -DestinationPath $zip
+    $noArm = [pscustomobject]@{ Version = '1.1.18'; Name = 'ventoy-1.1.18-windows.zip'; Url = 'u'; Sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant() }
+    Install-Ventoy -Release $noArm 3>$null
+    Assert-True ((Get-VentoyShortcutTarget) -eq (Join-Path $root 'Ventoy2Disk.exe')) 'a release without the native build falls back to the x86 Ventoy2Disk'
+    $env:PROCESSOR_ARCHITEW6432 = $null
+    Move-Item -LiteralPath "$zip.orig" -Destination $zip -Force
+    Install-Ventoy -Release $ventoyRelease
+
+    $bad = [pscustomobject]@{ Version = '1.1.19'; Name = 'ventoy-1.1.19-windows.zip'; Url = 'u'; Sha256 = 'f' * 64 }
+    $threw = $false
+    try { Install-Ventoy -Release $bad } catch { $threw = $_.Exception.Message -match 'checksum mismatch' }
+    Assert-True ($threw -and (Get-VentoyInstall).Version -eq '1.1.18') 'a checksum mismatch leaves the installed Ventoy untouched'
+
+    # An interrupted swap that left only the previous tree is put back, not
+    # deleted as stale.
+    Rename-Item -LiteralPath $root -NewName 'Ventoy.lan-ipxe-old'
+    Restore-InterruptedTreeSwap -Root $root -Label 'Ventoy'
+    Assert-True ((Get-VentoyInstall).Version -eq '1.1.18' -and -not (Test-Path -LiteralPath "$root.lan-ipxe-old")) 'previous tree restored after an interrupted swap'
+
+    # Step decisions.
+    $script:VentoyCalls = @()
+    function Get-VentoyRelease { $script:VentoyCalls += 'release'; return $ventoyRelease }
+    function Install-Ventoy { param($Release) $script:VentoyCalls += "install|$($Release.Version)" }
+    $script:VentoyShortcut = $null
+    Assert-True ((Invoke-VentoyStep 3>$null) -eq 'current' -and $script:VentoyCalls -notcontains 'install|1.1.18') 'recorded release is current'
+    Assert-True ($script:VentoyShortcut -eq "Ventoy2Disk|$(Join-Path $root 'Ventoy2Disk_X64.exe')|True") 'a current Ventoy still gets its all-users Start menu shortcut'
+    # A copy unpacked by hand (no marker) is left alone under -NoUpgrade and
+    # replaced otherwise.
+    $markerPath = Join-Path $root $VentoyMarkerName
+    $markerText = Get-Content -Raw -LiteralPath $markerPath
+    Remove-Item -LiteralPath $markerPath
+    Assert-True ((Get-VentoyInstall).Managed -eq $false) 'a Ventoy without the marker is reported as unmanaged'
+    $script:VentoyCalls = @()
+    Assert-True ((Invoke-VentoyStep -NoUpgrade 3>$null) -eq 'current' -and $script:VentoyCalls.Count -eq 0) '-NoUpgrade leaves an unmanaged Ventoy alone'
+    Assert-True ((Invoke-VentoyStep 3>$null) -eq 'updated' -and $script:VentoyCalls -contains 'install|1.1.18') 'apply replaces an unmanaged Ventoy'
+    Set-Content -LiteralPath $markerPath -Value $markerText -NoNewline
+    $script:VentoyCalls = @()
+    Assert-True ((Invoke-VentoyStep -NoUpgrade 3>$null) -eq 'current' -and $script:VentoyCalls.Count -eq 0) '-NoUpgrade skips the release lookup for an installed Ventoy'
+    $ventoyRelease = [pscustomobject]@{ Version = '1.1.19'; Name = 'ventoy-1.1.19-windows.zip'; Url = 'u'; Sha256 = 'f' * 64 }
+    $script:VentoyCalls = @()
+    Assert-True ((Invoke-VentoyStep 3>$null) -eq 'updated' -and $script:VentoyCalls -contains 'install|1.1.19') 'newer release replaces Ventoy'
+    Remove-Item -LiteralPath $root -Recurse -Force
+    $script:VentoyCalls = @()
+    Assert-True ((Invoke-VentoyStep 3>$null) -eq 'installed' -and $script:VentoyCalls -contains 'install|1.1.19') 'missing Ventoy is installed'
+    function Get-VentoyRelease { throw 'offline' }
+    Assert-True ((Invoke-VentoyStep 3>$null) -eq 'failed') 'release lookup failure is reported'
+}
+finally {
+    $env:ProgramFiles = $savedProgramFiles; $env:PROCESSOR_ARCHITECTURE = $savedArch; $env:PROCESSOR_ARCHITEW6432 = $savedWow
+    Remove-Item -Path function:Invoke-WebRequest -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $ventoyTemp -Recurse -Force -ErrorAction SilentlyContinue
+}
+Write-Output 'VENTOY PASSED'
 
 # --- PowerShell 7: the GitHub LTS MSI replaces the Store package -------------
 # msiexec results: reboot codes count as success and request a reboot, 1618 is
