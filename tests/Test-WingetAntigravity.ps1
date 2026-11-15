@@ -304,6 +304,23 @@ try {
     Assert-Equal ($result.Failed -join ',') 'uninstall VSCodium.VSCodium' 'failed purge is reported'
     Assert-Equal ($result.Installed -join ',') 'Microsoft.VisualStudioCode' 'replacement still installs after a failed purge'
 
+    # Store apps: an empty msstore inventory binds, and every command names
+    # the msstore source.
+    $script:WingetCalls = @()
+    $script:ExitCodes = @{}
+    $result = Invoke-WingetPackageSet `
+        -InstalledIds @() `
+        -DesiredIds @('9PFHDD62MXS1') `
+        -Source msstore
+    Assert-Equal ($script:WingetCalls -join "`n") 'install|--id|9PFHDD62MXS1|--exact|--source|msstore|--no-upgrade|--silent|--accept-package-agreements|--accept-source-agreements|--disable-interactivity' 'missing Store app installs from msstore'
+    Assert-Equal ($result.Installed -join ',') '9PFHDD62MXS1' 'missing Store app is reported installed'
+    $script:WingetCalls = @()
+    $result = Invoke-WingetPackageSet `
+        -InstalledIds @('9NM4T8B9JQZ1') `
+        -DesiredIds @('9NM4T8B9JQZ1') `
+        -Source msstore
+    Assert-Equal ($script:WingetCalls -join "`n") 'upgrade|--id|9NM4T8B9JQZ1|--exact|--source|msstore|--include-unknown|--silent|--accept-package-agreements|--accept-source-agreements|--disable-interactivity' 'installed Store app is updated from msstore'
+
     # Native CLIs: each official installer runs, the command is verified, and
     # only then is the WinGet copy it replaces uninstalled. A failed install
     # keeps the WinGet copy.
