@@ -384,12 +384,17 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   `charmbracelet.crush` WinGet package. PowerShell 7 must be the MSI
   (`C:\Program Files\PowerShell\7`), not the Microsoft Store package: Codex's Windows
   sandbox can't launch the Store app-execution alias, so sandboxed agents could run no
-  command. Apply installs the MSI, forced past a Store copy WinGet may count as
-  `Microsoft.PowerShell`, verifies it runs, then removes the Store package; `-Check`
-  reports a Store copy as drift. Every PowerShell 7 install and update uses the MSI
-  (`--installer-type wix`) and opts it into Microsoft Update (`USE_MU=1 ENABLE_MU=1`), so
-  Windows Update keeps it current between runs, including runs from that `pwsh` that
-  skip its WinGet update. The highest stable Python 3 minor-package channel is resolved from WinGet
+  command. Apply installs the LTS MSI from the `PowerShell/PowerShell` GitHub release that
+  `tools/metadata.json` names as LTS (WinGet's `Microsoft.PowerShell` follows the newer
+  non-LTS line), SHA-256 checked against `hashes.sha256` and the asset digest, verifies it
+  runs, then removes the Store package; `-Check` reports a Store copy or a non-LTS line as
+  drift. A newer patch of the LTS line is kept; a newer line (7.7 from WinGet) is
+  uninstalled first, after the LTS MSI is downloaded and verified, since the MSI refuses
+  downgrades; runs from that `pwsh` skip the switch (its MSI closes every `pwsh`). The MSI
+  opts into Microsoft Update (`USE_MU=1 ENABLE_MU=1`; this enables Microsoft Update
+  machine-wide), which keeps it on its LTS line between runs. WinGet still matches the
+  MSI to `Microsoft.PowerShell`, so a manual `winget upgrade --all` moves it to the
+  non-LTS line until the next run switches it back. The highest stable Python 3 minor-package channel is resolved from WinGet
   rather than hard-coded. Antigravity IDE, VSCodium, and the OpenCode CLI and desktop app
   (`SST.opencode`, `SST.OpenCodeDesktop`) are removed, as are native OpenCode installs
   WinGet does not track: `%USERPROFILE%\.opencode\bin` with its user PATH entry and the

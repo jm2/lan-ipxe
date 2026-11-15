@@ -19,7 +19,7 @@ if ($parseErrors.Count) {
 $tokens.Count | Out-Null
 
 foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetFullStorePackages', 'WingetStorePackageNames', 'WingetLegacyPackages', 'WingetPresenceOnlyPackages',
-                              'RustComponents', 'BalunWingetId', 'BalunRepo', 'BalunDisplayName', 'BalunInstallerArgs', 'WingetOkCodes', 'WingetRebootCodes', 'WingetDeferredCodes', 'WingetRemoveOkCodes', 'WingetLaunchAttempts', 'WingetLaunchRetrySeconds', 'WingetInstallTechMismatchCode', 'WingetUninstallWaitSeconds', 'WingetUninstallPollSeconds', 'NativeCliTools', 'WingetPackageArgs', 'GooGetGitHubRepo', 'GooGetPatchedRepo', 'GooGetPatchedCommit', 'GooGetPatchedPulls', 'GooGetRepoName', 'GooGetRepoUrl', 'GooGetRetiredRepos', 'GooGetAclTrustedSids', 'GooGetPackages', 'GooGetFullPackages', 'GooGetProbeTimeoutSeconds',
+                              'RustComponents', 'BalunWingetId', 'BalunRepo', 'BalunDisplayName', 'BalunInstallerArgs', 'PowerShellRepo', 'PowerShellMetadataUrl', 'PowerShellMsiProperties', 'PowerShellMsiLog', 'MsiOkCodes', 'MsiRebootCodes', 'MsiBusyCode', 'MsiBusyAttempts', 'MsiBusyRetrySeconds', 'WingetOkCodes', 'WingetRebootCodes', 'WingetDeferredCodes', 'WingetRemoveOkCodes', 'WingetLaunchAttempts', 'WingetLaunchRetrySeconds', 'WingetInstallTechMismatchCode', 'WingetUninstallWaitSeconds', 'WingetUninstallPollSeconds', 'NativeCliTools', 'WingetPackageArgs', 'GooGetGitHubRepo', 'GooGetPatchedRepo', 'GooGetPatchedCommit', 'GooGetPatchedPulls', 'GooGetRepoName', 'GooGetRepoUrl', 'GooGetRetiredRepos', 'GooGetAclTrustedSids', 'GooGetPackages', 'GooGetFullPackages', 'GooGetProbeTimeoutSeconds',
                               'GamesExcludePattern', 'GamesReservePercent', 'GamesSizeFactor', 'GamesBootstrapWingetPackages')) {
     $assignmentAst = $ast.Find({
         param($node)
@@ -32,7 +32,7 @@ foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetFul
 }
 foreach ($functionName in @('Write-Note', 'Invoke-Winget', 'Get-WingetPackageArgument', 'Get-WingetArpEntry', 'Test-NsisExecutable', 'Remove-WingetPackageForReinstall', 'Wait-WingetPackageRemoved', 'Split-UninstallCommand', 'Invoke-UninstallCommand', 'Invoke-WingetPackageSet', 'Get-RustupStableComponent',
                             'Test-RustupDefaultToolchain', 'Initialize-RustupToolchain',
-                            'Get-NativeProcessorArchitecture', 'Get-WindowsArchitectureName', 'Get-BalunRelease', 'Invoke-BalunStep',
+                            'Get-NativeProcessorArchitecture', 'Get-WindowsArchitectureName', 'Get-VerifiedReleaseAsset', 'Get-BalunRelease', 'Invoke-BalunStep', 'Get-PowerShellLtsVersion', 'Get-PowerShellLtsRelease', 'Invoke-Msiexec',
                             'Invoke-PowerShellMsiSwitch', 'Select-GooGetSource', 'Test-GooGetPatchPending', 'Get-GooGetConfText', 'Get-GooGetRepoFileText', 'Get-GooGetRetiredRepoFile', 'Read-TextOrEmpty', 'Test-GooGetWriteRight',
                             'Get-GooGetInstalledName', 'Get-GooGetInstalledPackage', 'Invoke-GooGetPackageSet',
                             'Get-GameSourceRank', 'Get-GameKey', 'Select-GamePackage', 'Get-GooGetArchPreference', 'Compare-GooGetVersion', 'Select-GooGetIndexEntry')) {
@@ -52,10 +52,11 @@ foreach ($id in @('Valve.Steam', 'GOG.Galaxy', 'SuperTuxKart.SuperTuxKart', 'Ple
     Assert-True ($full -contains $id) "$id must be in full"
 }
 foreach ($id in @('Rustlang.Rustup', 'Google.Chrome', 'Mozilla.Firefox', 'LLVM.LLVM', 'GoLang.Go',
-                  'Google.AndroidStudio', 'Microsoft.VisualStudio.Community', 'Microsoft.PowerShell', 'Git.Git')) {
+                  'Google.AndroidStudio', 'Microsoft.VisualStudio.Community', 'Git.Git')) {
     Assert-True ($core -contains $id) "$id must be in core"
 }
 Assert-True (@($full | Select-Object -Unique).Count -eq $full.Count) 'core and full package IDs do not overlap'
+Assert-True ($full -notcontains 'Microsoft.PowerShell') 'PowerShell 7 is the GitHub LTS MSI, not the WinGet stable package'
 Assert-True ($full -notcontains 'Apple.iTunes') 'iTunes is replaced by the Store Apple Music and Apple TV apps'
 foreach ($id in @('9PFHDD62MXS1', '9NM4T8B9JQZ1')) {
     Assert-True ($WingetFullStorePackages -contains $id) "Store app $id must be in full"
@@ -377,30 +378,32 @@ finally {
 }
 Write-Output 'INSTALLER TECHNOLOGY CHANGE PASSED'
 
-# --- The PowerShell 7 hosting the run is never upgraded by it ----------------
+# --- A package hosting the run is never upgraded by it ----------------------
 $script:WingetCalls = @()
 function global:winget { $script:WingetCalls += ($args -join '|'); $global:LASTEXITCODE = 0 }
 try {
-    $result = Invoke-WingetPackageSet -InstalledIds @('Microsoft.PowerShell', 'Git.Git') -DesiredIds @('Microsoft.PowerShell', 'Git.Git') -HostIds @('Microsoft.PowerShell') 6>$null
-    Assert-True (@($script:WingetCalls | Where-Object { $_ -like '*Microsoft.PowerShell*' }).Count -eq 0) 'the hosting PowerShell is not upgraded'
+    $result = Invoke-WingetPackageSet -InstalledIds @('Example.Host', 'Git.Git') -DesiredIds @('Example.Host', 'Git.Git') -HostIds @('Example.Host') 6>$null
+    Assert-True (@($script:WingetCalls | Where-Object { $_ -like '*Example.Host*' }).Count -eq 0) 'the hosting package is not upgraded'
     Assert-True (@($script:WingetCalls | Where-Object { $_ -like 'upgrade|--id|Git.Git|*' }).Count -eq 1) 'other packages are still upgraded'
-    Assert-True ($result.HostSkipped -contains 'Microsoft.PowerShell' -and $result.Failed.Count -eq 0) 'the skipped host update is reported, not failed'
+    Assert-True ($result.HostSkipped -contains 'Example.Host' -and $result.Failed.Count -eq 0) 'the skipped host update is reported, not failed'
 
-    # Every PowerShell 7 install/upgrade stays the MSI and opts into Microsoft
-    # Update; other packages get no extra arguments (not even an empty one).
-    $msiArgs = '--installer-type|wix|--custom|USE_MU=1 ENABLE_MU=1'
+    # Per-package extra arguments reach every install/upgrade of that package;
+    # other packages get no extra arguments (not even an empty one).
+    $savedPackageArgs = $WingetPackageArgs
+    $WingetPackageArgs = @{ 'Example.Extra' = @('--custom', 'A=1') }
     $script:WingetCalls = @()
-    Invoke-WingetPackageSet -InstalledIds @('Microsoft.PowerShell', 'Git.Git') -DesiredIds @('Microsoft.PowerShell', 'Git.Git') 6>$null | Out-Null
-    Assert-True ($script:WingetCalls -contains "upgrade|--id|Microsoft.PowerShell|--exact|--source|winget|--include-unknown|--silent|--accept-package-agreements|--accept-source-agreements|--disable-interactivity|$msiArgs") 'PowerShell 7 upgrades as the Microsoft Update-enabled MSI'
+    Invoke-WingetPackageSet -InstalledIds @('Example.Extra', 'Git.Git') -DesiredIds @('Example.Extra', 'Git.Git') 6>$null | Out-Null
+    Assert-True ($script:WingetCalls -contains 'upgrade|--id|Example.Extra|--exact|--source|winget|--include-unknown|--silent|--accept-package-agreements|--accept-source-agreements|--disable-interactivity|--custom|A=1') 'per-package arguments reach the upgrade'
     Assert-True ($script:WingetCalls -contains 'upgrade|--id|Git.Git|--exact|--source|winget|--include-unknown|--silent|--accept-package-agreements|--accept-source-agreements|--disable-interactivity') 'other upgrades carry no extra arguments'
     $script:WingetCalls = @()
-    Invoke-WingetPackageSet -InstalledIds @('Example.Unrelated') -DesiredIds @('Microsoft.PowerShell') 6>$null | Out-Null
-    Assert-True ($script:WingetCalls -contains "install|--id|Microsoft.PowerShell|--exact|--source|winget|--no-upgrade|--silent|--accept-package-agreements|--accept-source-agreements|--disable-interactivity|$msiArgs") 'a missing PowerShell 7 installs as the Microsoft Update-enabled MSI'
+    Invoke-WingetPackageSet -InstalledIds @('Example.Unrelated') -DesiredIds @('Example.Extra') 6>$null | Out-Null
+    Assert-True ($script:WingetCalls -contains 'install|--id|Example.Extra|--exact|--source|winget|--no-upgrade|--silent|--accept-package-agreements|--accept-source-agreements|--disable-interactivity|--custom|A=1') 'per-package arguments reach the install'
+    $WingetPackageArgs = $savedPackageArgs
 }
 finally {
     Remove-Item -Path function:global:winget -ErrorAction SilentlyContinue
 }
-Write-Output 'HOST POWERSHELL PASSED'
+Write-Output 'HOST PACKAGE PASSED'
 
 # --- winget launch failures are retried, exit codes are not ------------------
 $savedRetrySeconds = $WingetLaunchRetrySeconds
@@ -569,37 +572,142 @@ finally {
 }
 Write-Output 'BALUN PASSED'
 
-# --- PowerShell 7: MSI replaces the Store package ----------------------------
+# --- PowerShell 7: the GitHub LTS MSI replaces the Store package -------------
+# msiexec results: reboot codes count as success and request a reboot, 1618 is
+# retried, 1605 is accepted only where the caller allows it, and any other code
+# throws with the log path.
+$savedBusyRetry = $MsiBusyRetrySeconds
+$MsiBusyRetrySeconds = 0
+$script:MsiExitCodes = @()
+$script:MsiArgs = @()
+Set-Item -Path function:Start-Process -Value {
+    $script:MsiArgs += ,@($args[[Array]::IndexOf([object[]]$args, '-ArgumentList') + 1])
+    $code = $script:MsiExitCodes[0]
+    $script:MsiExitCodes = @($script:MsiExitCodes | Select-Object -Skip 1)
+    [pscustomobject]@{ ExitCode = $code }
+}
+try {
+    $script:RebootNeeded = $false
+    $script:MsiExitCodes = @(3010)
+    Invoke-Msiexec -Arguments @('/i', '"C:\Temp dir\p.msi"', '/quiet') 6>$null
+    Assert-True ($script:RebootNeeded) 'msiexec 3010 counts as success and requests a reboot'
+    Assert-True (($script:MsiArgs[0] -join ' ') -eq "/i `"C:\Temp dir\p.msi`" /quiet /l*v `"$PowerShellMsiLog`"") 'msiexec gets a quoted package path and a verbose log'
+    $script:MsiArgs = @(); $script:MsiExitCodes = @(1618, 1618, 0)
+    Invoke-Msiexec -Arguments @('/i', 'p.msi') 6>$null
+    Assert-True ($script:MsiArgs.Count -eq 3) 'msiexec 1618 (another install running) is retried'
+    $script:MsiExitCodes = @(1605)
+    Invoke-Msiexec -Arguments @('/x', '{P}') -ExtraOkCodes @(1605) 6>$null
+    $threw = $false
+    $script:MsiExitCodes = @(1605)
+    try { Invoke-Msiexec -Arguments @('/i', 'p.msi') 6>$null } catch { $threw = $true }
+    Assert-True $threw '1605 is accepted only where the caller allows it'
+    $threw = $false
+    $script:MsiExitCodes = @(1603)
+    try { Invoke-Msiexec -Arguments @('/i', 'p.msi') 6>$null } catch { $threw = $_.Exception.Message -like '*exited with 1603 (log: *' }
+    Assert-True $threw 'msiexec failure throws with the log path'
+}
+finally {
+    $MsiBusyRetrySeconds = $savedBusyRetry
+    $script:RebootNeeded = $false
+    Remove-Item -Path function:Start-Process -ErrorAction SilentlyContinue
+}
+
 $script:PwshDir = Join-Path ([IO.Path]::GetTempPath()) ("pwsh-msi-{0}" -f [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $script:PwshDir | Out-Null
 $script:PwshMsi = Join-Path $script:PwshDir 'pwsh.exe'
-$script:PwshCalls = @(); $script:PwshStore = @(); $script:PwshRuns = $true; $script:PwshWingetExit = 0
-function global:winget {
-    $script:PwshCalls += ($args -join '|'); $global:LASTEXITCODE = $script:PwshWingetExit
-    if ($script:PwshWingetExit -eq 0) { Set-Content -LiteralPath $script:PwshMsi -Value '' }
-}
+$script:PwshCalls = @(); $script:PwshStore = @(); $script:PwshRuns = $true
+$script:PwshInstallFails = $false; $script:PwshReleaseFails = $false
+$script:PwshExisting = $null; $script:PwshHosted = $false
 function Get-PowerShellMsiPath { $script:PwshMsi }
 function Get-StorePowerShell { @($script:PwshStore) }
 function Test-PowerShellMsiRun { param($Path) $script:PwshCalls += "run|$Path"; $script:PwshRuns }
+function Get-PowerShellMsiInstall { $script:PwshExisting }
+function Test-PowerShellMsiHost { $script:PwshHosted }
+function Get-PowerShellLtsRelease {
+    $script:PwshCalls += 'release'
+    if ($script:PwshReleaseFails) { throw 'metadata unreachable' }
+    [pscustomobject]@{ Version = '7.6.10'; Name = 'PowerShell-7.6.10-win-x64.msi'; Url = 'u'; Sha256 = 'a' * 64 }
+}
+function Save-PowerShellMsi {
+    param($Release)
+    $script:PwshCalls += "msi-save|$($Release.Version)"
+    $dir = Join-Path $script:PwshDir 'download'
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    [pscustomobject]@{ Directory = $dir; Path = (Join-Path $dir $Release.Name) }
+}
+function Install-PowerShellMsi {
+    param($Path)
+    $script:PwshCalls += "msi-install|$(Split-Path -Leaf $Path)"
+    if ($script:PwshInstallFails) { throw 'msiexec /i exited with 1603' }
+    Set-Content -LiteralPath $script:PwshMsi -Value ''
+}
+function Invoke-Msiexec { param([string[]]$Arguments, [int[]]$ExtraOkCodes) $script:PwshCalls += "msiexec|$($Arguments -join ' ')" }
 Set-Item -Path function:Remove-AppxPackage -Value { $script:PwshCalls += 'remove-appx'; $script:PwshStore = @() }
+$script:PwshWarnings = @()
 function Invoke-PwshCase {
-    param([bool]$HasMsi, [bool]$HasStore)
+    param([bool]$HasMsi, [bool]$HasStore, [string]$Version = '7.6.10', [bool]$NoUpgrade = $false,
+          [bool]$Registered = $HasMsi, [string]$ProductCode = '{B6950B97-25F0-4EB3-9FC8-DB5D085645DE}')
     $script:PwshCalls = @()
     Remove-Item -LiteralPath $script:PwshMsi -ErrorAction SilentlyContinue
     if ($HasMsi) { Set-Content -LiteralPath $script:PwshMsi -Value '' }
+    $script:PwshExisting = $null
+    if ($Registered) { $script:PwshExisting = [pscustomobject]@{ Version = $Version; ProductCode = $ProductCode } }
     $script:PwshStore = @(if ($HasStore) { [pscustomobject]@{ Version = '7.6.7.0' } })
-    return (Invoke-PowerShellMsiSwitch 6>$null 3>$null)
+    $status = Invoke-PowerShellMsiSwitch -NoUpgrade:$NoUpgrade 6>$null 3>&1 | ForEach-Object {
+        if ($_ -is [System.Management.Automation.WarningRecord]) { $script:PwshWarnings += $_.Message } else { $_ }
+    }
+    return $status
 }
+$installMsi = 'msi-install|PowerShell-7.6.10-win-x64.msi'
+$uninstallMsi = 'msiexec|/x {B6950B97-25F0-4EB3-9FC8-DB5D085645DE} /quiet /norestart'
 try {
     $status = Invoke-PwshCase $false $true
-    Assert-True ($status -eq 'installed') "Store-only host gets the MSI (got $status)"
-    $install = @($script:PwshCalls | Where-Object { $_ -like 'install|--id|Microsoft.PowerShell|*' })
-    Assert-True ($install.Count -eq 1 -and $install[0] -match '\|--installer-type\|wix\|' -and $install[0] -match '\|--force\|') 'MSI install is forced past the Store copy'
-    Assert-True ($install[0] -like '*|--custom|USE_MU=1 ENABLE_MU=1') 'the MSI install opts into Microsoft Update'
+    Assert-True ($status -eq 'installed') "Store-only host gets the LTS MSI (got $status)"
+    Assert-True ($script:PwshCalls -contains $installMsi) 'the LTS release MSI is installed'
     Assert-True ([Array]::IndexOf([object[]]$script:PwshCalls, 'remove-appx') -gt [Array]::IndexOf([object[]]$script:PwshCalls, "run|$script:PwshMsi")) 'Store copy is removed only after the MSI runs'
 
+    $status = Invoke-PwshCase $false $false -NoUpgrade $true
+    Assert-True ($status -eq 'installed') "-NoUpgrade still installs a missing MSI (got $status)"
+
     $status = Invoke-PwshCase $true $false
-    Assert-True ($status -eq 'current' -and @($script:PwshCalls | Where-Object { $_ -like 'install|*' -or $_ -eq 'remove-appx' }).Count -eq 0) 'MSI-only host is left alone'
+    Assert-True ($status -eq 'current' -and @($script:PwshCalls | Where-Object { $_ -like 'msi*' -or $_ -eq 'remove-appx' }).Count -eq 0) 'current LTS MSI is left alone'
+
+    $status = Invoke-PwshCase $true $false '7.6.11'
+    Assert-True ($status -eq 'current' -and @($script:PwshCalls | Where-Object { $_ -like 'msi*' }).Count -eq 0) 'a newer patch of the LTS line (metadata lagging) is kept, not downgraded'
+
+    $status = Invoke-PwshCase $true $false '7.6.7'
+    Assert-True ($status -eq 'updated' -and $script:PwshCalls -contains $installMsi) "older LTS patch is updated in place (got $status)"
+    Assert-True ($script:PwshCalls -notcontains $uninstallMsi) 'an in-place LTS update uninstalls nothing'
+
+    $status = Invoke-PwshCase $true $false '7.7.0'
+    Assert-True ($status -eq 'updated') "newer non-LTS line is switched to LTS (got $status)"
+    $save = [Array]::IndexOf([object[]]$script:PwshCalls, 'msi-save|7.6.10')
+    $uninstall = [Array]::IndexOf([object[]]$script:PwshCalls, $uninstallMsi)
+    Assert-True ($save -ge 0 -and $save -lt $uninstall -and $uninstall -lt [Array]::IndexOf([object[]]$script:PwshCalls, $installMsi)) 'the LTS MSI is verified before the non-LTS MSI is uninstalled, then installed'
+
+    $script:PwshWarnings = @()
+    $script:PwshInstallFails = $true
+    $status = Invoke-PwshCase $true $false '7.7.0'
+    Assert-True ($status -eq 'failed' -and @($script:PwshWarnings | Where-Object { $_ -like '*was uninstalled, but LTS 7.6.10 failed to install*' }).Count -eq 1) 'an install failure after the uninstall says PowerShell 7 is gone'
+    $script:PwshInstallFails = $false
+
+    $status = Invoke-PwshCase $true $false '7.7.0' -ProductCode ''
+    Assert-True ($status -eq 'failed' -and @($script:PwshCalls | Where-Object { $_ -like 'msi*' }).Count -eq 0) 'a newer line without a ProductCode fails before anything is changed'
+
+    $status = Invoke-PwshCase $false $false '7.6.10' -Registered $true
+    Assert-True ($status -eq 'installed' -and [Array]::IndexOf([object[]]$script:PwshCalls, $uninstallMsi) -lt [Array]::IndexOf([object[]]$script:PwshCalls, $installMsi) -and $script:PwshCalls -contains $uninstallMsi) 'a registered install whose files are gone is uninstalled, then reinstalled'
+
+    $status = Invoke-PwshCase $true $false -Registered $false
+    Assert-True ($status -eq 'updated' -and $script:PwshCalls -contains $installMsi -and $script:PwshCalls -notcontains $uninstallMsi) 'an unregistered copy is installed over'
+
+    $script:PwshHosted = $true
+    $status = Invoke-PwshCase $true $true '7.7.0'
+    Assert-True ($status -eq 'host-skipped' -and @($script:PwshCalls | Where-Object { $_ -like 'msi*' }).Count -eq 0) 'the PowerShell hosting the run is not switched'
+    Assert-True ($script:PwshCalls -contains 'remove-appx') 'a host-skipped switch still removes the Store copy'
+    $script:PwshHosted = $false
+
+    $status = Invoke-PwshCase $true $false '7.6.7' -NoUpgrade $true
+    Assert-True ($status -eq 'current' -and $script:PwshCalls -notcontains 'release') '-NoUpgrade skips the release lookup for an installed MSI'
 
     $status = Invoke-PwshCase $true $true
     Assert-True ($status -eq 'store-removed' -and $script:PwshCalls -contains 'remove-appx') 'leftover Store copy is removed when the MSI exists'
@@ -609,14 +717,68 @@ try {
     Assert-True ($status -eq 'failed' -and $script:PwshCalls -notcontains 'remove-appx') 'a broken MSI keeps the Store copy'
     $script:PwshRuns = $true
 
-    $script:PwshWingetExit = 1
+    $script:PwshInstallFails = $true
     $status = Invoke-PwshCase $false $true
     Assert-True ($status -eq 'failed' -and $script:PwshCalls -notcontains 'remove-appx') 'failed MSI install keeps the Store copy'
-    $script:PwshWingetExit = 0
+    $script:PwshInstallFails = $false
+
+    $script:PwshReleaseFails = $true
+    $status = Invoke-PwshCase $true $true '7.6.7'
+    Assert-True ($status -eq 'failed' -and $script:PwshCalls -notcontains 'remove-appx') 'an unresolved LTS release fails without touching the Store copy'
+    $script:PwshReleaseFails = $false
 }
 finally {
-    Remove-Item -Path function:global:winget, function:Remove-AppxPackage -ErrorAction SilentlyContinue
+    Remove-Item -Path function:Remove-AppxPackage -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $script:PwshDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# LTS resolution: the newest stable LTSReleaseTag, then that release's MSI,
+# cross-checked against hashes.sha256 and the GitHub digest.
+${function:Get-PowerShellLtsRelease} = $ast.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-PowerShellLtsRelease'
+}, $true).Body.GetScriptBlock()
+$msiSum = 'f' * 64
+$script:LtsTags = @('v7.4.13', 'v7.6.10', 'v7.8.0-preview.1')
+$script:RestUris = @()
+Set-Item -Path function:Invoke-RestMethod -Value {
+    $uri = [string]$args[[Array]::IndexOf([object[]]$args, '-Uri') + 1]
+    $script:RestUris += $uri
+    if ($uri -like '*metadata.json') { return [pscustomobject]@{ LTSReleaseTag = $script:LtsTags; StableReleaseTag = 'v7.7.0' } }
+    [pscustomobject]@{
+        tag_name = 'v7.6.10'; prerelease = $false; draft = $false
+        assets = @(
+            [pscustomobject]@{ name = 'PowerShell-7.6.10-win-x64.msi'; browser_download_url = 'msi'; digest = "sha256:$msiSum" }
+            [pscustomobject]@{ name = 'hashes.sha256'; browser_download_url = 'sums'; digest = '' }
+        )
+    }
+}
+Set-Item -Path function:Invoke-WebRequest -Value {
+    $outFile = $args[[Array]::IndexOf([object[]]$args, '-OutFile') + 1]
+    # PowerShell publishes hashes.sha256 as UTF-16 with a byte-order mark.
+    Set-Content -LiteralPath $outFile -Encoding Unicode -Value "$('0' * 64) *PowerShell-7.6.10-win-arm64.msi`r`n$msiSum *PowerShell-7.6.10-win-x64.msi"
+}
+$savedArch = $env:PROCESSOR_ARCHITECTURE; $savedWow = $env:PROCESSOR_ARCHITEW6432
+try {
+    $env:PROCESSOR_ARCHITECTURE = 'AMD64'; $env:PROCESSOR_ARCHITEW6432 = $null
+    Assert-True ((Get-PowerShellLtsVersion) -eq '7.6.10') 'the newest stable LTS tag is selected (previews and older LTS ignored)'
+    $script:RestUris = @()
+    $release = Get-PowerShellLtsRelease
+    Assert-True ($release.Version -eq '7.6.10' -and $release.Name -eq 'PowerShell-7.6.10-win-x64.msi' -and $release.Sha256 -eq $msiSum) 'LTS MSI and checksum resolved for x64'
+    Assert-True ($script:RestUris -contains 'https://api.github.com/repos/PowerShell/PowerShell/releases/tags/v7.6.10') 'the LTS release is looked up by its tag'
+    $env:PROCESSOR_ARCHITEW6432 = 'ARM64'
+    $threw = $false
+    try { Get-PowerShellLtsRelease | Out-Null } catch { $threw = $_.Exception.Message -match 'lacks exactly one PowerShell-7\.6\.10-win-arm64\.msi' }
+    Assert-True $threw 'arm64 host selects the arm64 MSI (absent in this fixture)'
+    $env:PROCESSOR_ARCHITEW6432 = $null
+    $script:LtsTags = @('v7.8.0-preview.1')
+    $threw = $false
+    try { Get-PowerShellLtsVersion | Out-Null } catch { $threw = $_.Exception.Message -match 'no stable LTSReleaseTag' }
+    Assert-True $threw 'metadata without a stable LTS tag is rejected'
+}
+finally {
+    $env:PROCESSOR_ARCHITECTURE = $savedArch; $env:PROCESSOR_ARCHITEW6432 = $savedWow
+    Remove-Item -Path function:Invoke-RestMethod, function:Invoke-WebRequest -ErrorAction SilentlyContinue
 }
 Assert-True ($scriptText.IndexOf('$pwshResult = Invoke-PowerShellMsiSwitch') -lt $scriptText.IndexOf('#--- 4. Self-updating native CLIs')) 'PowerShell switch runs in the package phase'
 Assert-True ($scriptText -match "(?m)^if \(.*-or \`$pwshResult -eq 'failed'.*\) \{ exit 1 \}\r?$") 'a failed PowerShell switch fails the run'
