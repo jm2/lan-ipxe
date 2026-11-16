@@ -1,3 +1,10 @@
+# ip_resolve=4: packages.microsoft.com is Microsoft's anycast Edge (msedge.net).
+# Native IPv6 to it intermittently gets a TCP RST right after the TLS
+# ClientHello (~40% on the SC26v6 IPv6-only network, Nov 2026), which dnf
+# reports as Curl error 35 and skips the repo. IPv4 is reliable everywhere:
+# on dual-stack networks it is native, on IPv6-only networks NetworkManager's
+# CLAT carries it over NAT64 (100% in the same test). Scoped to the Microsoft
+# repos only; other repos stay on native IPv6.
 [code]
 name=Visual Studio Code
 baseurl=https://packages.microsoft.com/yumrepos/vscode
@@ -7,3 +14,4 @@ repo_gpgcheck=1
 gpgkey=file:///etc/pki/rpm-gpg/MICROSOFT-RPM-GPG-KEY
 sslverify=1
 metadata_expire=1h
+ip_resolve=4

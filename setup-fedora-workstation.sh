@@ -889,7 +889,13 @@ import_rpm_key() {
     [[ -n ${trusted_path} ]] \
       || die "a trusted local path is required for fingerprint-pinned key ${frag}"
     key_file=${WORK_DIR}/$(basename "${url}")
-    curl --proto '=https' --tlsv1.2 -fsSL "${url}" -o "${key_file}" \
+    # --retry-all-errors: plain --retry skips TCP resets (curl 35/56), which
+    # some IPv6 paths to CDN edges hit intermittently (packages.microsoft.com
+    # and packages.wazuh.com on the SC26v6 IPv6-only network, Nov 2026).
+    # Retrying any error is safe because the fingerprint is verified below.
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-all-errors \
+      --retry-delay 2 --connect-timeout 30 --max-time 120 \
+      "${url}" -o "${key_file}" \
       || die "could not download signing key: ${url}"
     install -d -m 0700 "${gnupg_home}"
     actual_fingerprint=$(GNUPGHOME="${gnupg_home}" \
