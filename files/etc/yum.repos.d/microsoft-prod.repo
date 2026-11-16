@@ -2,6 +2,9 @@
 # Uses the RHEL 9 prod path: Microsoft's Fedora-specific repos lag and often lack
 # current PowerShell, while rhel/9/prod carries the current build and installs on
 # Fedora fine (PowerShell bundles its own .NET runtime). Signed + verified.
+# ip_resolve=4: native IPv6 to Microsoft's anycast Edge intermittently resets
+# after the TLS ClientHello (Curl error 35); IPv4 (native, or CLAT/NAT64 on
+# IPv6-only networks) is reliable. See vscode.repo for details.
 [packages-microsoft-com-prod]
 name=Microsoft Production
 baseurl=https://packages.microsoft.com/rhel/9/prod/
@@ -10,3 +13,4 @@ gpgcheck=1
 repo_gpgcheck=1
 gpgkey=file:///etc/pki/rpm-gpg/MICROSOFT-RPM-GPG-KEY
 sslverify=1
+ip_resolve=4
