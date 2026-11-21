@@ -57,7 +57,7 @@ test_profile_selection() (
     ! array_contains "${package}" "${PKGS_AUR[@]}" \
       || fail "core AUR set includes ${package}"
   done
-  for package in rustup chromium code gcc clang go jdk-openjdk cockpit; do
+  for package in rustup chromium code gcc clang freerdp libsecret qemu-user-static qemu-user-static-binfmt uv go jdk-openjdk cockpit; do
     array_contains "${package}" "${PKGS_OFFICIAL[@]}" \
       || fail "core official set omits ${package}"
   done

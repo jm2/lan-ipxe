@@ -219,6 +219,7 @@ PKGS=(
   clamav-update
   clamd
   clang
+  clang-devel
   cmake
   cockpit
   cockpit-files
@@ -252,6 +253,8 @@ PKGS=(
   firewalld
   flatpak
   flex
+  freerdp
+  freerdp-devel
   fuse
   fuse-libs
   gcc
@@ -303,6 +306,7 @@ PKGS=(
   libicu
   libmpc-devel
   libplist-devel
+  libsecret-devel
   libsodium-devel
   libstdc++-devel
   libtool
@@ -311,6 +315,7 @@ PKGS=(
   libva
   libva-utils
   libwebsockets-devel
+  libwinpr-devel
   libXcursor-devel
   libXfixes-devel
   libXi-devel
@@ -393,6 +398,7 @@ PKGS=(
   tributary
   udisks2-lvm2
   unar
+  uv
   vim
   vlc
   vulkan-loader
@@ -427,6 +433,11 @@ PKGS_FULL=(
 PKGS_X86_64=(
   libva-intel-media-driver
   powershell
+  qemu-user-static-aarch64
+)
+# aarch64 only: the counterpart of qemu-user-static-aarch64 on x86_64
+PKGS_AARCH64=(
+  qemu-user-static-x86
 )
 # x86_64 + full: Steam, its 32-bit Steam/Wine libraries, and Plex
 PKGS_FULL_X86_64=(
@@ -1784,6 +1795,17 @@ rpm_version_at_least() {
     && [[ $(printf '%s\n' "$2" "$1" | sort -V | tail -1) == "$1" ]]
 }
 
+# rpm_built_for_this_release <package>: true when the installed package's
+# release carries this system's dist tag (.fc45 on Fedora 45). A package built
+# locally for an older Fedora keeps its version across a system upgrade, but
+# its library dependencies do not, so it has to be rebuilt.
+rpm_built_for_this_release() {
+  local release dist
+  release=$(rpm -q --qf '%{RELEASE}' "$1" 2>/dev/null) || return 1
+  dist=$(rpm -E '%{?dist}')
+  [[ -n ${dist} && ${release} == *"${dist}" ]]
+}
+
 # Navidrome publishes no repository. Install its official release RPM only
 # after checking the digest GitHub publishes for that exact asset; DNF then
 # upgrades in place and the package scriptlet restarts a running service.
@@ -1820,8 +1842,16 @@ install_owntone() {
     'owntone-{version}.tar.xz' '^([0-9]+\.[0-9]+(\.[0-9]+)?)$'
   installed_version=$(installed_rpm_version owntone)
   if rpm_version_at_least "${installed_version}" "${RESOLVED_VERSION}"; then
-    note "OwnTone ${installed_version}: installed (latest release ${RESOLVED_VERSION})"
-    return 0
+    if rpm_built_for_this_release owntone; then
+      note "OwnTone ${installed_version}: installed (latest release ${RESOLVED_VERSION})"
+      return 0
+    fi
+    # Rebuilding the latest release would downgrade a newer local build.
+    if [[ ${installed_version} != "${RESOLVED_VERSION}" ]]; then
+      warn "OwnTone ${installed_version} was built for an older Fedora release and is newer than ${RESOLVED_VERSION}; rebuild it by hand"
+      return 0
+    fi
+    note "OwnTone ${installed_version}: built for an older Fedora release; rebuilding"
   fi
   spec=${topdir}/SPECS/owntone.spec
   tarball=${topdir}/SOURCES/owntone-${RESOLVED_VERSION}.tar.xz
@@ -2507,6 +2537,7 @@ select_profile() {
       "etc/yum.repos.d/microsoft-prod.repo|/etc/yum.repos.d/microsoft-prod.repo"
     )
   else
+    SELECTED_PKGS+=("${PKGS_AARCH64[@]}")
     # Microsoft's PowerShell RPM is x86_64-only; aarch64 uses the release tarball.
     SELECTED_TOOLS+=(pwsh)
   fi
@@ -2703,7 +2734,10 @@ check_state() {
       claude) id=${HOME}/.local/bin/claude ;;
       *) id=${tool} ;;
     esac
-    if tool_present "${id}"; then
+    if [[ ${tool} == owntone ]] && tool_present "${id}" \
+        && ! rpm_built_for_this_release owntone; then
+      check_report DRIFT "tool owntone (built for an older Fedora release)"
+    elif tool_present "${id}"; then
       check_report CURRENT "tool ${tool}"
     else
       check_report DRIFT "tool ${tool}"

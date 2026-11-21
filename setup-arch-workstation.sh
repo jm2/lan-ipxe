@@ -204,6 +204,7 @@ PKGS_OFFICIAL_CORE=(
   firewalld
   flatpak
   flex
+  freerdp
   fuse2
   gcc
   gdb
@@ -236,6 +237,7 @@ PKGS_OFFICIAL_CORE=(
   libgtop # Optional upstream, required by the System Monitor shell extension.
   libmpc
   libpulse
+  libsecret
   libva-intel-driver
   libva-nvidia-driver
   libva-utils
@@ -283,6 +285,8 @@ PKGS_OFFICIAL_CORE=(
   power-profiles-daemon
   ptyxis
   python
+  qemu-user-static
+  qemu-user-static-binfmt
   rpm-tools
   rsync
   ruby
@@ -301,6 +305,7 @@ PKGS_OFFICIAL_CORE=(
   tmux
   tree
   unarchiver
+  uv
   vim
   vlc
   vulkan-devel

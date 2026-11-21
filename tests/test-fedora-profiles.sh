@@ -93,7 +93,8 @@ test_profile_selection() {
 
       # Core developer surface, present in both profiles.
       for item in balun tributary switchworks chromium google-chrome-stable code \
-          clang golang nodejs cockpit-machines cockpit-podman transmission-cli \
+          clang clang-devel freerdp freerdp-devel libsecret-devel libwinpr-devel uv \
+          golang nodejs cockpit-machines cockpit-podman transmission-cli \
           aide audit clamav clamav-update clamd firewalld; do
         has_line "${item}" "${pkgs}" || fail "${arch}/${profile}: omits core package ${item}"
       done
@@ -169,6 +170,10 @@ test_profile_selection() {
 
       if [[ ${arch} == x86_64 ]]; then
         has_line powershell "${pkgs}" || fail "x86_64/${profile}: omits the PowerShell RPM"
+        has_line qemu-user-static-aarch64 "${pkgs}" \
+          || fail "x86_64/${profile}: omits aarch64 user-mode emulation"
+        ! has_line qemu-user-static-x86 "${pkgs}" \
+          || fail "x86_64/${profile}: requests x86 user-mode emulation"
         if [[ ${profile} == full ]]; then
           for item in steam plexmediaserver glibc-devel.i686; do
             has_line "${item}" "${pkgs}" || fail "x86_64/full: omits ${item}"
@@ -183,9 +188,11 @@ test_profile_selection() {
           done
         fi
       else
-        for item in steam plexmediaserver powershell glibc-devel.i686; do
+        for item in steam plexmediaserver powershell glibc-devel.i686 qemu-user-static-aarch64; do
           ! has_line "${item}" "${pkgs}" || fail "aarch64/${profile}: requests x86_64-only ${item}"
         done
+        has_line qemu-user-static-x86 "${pkgs}" \
+          || fail "aarch64/${profile}: omits x86 user-mode emulation"
         has_line pwsh "${tools}" || fail "aarch64/${profile}: omits release-tarball PowerShell"
         if [[ ${profile} == full ]]; then
           lan_services=$(grep -A1 'workstation-lan source zone' <<<"${out}" | tail -1)

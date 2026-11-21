@@ -1357,17 +1357,19 @@ test_fedora_navidrome_checksum_rejection() {
 }
 
 # Mocks OwnTone release metadata, the RPM database, the source download, DNF,
-# and rpmbuild. $1: installed version ('' when absent); $2: good, corrupt, or
-# broken (the build fails).
+# and rpmbuild on a Fedora 44 host. $1: installed version ('' when absent);
+# $2: good, corrupt, or broken (the build fails); $3: the installed package's
+# release (default 1.fc44, built for this host).
 setup_owntone_fixture() {
   local digest
   OWNTONE_INSTALLED=$1
   OWNTONE_MODE=$2
+  OWNTONE_RELEASE=${3:-1.fc44}
   digest=$(printf 'owntone fixture source\n' | sha256sum)
   OWNTONE_DIGEST=${digest%% *}
   select_fedora_artifacts x86_64
   OWNTONE_SPEC=${REPO_ROOT}/files/rpm/owntone.spec
-  WORK_DIR=${TEST_ROOT}/owntone-${1:-absent}-$2/work
+  WORK_DIR=${TEST_ROOT}/owntone-${1:-absent}-$2-${OWNTONE_RELEASE}/work
   OWNTONE_CALLS=${WORK_DIR}/calls
   # install_owntone captures rpmbuild output; keep mock assertions visible.
   exec 9>&2
@@ -1383,6 +1385,9 @@ setup_owntone_fixture() {
     case "$*" in
       '-q --quiet owntone') [[ -n ${OWNTONE_INSTALLED} ]] ;;
       '-q --qf %{VERSION} owntone') printf '%s' "${OWNTONE_INSTALLED}" ;;
+      '-q --qf %{RELEASE} owntone')
+        [[ -n ${OWNTONE_INSTALLED} ]] && printf '%s' "${OWNTONE_RELEASE}" ;;
+      '-E %{?dist}') printf '.fc44' ;;
       *) fail "unexpected rpm call: $*" ;;
     esac
   }
@@ -1408,6 +1413,7 @@ setup_owntone_fixture() {
         ;;
       "dnf -y install ${WORK_DIR}/rpmbuild/RPMS/x86_64/owntone-29.4-1.fc44.x86_64.rpm")
         OWNTONE_INSTALLED=29.4
+        OWNTONE_RELEASE=1.fc44
         ;;
       *) fail "unexpected privileged OwnTone call: $*" ;;
     esac
@@ -1446,6 +1452,24 @@ test_fedora_owntone_install() (
     rpmbuild() { fail "OwnTone ${installed} attempted a rebuild"; }
     install_owntone >/dev/null
   done
+
+  # The latest release built for an older Fedora is rebuilt for this one.
+  setup_owntone_fixture 29.4 good 1.fc43
+  rpm_built_for_this_release owntone \
+    && fail 'an .fc43 OwnTone counted as built for Fedora 44'
+  install_owntone >/dev/null
+  [[ $(<"${OWNTONE_CALLS}") == $'sudo builddep\nrpmbuild\nsudo install' ]] \
+    || fail 'OwnTone built for an older Fedora was not rebuilt'
+  rpm_built_for_this_release owntone \
+    || fail 'the rebuilt OwnTone does not carry this release dist tag'
+
+  # A newer local build for an older Fedora is left alone, not downgraded.
+  setup_owntone_fixture 30.0 good 1.fc43
+  curl() { fail 'a newer stale OwnTone attempted a download'; }
+  sudo() { fail 'a newer stale OwnTone attempted a privileged mutation'; }
+  rpmbuild() { fail 'a newer stale OwnTone attempted a downgrade build'; }
+  install_owntone 2>&1 | grep -q 'rebuild it by hand' \
+    || fail 'a newer stale OwnTone did not warn'
 )
 
 test_fedora_owntone_rejection() {
