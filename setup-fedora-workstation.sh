@@ -249,7 +249,8 @@ PKGS=(
   efibootmgr
   elfutils-libelf-devel
   erofs-utils
-  ffmpeg-free-devel
+  ffmpeg
+  ffmpeg-devel
   firewalld
   flatpak
   flex
@@ -291,6 +292,9 @@ PKGS=(
   gperf
   grub2
   gstreamer1-devel
+  gstreamer1-plugin-libav
+  gstreamer1-plugins-bad-freeworld
+  gstreamer1-plugins-ugly
   gtk4-devel
   hfsutils
   ImageMagick
@@ -335,6 +339,7 @@ PKGS=(
   meld
   mesa-libEGL-devel
   mesa-libGL-devel
+  mesa-va-drivers-freeworld
   mesa-vulkan-drivers
   meson
   mingw64-gcc-c++
@@ -431,6 +436,7 @@ PKGS_FULL=(
 
 # x86_64 only: packages that exist only for that architecture
 PKGS_X86_64=(
+  intel-media-driver
   libva-intel-media-driver
   powershell
   qemu-user-static-aarch64
@@ -2406,6 +2412,31 @@ keep_installed() {
 # installed obsoleter; disable_excludes lets the transaction see the package
 # that files/etc/dnf/libdnf5.conf.d/80-protobuf3-c.conf hides from every other
 # run. DNF pulls protobuf-c.i686 back in for the 32-bit libprotobuf-c users.
+# Fedora's ffmpeg-free build lacks the patent-encumbered codecs; the script
+# uses RPM Fusion's full FFmpeg instead. Its packages Conflict with the -free
+# ones rather than Obsolete them, so a plain install cannot replace them. Swap
+# once, as RPM Fusion documents; this also removes the -free -devel packages,
+# and the package set then installs ffmpeg-devel. DNF accepts the swap on a
+# host that only has the -free libraries, without ffmpeg-free itself.
+installed_ffmpeg_free() {
+  rpm -qa --qf '%{NAME}\n' 2>/dev/null \
+    | grep -Ex '(ffmpeg|libav[a-z]+|libsw[a-z]+|libpostproc)-free(-devel)?' \
+    | sort -u
+}
+use_rpmfusion_ffmpeg() {
+  local free=()
+  mapfile -t free < <(installed_ffmpeg_free)
+  if (( ! ${#free[@]} )); then
+    note "ffmpeg-free: absent"
+    return 0
+  fi
+  sudo dnf -y swap --allowerasing ffmpeg-free ffmpeg \
+    || die "could not replace ffmpeg-free with RPM Fusion ffmpeg"
+  mapfile -t free < <(installed_ffmpeg_free)
+  (( ! ${#free[@]} )) || die "still installed after the ffmpeg swap: ${free[*]}"
+  note "ffmpeg-free replaced by RPM Fusion ffmpeg"
+}
+
 restore_protobuf_c() {
   if ! rpm -q --quiet protobuf3-c 2>/dev/null; then
     note "protobuf3-c: absent"
@@ -2581,6 +2612,7 @@ print_plan() {
   printf '  %s\n' "${SELECTED_REPOS[@]}"
   printf 'PLAN: CA-bundle symlinks /etc/ssl/certs/ca-certificates.crt, /etc/pki/tls/certs/ca-bundle.crt\n'
   printf 'PLAN: exclude protobuf3-c* from DNF; swap an installed protobuf3-c back to protobuf-c\n'
+  printf 'PLAN: swap Fedora ffmpeg-free (and its -free libraries) for RPM Fusion ffmpeg\n'
   printf 'PLAN: dnf install %d entries:\n' "${#SELECTED_PKGS[@]}"
   printf '  %s\n' "${SELECTED_PKGS[@]}"
   printf 'PLAN: native vendor tools (%s):\n' \
@@ -2772,6 +2804,9 @@ check_state() {
     || check_report DRIFT "OpenCode package: installed (replaced by goose and Crush)"
   ! rpm -q --quiet protobuf3-c 2>/dev/null \
     || check_report DRIFT "package protobuf3-c: installed (obsoletes protobuf-c; swapped back)"
+  while read -r id; do
+    check_report DRIFT "package ${id}: installed (replaced by RPM Fusion ffmpeg)"
+  done < <(installed_ffmpeg_free)
   for id in "${SELECTED_FLATPAKS[@]}"; do
     if flatpak info --system "${id}" >/dev/null 2>&1; then
       check_report CURRENT "flatpak ${id}"
@@ -3035,6 +3070,10 @@ log "protobuf-c (Fedora 45 protobuf3-c obsolete workaround)"
 put_file -s "${FILES}/etc/dnf/libdnf5.conf.d/80-protobuf3-c.conf" \
   /etc/dnf/libdnf5.conf.d/80-protobuf3-c.conf
 restore_protobuf_c
+
+# RPM Fusion (enabled above) must be in place; ffmpeg-devel is in the package set.
+log "FFmpeg (RPM Fusion full build in place of ffmpeg-free)"
+use_rpmfusion_ffmpeg
 
 if (( NO_UPGRADE )); then
   log "Skipping DNF package updates (--no-upgrade)"

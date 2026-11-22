@@ -94,6 +94,8 @@ test_profile_selection() {
       # Core developer surface, present in both profiles.
       for item in balun tributary switchworks chromium google-chrome-stable code \
           clang clang-devel freerdp freerdp-devel libsecret-devel libwinpr-devel uv \
+          ffmpeg ffmpeg-devel gstreamer1-plugin-libav gstreamer1-plugins-bad-freeworld \
+          gstreamer1-plugins-ugly mesa-va-drivers-freeworld \
           golang nodejs cockpit-machines cockpit-podman transmission-cli \
           aide audit clamav clamav-update clamd firewalld; do
         has_line "${item}" "${pkgs}" || fail "${arch}/${profile}: omits core package ${item}"
@@ -172,6 +174,8 @@ test_profile_selection() {
         has_line powershell "${pkgs}" || fail "x86_64/${profile}: omits the PowerShell RPM"
         has_line qemu-user-static-aarch64 "${pkgs}" \
           || fail "x86_64/${profile}: omits aarch64 user-mode emulation"
+        has_line intel-media-driver "${pkgs}" \
+          || fail "x86_64/${profile}: omits RPM Fusion's full Intel VA-API driver"
         ! has_line qemu-user-static-x86 "${pkgs}" \
           || fail "x86_64/${profile}: requests x86 user-mode emulation"
         if [[ ${profile} == full ]]; then
@@ -188,7 +192,7 @@ test_profile_selection() {
           done
         fi
       else
-        for item in steam plexmediaserver powershell glibc-devel.i686 qemu-user-static-aarch64; do
+        for item in steam plexmediaserver powershell glibc-devel.i686 qemu-user-static-aarch64 intel-media-driver; do
           ! has_line "${item}" "${pkgs}" || fail "aarch64/${profile}: requests x86_64-only ${item}"
         done
         has_line qemu-user-static-x86 "${pkgs}" \
@@ -302,6 +306,43 @@ test_protobuf_c_restore() (
   grep -Fxq 'excludepkgs=protobuf3-c*' \
     "${REPO_ROOT}/files/etc/dnf/libdnf5.conf.d/80-protobuf3-c.conf" \
     || fail 'libdnf5 drop-in does not exclude protobuf3-c*'
+)
+
+# RPM Fusion's full FFmpeg replaces ffmpeg-free and every -free library once,
+# including a host that has only the libraries, and does nothing afterwards.
+test_ffmpeg_swap() (
+  local db=${TEST_ROOT}/installed-ffmpeg log=${TEST_ROOT}/ffmpeg-calls out
+  set --
+  # shellcheck disable=SC1090
+  source <(sed '/^#--- Preflight/,$d' "${SCRIPT}")
+  rpm() {
+    [[ $* == "-qa --qf %{NAME}\\n" ]] || fail "unexpected rpm call: $*"
+    cat "${db}"
+  }
+  sudo() {
+    printf '%s\n' "$*" >>"${log}"
+    [[ $* == 'dnf -y swap --allowerasing ffmpeg-free ffmpeg' ]] \
+      && printf '%s\n' ffmpeg ffmpeg-libs fdk-aac-free gstreamer1-plugins-bad-free >"${db}"
+  }
+  for start in 'ffmpeg-free ffmpeg-free-devel libavcodec-free libavcodec-free-devel libswscale-free' \
+      'libavcodec-free libavformat-free libavutil-free fdk-aac-free'; do
+    printf '%s\n' ${start} >"${db}"
+    : >"${log}"
+    use_rpmfusion_ffmpeg >/dev/null
+    [[ $(cat "${log}") == 'dnf -y swap --allowerasing ffmpeg-free ffmpeg' ]] \
+      || fail "unexpected ffmpeg swap for '${start}': $(cat "${log}")"
+    [[ -z $(installed_ffmpeg_free) ]] || fail "ffmpeg-free packages remain after '${start}'"
+  done
+  # Unrelated -free packages (fdk-aac-free, GStreamer's) never trigger it.
+  : >"${log}"
+  use_rpmfusion_ffmpeg >/dev/null
+  [[ ! -s ${log} ]] || fail 'ffmpeg swap ran again once converged'
+  # A swap that leaves a -free library behind is an error.
+  sudo() { :; }
+  printf '%s\n' libavcodec-free >"${db}"
+  out=$( (use_rpmfusion_ffmpeg) 2>&1 ) && fail 'an incomplete ffmpeg swap passed'
+  [[ ${out} == *'still installed after the ffmpeg swap: libavcodec-free'* ]] \
+    || fail "incomplete ffmpeg swap gave the wrong error: ${out}"
 )
 
 # The rendered security configs must be deterministic: apply installs them and
@@ -524,6 +565,8 @@ printf 'PASS Fedora dry-run makes no sudo, package-manager, network, or HOME wri
 test_distro_rust_purge
 printf 'PASS Fedora purges installed distro Rust packages before rustup\n'
 test_protobuf_c_restore
+test_ffmpeg_swap
+printf 'PASS Fedora swaps ffmpeg-free for RPM Fusion ffmpeg once\n'
 printf 'PASS Fedora swaps an obsoleting protobuf3-c back to protobuf-c once\n'
 test_security_renders
 printf 'PASS Fedora deterministic clamd/LAN-zone rendering with profile gating\n'
