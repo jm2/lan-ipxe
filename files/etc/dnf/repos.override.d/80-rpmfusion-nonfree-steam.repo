@@ -1,0 +1,5 @@
+# Enables the rpmfusion-nonfree-steam repository that Fedora ships disabled in
+# fedora-workstation-repositories
+# (/usr/share/dnf5/repos.d/rpmfusion-nonfree-steam.repo).
+[rpmfusion-nonfree-steam]
+enabled=1

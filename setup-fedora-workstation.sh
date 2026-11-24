@@ -254,6 +254,8 @@ PKGS=(
   efibootmgr
   elfutils-libelf-devel
   erofs-utils
+  # Fedora's disabled Chrome/Steam repository definitions (see VENDOR_REPO_DIR).
+  fedora-workstation-repositories
   ffmpeg
   ffmpeg-devel
   firewalld
@@ -1012,6 +1014,56 @@ dnf_repo_enabled() {
   repo_output=$(dnf -q repolist --enabled 2>/dev/null) || return 1
   awk -v repo="$1" 'NR > 1 && $1 == repo { found = 1 } END { exit !found }' \
     <<<"${repo_output}"
+}
+
+# Chrome and RPM Fusion's Steam repository come from Fedora's
+# fedora-workstation-repositories, which ships them disabled under
+# /usr/share/dnf5/repos.d; drop-ins in /etc/dnf/repos.override.d enable them.
+# dnf5 reads /etc/yum.repos.d and that directory side by side, so a copy of
+# the same repository ID in /etc/yum.repos.d is a second definition, which it
+# rejects ("Id is present more than once") instead of treating as an override.
+VENDOR_REPOS_PKG=fedora-workstation-repositories
+VENDOR_REPO_DIR=/usr/share/dnf5/repos.d
+VENDOR_REPO_DUPLICATES=(/etc/yum.repos.d/google-chrome.repo
+  /etc/yum.repos.d/rpmfusion-nonfree-steam.repo)
+
+# vendor_repo_defined <repo-id> [dir]: a repository file Fedora ships defines
+# <repo-id>. The optional directory is a test seam.
+vendor_repo_defined() {
+  local file
+  for file in "${2:-${VENDOR_REPO_DIR}}"/*.repo; do
+    grep -qxF -- "[$1]" "${file}" 2>/dev/null && return 0
+  done
+  return 1
+}
+
+# vendor_repo_duplicate <file> [dir]: <file> exists and every repository it
+# defines is one Fedora already ships, so dnf5 sees each of them twice.
+vendor_repo_duplicate() {
+  local id found=0
+  [[ -f $1 ]] || return 1
+  while read -r id; do
+    vendor_repo_defined "${id}" "${2:-}" || return 1
+    found=1
+  done < <(sed -n 's/^\[\(.*\)\][[:space:]]*$/\1/p' "$1")
+  (( found ))
+}
+
+# retire_vendor_repo_duplicates: remove the /etc/yum.repos.d copies earlier
+# runs installed (and Google's cron job keeps rewriting while the file exists)
+# once Fedora's own definitions are present. A file that also defines a
+# repository Fedora does not ship is left alone with a warning.
+retire_vendor_repo_duplicates() {
+  local file
+  for file in "${VENDOR_REPO_DUPLICATES[@]}"; do
+    [[ -e ${file} ]] || continue
+    if vendor_repo_duplicate "${file}"; then
+      sudo rm -f -- "${file}"
+      note "${file}: removed (duplicates ${VENDOR_REPO_DIR}/${file##*/})"
+    else
+      warn "${file}: defines a repository Fedora does not ship; left in place"
+    fi
+  done
 }
 
 # Retire only the exact repository file previously deployed by this project.
@@ -2662,7 +2714,7 @@ select_profile() {
   # render_clamd_config, render_lan_zone, and configure_wazuh_agent instead.
   MANAGED_FILES=(
     "etc/yum.repos.d/vscode.repo|/etc/yum.repos.d/vscode.repo"
-    "etc/yum.repos.d/google-chrome.repo|/etc/yum.repos.d/google-chrome.repo"
+    "etc/dnf/repos.override.d/80-google-chrome.repo|/etc/dnf/repos.override.d/80-google-chrome.repo"
     "etc/yum.repos.d/charm.repo|/etc/yum.repos.d/charm.repo"
     "etc/yum.repos.d/wazuh.repo|/etc/yum.repos.d/wazuh.repo"
     "bashrc|${HOME}/.bashrc"
@@ -2729,7 +2781,7 @@ select_profile() {
       # and so is its in-home streaming surface.
       FIREWALL_LAN_SERVICES+=(plexmediaserver steam-streaming)
       MANAGED_FILES+=(
-        "etc/yum.repos.d/rpmfusion-nonfree-steam.repo|/etc/yum.repos.d/rpmfusion-nonfree-steam.repo"
+        "etc/dnf/repos.override.d/80-rpmfusion-nonfree-steam.repo|/etc/dnf/repos.override.d/80-rpmfusion-nonfree-steam.repo"
         "etc/yum.repos.d/plex.repo|/etc/yum.repos.d/plex.repo"
       )
     fi
@@ -2976,6 +3028,15 @@ check_state() {
       check_report DRIFT "file ${dst}"
     fi
   done
+  if rpm -q --quiet "${VENDOR_REPOS_PKG}"; then
+    check_report CURRENT "package ${VENDOR_REPOS_PKG} (Chrome/Steam repository definitions)"
+  else
+    check_report DRIFT "package ${VENDOR_REPOS_PKG} (Chrome/Steam repository definitions)"
+  fi
+  for dst in "${VENDOR_REPO_DUPLICATES[@]}"; do
+    ! vendor_repo_duplicate "${dst}" \
+      || check_report DRIFT "file ${dst}: duplicates ${VENDOR_REPO_DIR}/${dst##*/} (dnf5 rejects the repository ID twice)"
+  done
   for dst in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt; do
     if [[ -L ${dst} && $(readlink -- "${dst}") == "${CA_BUNDLE}" ]]; then
       check_report CURRENT "symlink ${dst}"
@@ -3154,11 +3215,21 @@ log "CA bundle symlinks"
 ensure_symlink -s "${CA_BUNDLE}" /etc/ssl/certs/ca-certificates.crt
 ensure_symlink -s "${CA_BUNDLE}" /etc/pki/tls/certs/ca-bundle.crt
 
-#--- 1b. Repositories, continued (x86_64 repo files overwrite the disabled
-#        ones RPM Fusion ships, so they come after that install) ------------
+#--- 1b. Repositories, continued -------------------------------------------
 log "Repositories (Chrome, Charm, x86_64 extras, Microsoft, full-profile Steam/Plex, sing-box)"
-put_file -s "${FILES}/etc/yum.repos.d/google-chrome.repo" /etc/yum.repos.d/google-chrome.repo
+# Chrome (and below, Steam) are Fedora's own disabled definitions, enabled by
+# override drop-ins; see VENDOR_REPO_DIR. An override cannot create a
+# repository, so the package shipping the definitions comes first.
+if rpm -q --quiet "${VENDOR_REPOS_PKG}"; then
+  note "${VENDOR_REPOS_PKG}: installed"
+else
+  sudo dnf -y install "${VENDOR_REPOS_PKG}"
+  note "${VENDOR_REPOS_PKG}: installed now"
+fi
+retire_vendor_repo_duplicates
+put_file -s "${FILES}/etc/dnf/repos.override.d/80-google-chrome.repo" /etc/dnf/repos.override.d/80-google-chrome.repo
 import_rpm_key "${GOOGLE_KEY_URL}" linux-packages-keymaster@google.com
+dnf_repo_enabled google-chrome || die "the Google Chrome repository is not enabled"
 # Charm's signed repository is its documented Fedora channel for Crush.
 put_file -s "${FILES}/etc/yum.repos.d/charm.repo" /etc/yum.repos.d/charm.repo
 import_rpm_key "${CHARM_KEY_URL}" Charm
@@ -3167,8 +3238,10 @@ if (( IS_X86_64 )); then
   put_file -s "${FILES}/etc/yum.repos.d/microsoft-prod.repo" /etc/yum.repos.d/microsoft-prod.repo
 fi
 if (( IS_X86_64 )) && [[ ${PROFILE} == full ]]; then
-  put_file -s "${FILES}/etc/yum.repos.d/rpmfusion-nonfree-steam.repo" \
-    /etc/yum.repos.d/rpmfusion-nonfree-steam.repo
+  put_file -s "${FILES}/etc/dnf/repos.override.d/80-rpmfusion-nonfree-steam.repo" \
+    /etc/dnf/repos.override.d/80-rpmfusion-nonfree-steam.repo
+  dnf_repo_enabled rpmfusion-nonfree-steam \
+    || die "the RPM Fusion Steam repository is not enabled"
   # Plex publishes x86_64 RPMs only; the key signs both metadata and packages.
   import_rpm_key "${PLEX_KEY_URL}" "Plex Inc." \
     "${PLEX_KEY_FINGERPRINT}" "${PLEX_KEY_FILE}"

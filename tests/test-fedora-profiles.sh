@@ -592,11 +592,61 @@ test_game_packages_repo() {
   done
 }
 
+# Fedora 45 ships Chrome and RPM Fusion's Steam repo disabled under
+# /usr/share/dnf5/repos.d; a copy in /etc/yum.repos.d is a duplicate ID dnf5
+# rejects, so the script enables them through repos.override.d instead.
+test_vendor_repo_overrides() (
+  set --
+  # shellcheck disable=SC1090
+  source <(sed '/^#--- Preflight/,$d' "${SCRIPT}")
+  local vendor=${TEST_ROOT}/vendor-repos etc=${TEST_ROOT}/etc-repos entry
+  mkdir -p "${vendor}" "${etc}"
+  printf '[google-chrome]\nenabled=0\n' >"${vendor}/google-chrome.repo"
+  printf '[rpmfusion-nonfree-steam]\nenabled=0\n[rpmfusion-nonfree-steam-debuginfo]\nenabled=0\n' \
+    >"${vendor}/rpmfusion-nonfree-steam.repo"
+  printf '[google-chrome]\nenabled=1\n' >"${etc}/google-chrome.repo"
+  printf '[rpmfusion-nonfree-steam]\nenabled=1\n[rpmfusion-nonfree-steam-debuginfo]\nenabled=0\n' \
+    >"${etc}/rpmfusion-nonfree-steam.repo"
+  printf '[google-chrome]\nenabled=1\n[my-mirror]\nenabled=1\n' >"${etc}/mixed.repo"
+  vendor_repo_duplicate "${etc}/google-chrome.repo" "${vendor}" \
+    || fail 'a copy of the vendor google-chrome repo is not detected as a duplicate'
+  vendor_repo_duplicate "${etc}/rpmfusion-nonfree-steam.repo" "${vendor}" \
+    || fail 'a copy of the vendor Steam repos is not detected as a duplicate'
+  ! vendor_repo_duplicate "${etc}/mixed.repo" "${vendor}" \
+    || fail 'a file defining a repository Fedora does not ship would be removed'
+  ! vendor_repo_duplicate "${etc}/missing.repo" "${vendor}" \
+    || fail 'a missing file is reported as a duplicate'
+  # The managed files enable Fedora's definitions; none redefines them.
+  local override=${REPO_ROOT}/files/etc/dnf/repos.override.d
+  grep -qx '\[google-chrome\]' "${override}/80-google-chrome.repo" \
+    && grep -qx 'enabled=1' "${override}/80-google-chrome.repo" \
+    && grep -qxF 'baseurl=https://dl.google.com/linux/chrome/rpm/stable/$basearch' "${override}/80-google-chrome.repo" \
+    || fail '80-google-chrome.repo does not enable Chrome for every architecture'
+  grep -qx '\[rpmfusion-nonfree-steam\]' "${override}/80-rpmfusion-nonfree-steam.repo" \
+    && grep -qx 'enabled=1' "${override}/80-rpmfusion-nonfree-steam.repo" \
+    || fail '80-rpmfusion-nonfree-steam.repo does not enable the Steam repository'
+  [[ ! -e ${REPO_ROOT}/files/etc/yum.repos.d/google-chrome.repo \
+     && ! -e ${REPO_ROOT}/files/etc/yum.repos.d/rpmfusion-nonfree-steam.repo ]] \
+    || fail 'files/ still ships a duplicate Chrome or Steam repository definition'
+# shellcheck disable=SC2034  # consumed by the sourced select_profile
+  PROFILE=full ARCH=x86_64 IS_X86_64=1
+  select_profile
+  for entry in "${MANAGED_FILES[@]}"; do
+    [[ ${entry#*|} != /etc/yum.repos.d/google-chrome.repo \
+       && ${entry#*|} != /etc/yum.repos.d/rpmfusion-nonfree-steam.repo ]] \
+      || fail "managed file ${entry#*|} duplicates a Fedora repository"
+  done
+  [[ " ${MANAGED_FILES[*]} " == *'/etc/dnf/repos.override.d/80-rpmfusion-nonfree-steam.repo '* ]] \
+    || fail 'x86_64 full does not manage the Steam repository override'
+)
+
 test_argument_parsing
 printf 'PASS Fedora profile/mode argument parsing and core default\n'
 test_profile_selection
 test_game_packages_repo
 printf 'PASS Fedora game-packages repository: full (x86_64 + aarch64), pinned key, skipped off the LAN\n'
+test_vendor_repo_overrides
+printf "PASS Fedora enables Fedora's Chrome/Steam repositories by override, retiring duplicates\n"
 printf 'PASS Fedora core/full package, Flatpak, service and repo selection (x86_64 + aarch64)\n'
 test_managed_files_are_applied
 printf 'PASS Fedora managed-file list matches apply-time put_file calls\n'

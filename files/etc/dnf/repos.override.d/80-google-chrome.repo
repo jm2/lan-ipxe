@@ -1,0 +1,6 @@
+# Enables the google-chrome repository that Fedora ships disabled in
+# fedora-workstation-repositories (/usr/share/dnf5/repos.d/google-chrome.repo).
+# Google publishes one tree per architecture; Fedora's file names x86_64 only.
+[google-chrome]
+enabled=1
+baseurl=https://dl.google.com/linux/chrome/rpm/stable/$basearch
