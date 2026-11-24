@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Idempotent Windows 11 workstation setup with core, full and games profiles.
+Idempotent Windows 11 workstation setup with core, full, games and games-repo profiles.
 
 .DESCRIPTION
 Replaces the former comtrya manifest win11_workstation.yaml (comtrya is
@@ -19,7 +19,9 @@ game-packages GooGet repo publishes for this machine, one source per game
 (GOG, then Steam, then any other), leaving out the largest when the set would
 leave less than 20% of the Program Files drive free. Each game is a separate
 googet install whose cached .goo is cleared afterwards (googet remove
-downloads it again when needed).
+downloads it again when needed). Games-repo also stands alone and does only
+the games profile's setup steps: Go and Git if missing, GooGet, googet.conf
+and the game-packages repo. It installs no games and nothing from core or full.
 
 Safe to re-run: every step reconciles state first. Installed desired packages
 receive an exact-ID WinGet upgrade check unless they are explicitly exempted
@@ -95,9 +97,10 @@ Exit codes: 0 converged (or -DryRun), 1 error/failed install, 2 drift found by
 -Check.
 
 .PARAMETER WorkstationProfile
-core (default), full or games; also accepted as -Profile. Full adds games/launchers and media
-extras. Games runs on its own: GooGet (with the Go and Git it is built with) and every game in
-the LAN game-packages repo that fits.
+core (default), full, games or games-repo; also accepted as -Profile. Full adds games/launchers
+and media extras. Games runs on its own: GooGet (with the Go and Git it is built with) and every
+game in the LAN game-packages repo that fits. Games-repo runs on its own too: the same GooGet and
+repo setup, without installing any games.
 
 .PARAMETER Check
 Read-only state check: report CURRENT/DRIFT for OpenSSH, Hyper-V (with
@@ -131,12 +134,15 @@ powershell -ExecutionPolicy Bypass -File .\setup-win11-workstation.ps1 -Check -N
 
 .EXAMPLE
 powershell -ExecutionPolicy Bypass -File .\setup-win11-workstation.ps1 -Profile games
+
+.EXAMPLE
+powershell -ExecutionPolicy Bypass -File .\setup-win11-workstation.ps1 -Profile games-repo
 #>
 [CmdletBinding()]
 param(
     # Not named $Profile: that would shadow the automatic $PROFILE variable.
     [Alias('Profile')]
-    [ValidateSet('core', 'full', 'games')]
+    [ValidateSet('core', 'full', 'games', 'games-repo')]
     [string]$WorkstationProfile = 'core',
 
     [switch]$Check,
@@ -3060,8 +3066,7 @@ function Install-GameSet {
     return $failed
 }
 
-function Write-GameProfilePlan {
-    Write-Step 'Plan (offline; nothing is queried or changed)'
+function Write-GameRepoSetupPlan {
     Write-Note 'Standalone: nothing from the core or full profiles is installed or configured.'
     Write-Note "WinGet (only what GooGet's build needs, installed if missing): $($GamesBootstrapWingetPackages -join ', ')"
     if ($GooGetPatchedCommit) {
@@ -3072,6 +3077,17 @@ function Write-GameProfilePlan {
         Write-Note "GooGet: go install from the head of $GooGetGitHubRepo (skipped when present and -NoUpgrade)"
     }
     Write-Note "    into %ProgramData%\GooGet; googet.conf allowunsafeurl: true; repo $GooGetRepoName -> $GooGetRepoUrl"
+}
+
+function Write-GameRepoProfilePlan {
+    Write-Step 'Plan (offline; nothing is queried or changed)'
+    Write-GameRepoSetupPlan
+    Write-Note 'No games: install from the repo by hand with googet install <package>'
+}
+
+function Write-GameProfilePlan {
+    Write-Step 'Plan (offline; nothing is queried or changed)'
+    Write-GameRepoSetupPlan
     Write-Note "Games: every package in $GooGetRepoUrl for this machine except $GamesExcludePattern,"
     Write-Note '    one source per game (installed first, then GOG, Steam, other sources), dropping the largest until at'
     Write-Note "    least $GamesReservePercent% of the Program Files drive stays free (size: .goo download x $GamesSizeFactor);"
@@ -3079,12 +3095,19 @@ function Write-GameProfilePlan {
     Write-Note '    its cached .goo cleared afterwards; stops while enthoo is unreachable'
 }
 
-function Invoke-GameProfileCheck {
+# GooGet and its repo configuration, shared by the games and games-repo
+# checks. Returns the googet install, or $null.
+function Invoke-GameRepoCheck {
     Write-Step 'GooGet'
     $googet = Get-GooGetInstall
     Write-State ($null -ne $googet) 'googet.exe' $(if ($googet) { $googet.Version } else { 'not installed' })
     $drift = @(Get-GooGetConfigurationDrift)
     Write-State ($drift.Count -eq 0) "GooGet configuration ($GooGetRepoName repo)" $(if ($drift.Count) { 'missing ' + ($drift -join ', ') } else { '' })
+    return $googet
+}
+
+function Invoke-GameProfileCheck {
+    $googet = Invoke-GameRepoCheck
     Write-Step 'Games'
     if (-not $googet) { Write-Note 'NOTE    games: not queried; googet is not installed'; return }
     if (-not (Test-GooGetRepoReachable)) { Write-Note "NOTE    games: not queried; $GooGetRepoUrl is unreachable"; return }
@@ -3096,13 +3119,15 @@ function Invoke-GameProfileCheck {
     Write-GameSpace -Selection $selection
 }
 
-function Invoke-GameProfile {
+# The setup shared by the games and games-repo profiles: the WinGet tools
+# GooGet's build needs, then GooGet and its game-packages repo. Returns the
+# WinGet result and the googet install; throws when googet is unusable.
+function Invoke-GameRepoSetup {
     param([switch]$NoUpgrade)
-    $result = [pscustomobject]@{ Failed = @(); Installed = 0; Kept = 0; Skipped = 0; Bootstrap = $null }
-    # Presence-only: the games profile installs the GooGet build tools when
-    # missing and leaves installed ones at their version.
+    # Presence-only: install the GooGet build tools when missing and leave
+    # installed ones at their version.
     Write-Step "WinGet packages GooGet's build needs ($($GamesBootstrapWingetPackages -join ', '); installed if missing)"
-    $result.Bootstrap = Invoke-WingetPackageSet -InstalledIds (Get-WingetInventory) -DesiredIds $GamesBootstrapWingetPackages `
+    $bootstrap = Invoke-WingetPackageSet -InstalledIds (Get-WingetInventory) -DesiredIds $GamesBootstrapWingetPackages `
         -PresenceOnlyIds $GamesBootstrapWingetPackages -LegacyIds @() -HostIds @() -NoUpgrade:$NoUpgrade
     Write-Step 'GooGet (built from source) and the game-packages repo'
     $googetResult = Invoke-GooGetStep -NoUpgrade:$NoUpgrade
@@ -3112,6 +3137,15 @@ function Invoke-GameProfile {
     if ($googetResult -eq 'failed') { throw 'GooGet setup failed; not running googet (see the warning above)' }
     $googet = Get-GooGetInstall
     if (-not $googet) { throw "googet is not installed ($googetResult); re-run once Go and Git are installed" }
+    return [pscustomobject]@{ Bootstrap = $bootstrap; GooGet = $googet }
+}
+
+function Invoke-GameProfile {
+    param([switch]$NoUpgrade)
+    $result = [pscustomobject]@{ Failed = @(); Installed = 0; Kept = 0; Skipped = 0; Bootstrap = $null }
+    $setup = Invoke-GameRepoSetup -NoUpgrade:$NoUpgrade
+    $result.Bootstrap = $setup.Bootstrap
+    $googet = $setup.GooGet
     if (-not (Test-GooGetRepoReachable)) { throw "$GooGetRepoUrl is unreachable; the games profile installs only from the LAN game-packages repo" }
     Write-Step 'Selecting games'
     $selection = Get-GameSelection -GooGet $googet
@@ -3172,7 +3206,35 @@ if ($WorkstationProfile -eq 'full') {
 }
 Write-Step "Profile: $WorkstationProfile; mode: $mode"
 
-#--- games: a profile of its own --------------------------------------------
+#--- games and games-repo: profiles of their own ------------------------------
+if ($WorkstationProfile -eq 'games-repo') {
+    if ($DryRun) {
+        Write-GameRepoProfilePlan
+        exit 0
+    }
+    $script:DriftCount = 0
+    if ($Check) {
+        Invoke-GameRepoCheck | Out-Null
+        Write-Step 'Summary'
+        Write-Note "$script:DriftCount drifted item(s)"
+        if ($script:DriftCount) { exit 2 }
+        exit 0
+    }
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        throw 'winget not found. Install/update "App Installer" from the Microsoft Store, then re-run.'
+    }
+    $principal = New-Object Security.Principal.WindowsPrincipal ([Security.Principal.WindowsIdentity]::GetCurrent())
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw 'Apply requires an elevated PowerShell (Run as administrator). -Check and -DryRun do not.'
+    }
+    $repoSetup = Invoke-GameRepoSetup -NoUpgrade:$NoUpgrade
+    Write-Step 'Summary'
+    Write-Note "WinGet (GooGet build tools): $($repoSetup.Bootstrap.Installed.Count) installed now, $($repoSetup.Bootstrap.Failed.Count) failed"
+    Write-Note "GooGet $($repoSetup.GooGet.Version): $GooGetRepoName repo -> $GooGetRepoUrl; install from it with googet install <package>"
+    if (-not (Test-GooGetRepoReachable)) { Write-Note "$GooGetRepoUrl is unreachable right now; googet uses it once the LAN answers" }
+    if ($repoSetup.Bootstrap.Failed.Count) { exit 1 }
+    exit 0
+}
 if ($WorkstationProfile -eq 'games') {
     if ($DryRun) {
         Write-GameProfilePlan

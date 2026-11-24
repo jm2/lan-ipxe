@@ -184,7 +184,7 @@ XML
     || fail 'Fedora installed record'
 )
 
-# shellcheck disable=SC2034 # the GAMES_* arrays are read by the sourced install_games
+# shellcheck disable=SC2034,SC2154 # GAMES_* are read by the sourced install_games; ShellCheck cannot see GAMES_SIZE is associative
 test_batches() {
   local script
   for script in setup-arch-workstation.sh setup-fedora-workstation.sh; do
@@ -231,6 +231,43 @@ test_batches() {
   done
 }
 
+# games-repo apply: the repository setup only. Off the LAN it still succeeds,
+# and it never selects, installs or opens anything for games.
+# shellcheck disable=SC2034 # the sourced run_games_repo_apply reads these
+test_games_repo_apply() {
+  local script no_upgrade
+  for script in setup-arch-workstation.sh setup-fedora-workstation.sh; do
+    for no_upgrade in 0 1; do
+      (
+        set --
+        rpm() { [[ $1 == -E ]] && printf '45\n'; }
+        # shellcheck disable=SC1090
+        source <(sed '/^#--- Preflight/,$d' "${REPO_ROOT}/${script}")
+        local log=${TEST_ROOT}/games-repo.log
+        : >"${log}"
+        NO_UPGRADE=${no_upgrade} FEDORA_VERSION=45 ARCH=x86_64
+        log() { :; }
+        note() { :; }
+        sudo() { printf 'sudo %s\n' "$*" >>"${log}"; }
+        ensure_multilib() { printf 'multilib %s\n' "$1" >>"${log}"; }
+        ensure_game_packages_repo() { printf 'repo\n' >>"${log}"; GAME_PACKAGES_REACHABLE=0; }
+        command() { [[ $1 == -v ]] && return 0; builtin command "$@"; }
+        for fn in select_games install_games apply_games_firewall games_sudo_keepalive; do
+          eval "${fn}() { fail '${script}: games-repo ran ${fn}'; }"
+        done
+        run_games_repo_apply >/dev/null
+        case ${script}:${no_upgrade} in
+          setup-arch*:0) want='sudo -v|multilib 1|repo|sudo pacman -Syu --noconfirm|' ;;
+          setup-arch*:1) want='sudo -v|multilib 1|repo|' ;;
+          setup-fedora*) want='sudo -v|repo|' ;;
+        esac
+        [[ $(tr '\n' '|' <"${log}") == "${want}" ]] \
+          || fail "${script} (--no-upgrade=${no_upgrade}): games-repo steps (got: $(tr '\n' '|' <"${log}"))"
+      )
+    done
+  done
+}
+
 test_dry_runs() {
   local out script
   for script in setup-arch-workstation.sh setup-fedora-workstation.sh; do
@@ -239,14 +276,31 @@ test_dry_runs() {
     grep -q 'standalone; nothing from the core or full profiles' <<<"${out}" || fail "${script} games is standalone"
     grep -q 'GOG, Steam, other sources' <<<"${out}" || fail "${script} games dry run states the source order"
     grep -q '20% of the /opt filesystem' <<<"${out}" || fail "${script} games dry run states the reserve"
-    ! grep -Eqi 'rustup|antigravity|clamav|firewalld' <<<"${out}" || fail "${script} games dry run leaves the workstation alone"
-    bash "${REPO_ROOT}/${script}" --help | grep -Fq -- '--profile core|full|games' || fail "${script} --help documents games"
+    ! grep -Eqi 'rustup|antigravity|clamav|firewalld zone' <<<"${out}" || fail "${script} games dry run leaves the workstation alone"
+    bash "${REPO_ROOT}/${script}" --help | grep -Fq -- '--profile core|full|games|games-repo' \
+      || fail "${script} --help documents games and games-repo"
+
+    # games-repo: the same repository setup, and nothing else.
+    out=$(bash "${REPO_ROOT}/${script}" --profile games-repo --dry-run) || fail "${script} games-repo dry run failed"
+    grep -q '^Profile: games-repo; mode: dry-run' <<<"${out}" || fail "${script} games-repo dry run announces itself"
+    grep -q 'standalone; nothing from the core or full profiles' <<<"${out}" || fail "${script} games-repo is standalone"
+    grep -q 'game-packages repository: .*38C92DEA894BB3E48C50D6F0B48EFCBE62AAFAB2' <<<"${out}" \
+      || fail "${script} games-repo dry run sets up the pinned game-packages repository"
+    grep -q 'no games and no firewalld policy' <<<"${out}" || fail "${script} games-repo dry run installs no games"
+    ! grep -Eqi 'GOG, Steam|/opt filesystem|stop unless|rustup|antigravity|clamav' <<<"${out}" \
+      || fail "${script} games-repo dry run goes beyond the repository setup"
   done
+  out=$(bash "${REPO_ROOT}/setup-arch-workstation.sh" --profile games-repo --dry-run --no-upgrade)
+  grep -q 'no pacman -Syu (--no-upgrade)' <<<"${out}" || fail 'Arch games-repo --no-upgrade still syncs'
+  bash "${REPO_ROOT}/setup-fedora-workstation.sh" --profile bogus --dry-run >/dev/null 2>&1 \
+    && fail 'an unknown profile was accepted'
+  return 0
 }
 
 test_selector
 test_arch_records
 test_fedora_records
 test_batches
+test_games_repo_apply
 test_dry_runs
 printf 'games profile: PASS (awk: %s)\n' "$(awk -W version 2>/dev/null | head -n 1 || awk --version | head -n 1)"

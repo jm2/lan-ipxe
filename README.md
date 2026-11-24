@@ -208,6 +208,13 @@ them `-Profile`, `-Check`, `-DryRun`, `-NoUpgrade`):
   set twice; on Windows `googet remove` downloads a game again when it needs it. The profile stops when enthoo
   is unreachable. `--check` lists the games that would still install and why the
   others are skipped.
+- `--profile games-repo` (Arch, Fedora, Windows): also a profile of its own. It does
+  only the games profile's setup: the game-packages repository and its pinned key
+  (on Arch also `[multilib]` and a `pacman -Syu` so both sync, which `--no-upgrade`
+  skips; on Windows GooGet, with the Go and Git it is built from). It installs no
+  games and opens no firewall ports, so you can install individual packages
+  yourself (`dnf install`, `pacman -S`, `googet install`). Unlike games, it also
+  succeeds while enthoo is unreachable; the repository is used once the LAN answers.
 - `--dry-run` — offline, read-only plan for the selected profile (no sudo, network, or
   writes); exits 0.
 - `--check` — read-only state report (`CURRENT`/`DRIFT`); exits 0 when converged, 2 on

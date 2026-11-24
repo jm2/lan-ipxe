@@ -149,6 +149,20 @@ try {
     foreach ($id in @('Rustlang.Rustup', 'Valve.Steam', 'Google.Chrome', 'Hyper-V', 'OpenSSH')) {
         Assert-True ($text.IndexOf($id) -lt 0) "games dry run leaves out $id"
     }
+    $script:Calls = @()
+    $global:LASTEXITCODE = 99
+    $output = @(& $ScriptPath -Profile games-repo -DryRun 6>&1 | ForEach-Object { [string]$_ })
+    Assert-True ($LASTEXITCODE -eq 0) "games-repo dry run exits 0 (got $LASTEXITCODE)"
+    Assert-True ($script:Calls.Count -eq 0) "games-repo dry run made no system calls (got $($script:Calls -join ', '))"
+    $text = $output -join "`n"
+    Assert-True ($text -match 'Profile: games-repo; mode: dry-run') 'games-repo dry run announces profile and mode'
+    Assert-True ($text -match 'Standalone: nothing from the core or full profiles') 'games-repo dry run is standalone'
+    Assert-True ($text -match 'GoLang\.Go, Git\.Git') 'games-repo dry run installs what the GooGet build needs'
+    Assert-True ($text -match 'repo game-packages -> http://192\.168\.1\.11:8080/goo/game-packages') 'games-repo dry run lists the GooGet repo'
+    Assert-True ($text -match 'No games') 'games-repo dry run installs no games'
+    foreach ($id in @('GOG, Steam', 'Program Files drive', 'Rustlang.Rustup', 'Valve.Steam', 'Google.Chrome', 'Hyper-V', 'OpenSSH')) {
+        Assert-True ($text.IndexOf($id) -lt 0) "games-repo dry run leaves out $id"
+    }
 }
 finally {
     foreach ($name in $mockNames) { Remove-Item -Path "function:global:$name" -ErrorAction SilentlyContinue }

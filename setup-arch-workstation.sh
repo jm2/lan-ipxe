@@ -20,7 +20,10 @@
 # before Steam before other sources, and the largest are left out when the
 # set would leave less than 20% of the /opt filesystem free), and opens every
 # game's hosting/discovery ports to the LAN through the firewalld policy
-# workstation-lan-games once core/full has set up firewalld.
+# workstation-lan-games once core/full has set up firewalld. games-repo also
+# stands alone and does only the games profile's repository setup ([multilib],
+# the game-packages repository and its key, then pacman -Syu so both sync):
+# no games, no firewall policy, nothing from core or full.
 #
 # Modes: --dry-run prints the selected plan offline (no sudo, network, pacman
 # or writes; works on any host). --check reports CURRENT/DRIFT read-only, no
@@ -484,7 +487,7 @@ die()  { printf '\033[1;31m==> ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() {
   cat <<USAGE
-Usage: ${0##*/} [--profile core|full|games] [--check | --dry-run] [--no-upgrade]
+Usage: ${0##*/} [--profile core|full|games|games-repo] [--check | --dry-run] [--no-upgrade]
        [--wazuh-manager HOST]
        ${0##*/} -h|--help
 
@@ -500,6 +503,10 @@ safe to re-run at any time.
                    game-packages repository and every game it publishes
                    (GOG before Steam before other sources), leaving at
                    least ${GAMES_RESERVE_PERCENT}% of the ${GAMES_TARGET} filesystem free
+  --profile games-repo
+                   on its own: only the repository setup of the games profile
+                   ([multilib], game-packages, pacman -Syu); installs no games
+                   and nothing from core/full
   --dry-run        print the selected plan offline and exit 0; no sudo,
                    network, pacman or writes
   --check          report CURRENT/DRIFT read-only without sudo or network;
@@ -523,10 +530,10 @@ while (( $# )); do
   case $1 in
     -h|--help) usage; exit 0 ;;
     --profile)
-      (( $# >= 2 )) || { usage >&2; die "--profile requires core, full or games"; }
+      (( $# >= 2 )) || { usage >&2; die "--profile requires core, full, games or games-repo"; }
       case $2 in
-        core|full|games) PROFILE=$2 ;;
-        *) usage >&2; die "Invalid profile: $2 (expected core, full or games)" ;;
+        core|full|games|games-repo) PROFILE=$2 ;;
+        *) usage >&2; die "Invalid profile: $2 (expected core, full, games or games-repo)" ;;
       esac
       shift
       ;;
@@ -585,7 +592,8 @@ select_profile() {
   fi
 }
 # The games profile has no package lists of its own: select_games decides.
-[[ ${PROFILE} == games ]] || select_profile "${PROFILE}"
+# games-repo installs no packages at all.
+[[ ${PROFILE} == games || ${PROFILE} == games-repo ]] || select_profile "${PROFILE}"
 
 #--- Helpers ----------------------------------------------------------------
 # game_packages_key_fpr: the primary-key fingerprints in the vendored crossdock
@@ -810,12 +818,24 @@ games_space_summary() {
 
 # print_games_plan: the offline --dry-run plan of the games profile. The game
 # list depends on the repository and the disk, so it is decided at apply time.
-print_games_plan() {
-  printf 'Profile: games; mode: dry-run (offline, nothing is changed)\n'
+print_games_repo_plan_lines() {
   printf 'PLAN: standalone; nothing from the core or full profiles is installed or configured\n'
   printf 'PLAN: enable [multilib] in /etc/pacman.conf if disabled (backup /etc/pacman.conf.pre-workstation)\n'
   printf 'PLAN: game-packages repository: trust key %s (pacman-key --add/--lsign-key), install %s and its NetworkManager dispatcher hook, append "%s" to /etc/pacman.conf\n' \
     "${GAME_PACKAGES_KEY_FPR}" "${GAME_PACKAGES_TOGGLE}" "${GAME_PACKAGES_INCLUDE}"
+}
+
+# print_games_repo_plan: the offline --dry-run plan of the games-repo profile.
+print_games_repo_plan() {
+  printf 'Profile: games-repo; mode: dry-run (offline, nothing is changed)\n'
+  print_games_repo_plan_lines
+  printf 'PLAN: %s\n' "$( (( NO_UPGRADE )) && echo 'no pacman -Syu (--no-upgrade): the new repositories sync on the next pacman -Syu' || echo 'pacman -Syu (syncs the new repositories; Arch does not support -Sy alone)')"
+  printf 'PLAN: no games and no firewalld policy (the games profile installs and opens those)\n'
+}
+
+print_games_plan() {
+  printf 'Profile: games; mode: dry-run (offline, nothing is changed)\n'
+  print_games_repo_plan_lines
   printf 'PLAN: stop unless http://192.168.1.11:8080 answers (the games come only from the LAN repository)\n'
   printf 'PLAN: %s\n' "$( (( NO_UPGRADE )) && echo 'no pacman -Syu (--no-upgrade): install against the existing sync databases' || echo 'pacman -Syu')"
   printf 'PLAN: every game game-packages publishes except tools, servers, libraries and runtimes (%s),\n' "${GAMES_EXCLUDE}"
@@ -829,16 +849,15 @@ print_games_plan() {
 
 # run_games_check: read-only state of the games profile against the existing
 # sync database (no sudo or network). Exit 0 converged, 2 drift.
-run_games_check() {
-  local sync_db name repo_list
-  CHECK_DRIFT=0
-  CHECK_CURRENT=0
-  printf 'Profile: games; mode: check (read-only)\n'
+# check_games_repo: --check of the repository setup shared by games and
+# games-repo.
+check_games_repo() {
+  local repo_list
   repo_list=$(pacman-conf --repo-list 2>/dev/null) || die "could not read /etc/pacman.conf"
   if grep -qx multilib <<<"${repo_list}"; then
     report CURRENT "[multilib]: enabled"
   else
-    report DRIFT "[multilib]: disabled (required by the games profile)"
+    report DRIFT "[multilib]: disabled (required by the ${PROFILE} profile)"
   fi
   if game_packages_key_trusted; then
     report CURRENT "game-packages signing key: trusted in pacman's keyring"
@@ -850,8 +869,38 @@ run_games_check() {
   else
     report DRIFT "/etc/pacman.conf: missing '${GAME_PACKAGES_INCLUDE}'"
   fi
-  sync_db=$(pacman-conf DBPath 2>/dev/null) || sync_db=/var/lib/pacman/
-  sync_db=${sync_db%/}/sync/game-packages.db
+}
+
+# game_packages_sync_db: path of pacman's game-packages sync database.
+game_packages_sync_db() {
+  local db
+  db=$(pacman-conf DBPath 2>/dev/null) || db=/var/lib/pacman/
+  printf '%s\n' "${db%/}/sync/game-packages.db"
+}
+
+# run_games_repo_check: read-only state of the games-repo profile. Exit 0
+# converged, 2 drift.
+run_games_repo_check() {
+  CHECK_DRIFT=0
+  CHECK_CURRENT=0
+  printf 'Profile: games-repo; mode: check (read-only)\n'
+  check_games_repo
+  if [[ -s $(game_packages_sync_db) ]]; then
+    report CURRENT "game-packages sync database: present"
+  else
+    report NOTE "game-packages sync database: not synced yet (pacman -Syu on the LAN)"
+  fi
+  printf '\nSummary: %d current, %d drift\n' "${CHECK_CURRENT}" "${CHECK_DRIFT}"
+  (( CHECK_DRIFT == 0 )) || return 2
+}
+
+run_games_check() {
+  local sync_db name
+  CHECK_DRIFT=0
+  CHECK_CURRENT=0
+  printf 'Profile: games; mode: check (read-only)\n'
+  check_games_repo
+  sync_db=$(game_packages_sync_db)
   if [[ ! -s ${sync_db} ]]; then
     report DRIFT "game-packages sync database: missing (apply syncs it on the LAN)"
   else
@@ -978,6 +1027,25 @@ games_repo_reachable() {
 # is emptied after each transaction, so neither / nor the space check has to
 # hold the downloads. The games install from game-packages in batches
 # (install_games); the run stops if crossdock drops off the network.
+# run_games_repo_apply: the games-repo profile: [multilib] and game-packages,
+# then pacman -Syu (unless --no-upgrade) so pacman can install from both. Off
+# the LAN it still succeeds; the NetworkManager hook enables game-packages
+# once crossdock answers.
+run_games_repo_apply() {
+  log "Profile: games-repo$( (( NO_UPGRADE )) && printf ' (--no-upgrade)' )"
+  log "Authenticating sudo"
+  sudo -v || die "sudo authentication failed"
+  ensure_multilib 1
+  ensure_game_packages_repo
+  if (( NO_UPGRADE )); then
+    note "--no-upgrade: not syncing; the new repositories sync on the next pacman -Syu"
+  else
+    log "Syncing databases and applying updates (pacman -Syu)"
+    sudo pacman -Syu --noconfirm
+  fi
+  log "Done: game-packages is configured; install from it with: sudo pacman -S <package>"
+}
+
 run_games_apply() {
   local sync_db name
   log "Profile: games$( (( NO_UPGRADE )) && printf ' (--no-upgrade)' )"
@@ -1006,8 +1074,7 @@ run_games_apply() {
     sudo pacman -Syu --noconfirm --cachedir "${GAMES_CACHE}"
     sudo find "${GAMES_CACHE}" -mindepth 1 -delete
   fi
-  sync_db=$(pacman-conf DBPath 2>/dev/null) || sync_db=/var/lib/pacman/
-  sync_db=${sync_db%/}/sync/game-packages.db
+  sync_db=$(game_packages_sync_db)
   [[ -s ${sync_db} ]] || die "the game-packages sync database is missing after syncing"
 
   log "Selecting games"
@@ -2649,7 +2716,11 @@ print_plan() {
 
 #--- Preflight --------------------------------------------------------------
 if [[ ${MODE} == dry-run ]]; then
-  if [[ ${PROFILE} == games ]]; then print_games_plan; else print_plan; fi
+  case ${PROFILE} in
+    games) print_games_plan ;;
+    games-repo) print_games_repo_plan ;;
+    *) print_plan ;;
+  esac
   exit 0
 fi
 
@@ -2661,6 +2732,18 @@ command -v pacman-conf >/dev/null || die "pacman-conf is required."
 command -v cmp >/dev/null || die "cmp (diffutils) is required."
 pacman -Q pacman &>/dev/null || die "the local pacman database is not readable."
 [[ -f /etc/pacman.conf ]] || die "/etc/pacman.conf is missing."
+if [[ ${PROFILE} == games-repo ]]; then
+  WORK_DIR=$(mktemp -d)
+  cleanup() { rm -rf "${WORK_DIR}"; }
+  trap cleanup EXIT
+  if [[ ${MODE} == check ]]; then
+    run_games_repo_check
+    exit 0
+  fi
+  command -v sudo >/dev/null || die "sudo is required."
+  run_games_repo_apply
+  exit 0
+fi
 if [[ ${PROFILE} == games ]]; then
   [[ -r ${SELECT_GAMES_AWK} ]] || die "Game selector not found: ${SELECT_GAMES_AWK}"
   command -v bsdtar >/dev/null || die "bsdtar (libarchive) is required."

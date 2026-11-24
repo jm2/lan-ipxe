@@ -22,6 +22,10 @@
 #         firewalld policy workstation-lan-games opening every game's
 #         hosting/discovery ports to the LAN once core/full has set up
 #         firewalld
+#   games-repo  on its own as well: only the games profile's repository
+#         setup (the game-packages repo, its pinned key and metadata key),
+#         so packages can be installed from it by hand; no games, no
+#         firewall policy, nothing from core or full
 # Modes: --dry-run prints the plan offline (no sudo, network, or writes);
 # --check reports CURRENT/DRIFT read-only and exits 2 on drift;
 # --no-upgrade installs only what is missing and keeps installed versions.
@@ -518,7 +522,7 @@ die()  { printf '\033[1;31m==> ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() {
   cat <<USAGE
-Usage: ${0##*/} [--profile core|full|games] [--check | --dry-run] [--no-upgrade]
+Usage: ${0##*/} [--profile core|full|games|games-repo] [--check | --dry-run] [--no-upgrade]
        [--wazuh-manager HOST]
        ${0##*/} -h|--help
 
@@ -533,6 +537,9 @@ privileged steps); safe to re-run at any time.
                   game-packages repo and every game it publishes for this
                   architecture (GOG before Steam before other sources),
                   leaving at least ${GAMES_RESERVE_PERCENT}% of the ${GAMES_TARGET} filesystem free
+  --profile games-repo
+                  on its own: only the game-packages repo setup of the games
+                  profile; installs no games and nothing from core/full
   --check         read-only state report; no sudo or network
   --dry-run       offline plan for the selected profile; no sudo, network,
                   or writes
@@ -556,9 +563,9 @@ while (( $# )); do
   case $1 in
     -h|--help) usage; exit 0 ;;
     --profile)
-      (( $# >= 2 )) || { usage >&2; die "--profile requires core, full or games"; }
+      (( $# >= 2 )) || { usage >&2; die "--profile requires core, full, games or games-repo"; }
       case $2 in
-        core|full|games) PROFILE=$2 ;;
+        core|full|games|games-repo) PROFILE=$2 ;;
         *) usage >&2; die "Invalid profile: $2" ;;
       esac
       shift ;;
@@ -2291,11 +2298,14 @@ games_space_summary() {
 
 # print_games_plan: the offline --dry-run plan of the games profile. The game
 # list depends on the repository and the disk, so it is decided at apply time.
-print_games_plan() {
-  printf 'Profile: games; mode: dry-run (offline; no sudo, network, or writes)\n'
+print_games_repo_plan_lines() {
   printf 'PLAN: standalone; nothing from the core or full profiles is installed or configured\n'
   printf 'PLAN: game-packages repository: pinned key %s, %s; import its metadata key\n' \
     "${GAME_PACKAGES_KEY_FINGERPRINT}" /etc/yum.repos.d/game-packages.repo
+}
+print_games_plan() {
+  printf 'Profile: games; mode: dry-run (offline; no sudo, network, or writes)\n'
+  print_games_repo_plan_lines
   printf 'PLAN: stop unless http://192.168.1.11:8080 answers (the games come only from the LAN repository)\n'
   printf 'PLAN: %s\n' "$( (( NO_UPGRADE )) && echo 'installed games kept at their versions (--no-upgrade)' || echo 'dnf upgrade --from-repo game-packages <installed games> (the rest of the system is left alone)')"
   printf 'PLAN: every game game-packages publishes for %s except tools, servers, libraries and runtimes (%s),\n' "${ARCH}" "${GAMES_EXCLUDE}"
@@ -2308,18 +2318,56 @@ print_games_plan() {
   printf '  %s\n' "$(game_firewall_services | paste -sd ' ')"
 }
 
-# run_games_check: read-only state of the games profile against dnf's cached
-# metadata (no sudo or network). Exit 0 converged, 2 drift.
-run_games_check() {
-  local name
-  CHECK_DRIFT=0
-  printf 'Profile: games; mode: check (read-only)\n'
+# print_games_repo_plan: the offline --dry-run plan of the games-repo profile.
+print_games_repo_plan() {
+  printf 'Profile: games-repo; mode: dry-run (offline; no sudo, network, or writes)\n'
+  print_games_repo_plan_lines
+  printf 'PLAN: refresh the game-packages metadata when http://192.168.1.11:8080 answers (off the LAN, dnf skips the repo)\n'
+  printf 'PLAN: no games and no firewalld policy (the games profile installs and opens those)\n'
+}
+
+# check_games_repo: --check of the repository setup shared by games and
+# games-repo.
+check_games_repo() {
   if [[ -f /etc/yum.repos.d/game-packages.repo && ! -L /etc/yum.repos.d/game-packages.repo ]] \
      && [[ $(<"${FILES}/etc/yum.repos.d/game-packages.repo") == "$(</etc/yum.repos.d/game-packages.repo)" ]]; then
     check_report CURRENT "/etc/yum.repos.d/game-packages.repo"
   else
     check_report DRIFT "/etc/yum.repos.d/game-packages.repo: missing or differs from files/"
   fi
+  if [[ -f ${GAME_PACKAGES_KEY_FILE} && ! -L ${GAME_PACKAGES_KEY_FILE} ]] \
+     && cmp -s -- "${FILES}/keys/game-packages.asc" "${GAME_PACKAGES_KEY_FILE}"; then
+    check_report CURRENT "${GAME_PACKAGES_KEY_FILE}"
+  else
+    check_report DRIFT "${GAME_PACKAGES_KEY_FILE}: missing or differs from files/keys/game-packages.asc"
+  fi
+}
+
+# run_games_repo_check: read-only state of the games-repo profile. Exit 0
+# converged, 2 drift.
+run_games_repo_check() {
+  CHECK_DRIFT=0
+  printf 'Profile: games-repo; mode: check (read-only)\n'
+  check_games_repo
+  if game_packages_primary_xml >/dev/null; then
+    check_report CURRENT "game-packages metadata: cached"
+  else
+    check_report NOTE "game-packages metadata: not cached yet (fetched on the LAN)"
+  fi
+  if (( CHECK_DRIFT )); then
+    printf 'Result: drift found\n'
+    return 2
+  fi
+  printf 'Result: converged\n'
+}
+
+# run_games_check: read-only state of the games profile against dnf's cached
+# metadata (no sudo or network). Exit 0 converged, 2 drift.
+run_games_check() {
+  local name
+  CHECK_DRIFT=0
+  printf 'Profile: games; mode: check (read-only)\n'
+  check_games_repo
   if ! game_packages_primary_xml >/dev/null; then
     check_report DRIFT "game-packages metadata: not cached (apply fetches it on the LAN)"
   else
@@ -2518,12 +2566,9 @@ games_clear_downloads() {
 # downloads are cleared after every attempt, so neither / nor the space check
 # has to hold the whole set twice. The run stops if crossdock drops off the
 # network.
-run_games_apply() {
-  local name
-  log "Fedora ${FEDORA_VERSION} on ${ARCH} (profile: games$( (( NO_UPGRADE )) && echo '; --no-upgrade'))"
-  log "Authenticating sudo"
-  sudo -v || die "sudo authentication failed"
-  games_sudo_keepalive
+# setup_games_repo: the repository setup shared by games and games-repo:
+# the tools ensure_game_packages_repo needs, then the repository itself.
+setup_games_repo() {
   local prereqs=()
   command -v gpg >/dev/null || prereqs+=(gnupg2)
   command -v curl >/dev/null || prereqs+=(curl-minimal)
@@ -2533,6 +2578,26 @@ run_games_apply() {
   fi
   log "game-packages repository (LAN)"
   ensure_game_packages_repo
+}
+
+# run_games_repo_apply: the games-repo profile. Sets up the repository only;
+# off the LAN it still succeeds, and dnf picks the repository up once
+# crossdock answers.
+run_games_repo_apply() {
+  log "Fedora ${FEDORA_VERSION} on ${ARCH} (profile: games-repo)"
+  log "Authenticating sudo"
+  sudo -v || die "sudo authentication failed"
+  setup_games_repo
+  log "Done: game-packages is configured; install from it with: sudo dnf install <package>"
+}
+
+run_games_apply() {
+  local name
+  log "Fedora ${FEDORA_VERSION} on ${ARCH} (profile: games$( (( NO_UPGRADE )) && echo '; --no-upgrade'))"
+  log "Authenticating sudo"
+  sudo -v || die "sudo authentication failed"
+  games_sudo_keepalive
+  setup_games_repo
   (( GAME_PACKAGES_REACHABLE )) \
     || die "crossdock (http://192.168.1.11:8080) is unreachable; the games profile installs only from the LAN game-packages repository"
 
@@ -3064,20 +3129,24 @@ check_state() {
   printf 'Result: converged\n'
 }
 
-if [[ ${PROFILE} == games ]]; then
+if [[ ${PROFILE} == games || ${PROFILE} == games-repo ]]; then
   if [[ ${MODE} == dry-run ]]; then
-    print_games_plan
+    if [[ ${PROFILE} == games ]]; then print_games_plan; else print_games_repo_plan; fi
     exit 0
   fi
   [[ ${EUID} -ne 0 ]] || die "Run as your normal user, not root (sudo is used where needed)."
   [[ -f /etc/fedora-release ]] || die "This script is for Fedora."
   [[ -d ${FILES} ]] || die "Payload directory not found: ${FILES}"
-  [[ -r ${SELECT_GAMES_AWK} ]] || die "Game selector not found: ${SELECT_GAMES_AWK}"
+  [[ ${PROFILE} == games-repo || -r ${SELECT_GAMES_AWK} ]] || die "Game selector not found: ${SELECT_GAMES_AWK}"
   command -v dnf >/dev/null || die "dnf is required."
   command -v rpm >/dev/null || die "rpm is required."
   if [[ ${MODE} == check ]]; then
     check_status=0
-    run_games_check || check_status=$?
+    if [[ ${PROFILE} == games ]]; then
+      run_games_check || check_status=$?
+    else
+      run_games_repo_check || check_status=$?
+    fi
     exit "${check_status}"
   fi
   command -v sudo >/dev/null || die "sudo is required."
@@ -3090,7 +3159,7 @@ if [[ ${PROFILE} == games ]]; then
     rm -rf "${WORK_DIR}"
   }
   trap cleanup EXIT
-  run_games_apply
+  if [[ ${PROFILE} == games ]]; then run_games_apply; else run_games_repo_apply; fi
   exit 0
 fi
 
