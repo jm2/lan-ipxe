@@ -415,7 +415,7 @@ test_security_renders() (
     || fail 'core LAN zone omits mdns'
   ! grep -Fq '<service name="steam-streaming"/>' <<<"${out_core}" \
     || fail 'core LAN zone opens Steam streaming'
-  grep -Fq '<source address="192.168.1.0/24"/>' <<<"${out_core}" \
+  grep -Fq '<source address="192.168.0.0/23"/>' <<<"${out_core}" \
     || fail 'LAN zone omits the LAN source'
   grep -Fq '<source address="192.168.2.0/23"/>' <<<"${out_core}" \
     || fail 'LAN zone omits the SD-WAN source'
@@ -423,6 +423,34 @@ test_security_renders() (
   out_full=$(render_lan_zone "${FIREWALL_LAN_SERVICES[@]}")
   grep -Fq '<service name="steam-streaming"/>' <<<"${out_full}" \
     || fail 'full LAN zone omits Steam streaming'
+  # Cro-Mag Rally is the networked game full installs; core installs none.
+  grep -Fq '<service name="game-cro-mag-rally"/>' <<<"${out_full}" \
+    || fail 'full LAN zone omits Cro-Mag Rally'
+  ! grep -Fq '<service name="game-' <<<"${out_core}" \
+    || fail 'core LAN zone opens a game service'
+  # The games profile's policy lists every game service definition.
+  FILES=${REPO_ROOT}/files
+  local -a services
+  local policy service
+  mapfile -t services < <(game_firewall_services)
+  (( ${#services[@]} > 1 )) || fail 'no game firewalld service definitions found'
+  array_contains game-cro-mag-rally "${services[@]}" \
+    || fail 'game service list omits Cro-Mag Rally'
+  for service in "${FIREWALL_LAN_SERVICES[@]}"; do
+    [[ ${service} != game-* ]] || array_contains "${service}" "${services[@]}" \
+      || fail "full LAN zone names ${service}, which has no definition"
+  done
+  policy=$(render_games_policy "${services[@]}")
+  [[ ${policy} == "$(render_games_policy "${services[@]}")" ]] \
+    || fail 'render_games_policy is not deterministic'
+  grep -Fq '<ingress-zone name="workstation-lan"/>' <<<"${policy}" \
+    || fail 'games policy is not bound to the workstation-lan sources'
+  grep -Fq '<egress-zone name="HOST"/>' <<<"${policy}" \
+    || fail 'games policy does not target this host'
+  for service in "${services[@]}"; do
+    grep -Fq "<service name=\"${service}\"/>" <<<"${policy}" \
+      || fail "games policy omits ${service}"
+  done
 )
 
 test_clamav_db_bootstrap() (

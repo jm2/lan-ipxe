@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>FlatOut 2 LAN</short>
+  <description>FlatOut 2 game port UDP 23756 and LAN broadcast port UDP 23757.</description>
+  <port protocol="udp" port="23756-23757"/>
+</service>

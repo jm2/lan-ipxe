@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Dungeon Defenders LAN</short>
+  <description>Dungeon Defenders (Unreal Engine 3): game port UDP 7777 and LAN announce UDP 14001 (engine defaults). The source port lets LAN announce replies back in.</description>
+  <port protocol="udp" port="7777"/>
+  <port protocol="udp" port="14001"/>
+  <source-port protocol="udp" port="14001"/>
+</service>

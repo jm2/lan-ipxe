@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Cro-Mag Rally (LAN)</short>
+  <description>jm2's LAN-multiplayer Cro-Mag Rally: host lobby and in-race traffic plus LAN discovery broadcasts, TCP and UDP 49959 (the game's --port option changes it on every peer).</description>
+  <port protocol="tcp" port="49959"/>
+  <port protocol="udp" port="49959"/>
+</service>

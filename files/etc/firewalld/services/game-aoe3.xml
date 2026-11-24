@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Age of Empires III (2005) LAN</short>
+  <description>Original Age of Empires III LAN games: TCP and UDP 2300-2310 (upstream default; the installed files only confirm 2300).</description>
+  <port protocol="tcp" port="2300-2310"/>
+  <port protocol="udp" port="2300-2310"/>
+</service>

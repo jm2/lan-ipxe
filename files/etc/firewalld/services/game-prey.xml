@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Prey (2006) LAN</short>
+  <description>Prey net_port UDP 27719 and the next ports it binds to when that one is taken. The source port lets LAN-search replies back in.</description>
+  <port protocol="udp" port="27719-27726"/>
+  <source-port protocol="udp" port="27719"/>
+</service>

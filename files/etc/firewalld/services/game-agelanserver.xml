@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>ageLANServer (AoE DE LAN)</short>
+  <description>ageLANServer for Age of Empires II/III: Definitive Edition and Age of Mythology: Retold: HTTPS API (TCP 443) and LAN announcements (UDP 31978, multicast 239.31.97.8; clients receive them too). The Battle Server picks random ports unless they are pinned in its config; pinned ports need adding here. TCP 443 is also LanCache's HTTPS port, so ageLANServer and LanCache cannot run on the same host.</description>
+  <port protocol="tcp" port="443"/>
+  <port protocol="udp" port="31978"/>
+</service>

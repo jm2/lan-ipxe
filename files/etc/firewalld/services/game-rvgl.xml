@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Re-Volt (RVGL) LAN</short>
+  <description>RVGL multiplayer and LAN search on UDP 2310. The source port lets LAN-search replies back in (clients search from a random port unless LocalPort is set).</description>
+  <port protocol="udp" port="2310"/>
+  <source-port protocol="udp" port="2310"/>
+</service>

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Knockout City server</short>
+  <description>Knockout City Private Server Edition: backend TCP 23600, game servers UDP 23600-23699 and LAN announcements UDP 23599 (the same ports as the knockoutcity service knockoutcity-server ships, under a name this repository owns, so the games policy never names a service that is not installed).</description>
+  <port protocol="tcp" port="23600"/>
+  <port protocol="udp" port="23600-23699"/>
+  <port protocol="udp" port="23599"/>
+</service>

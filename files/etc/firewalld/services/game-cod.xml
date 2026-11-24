@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Call of Duty (IW engine) LAN</short>
+  <description>Call of Duty 4 (and KisakCOD), World at War and Modern Warfare 2 (IW4x): net_port UDP 28960, with the range LAN search and extra local instances use.</description>
+  <port protocol="udp" port="28960-28969"/>
+</service>

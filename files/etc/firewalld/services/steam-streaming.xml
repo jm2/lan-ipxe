@@ -2,7 +2,9 @@
 <service>
   <short>Steam in-home streaming</short>
   <description>Steam client LAN/in-home streaming and Remote Play (per Valve's
-in-home streaming documentation).</description>
+in-home streaming documentation), plus local network game transfers
+between this host's peers (TCP 27040; discovery shares UDP 27036).</description>
   <port protocol="tcp" port="27036-27037"/>
+  <port protocol="tcp" port="27040"/>
   <port protocol="udp" port="27031-27036"/>
 </service>

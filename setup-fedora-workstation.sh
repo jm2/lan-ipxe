@@ -18,7 +18,10 @@
 #         the LAN game-packages repo and every game it publishes for this
 #         architecture (see lib/select-games.awk: GOG builds before Steam
 #         before other sources, and the largest are left out when the set
-#         would leave less than 20% of the /opt filesystem free)
+#         would leave less than 20% of the /opt filesystem free), plus the
+#         firewalld policy workstation-lan-games opening every game's
+#         hosting/discovery ports to the LAN once core/full has set up
+#         firewalld
 # Modes: --dry-run prints the plan offline (no sudo, network, or writes);
 # --check reports CURRENT/DRIFT read-only and exits 2 on drift;
 # --no-upgrade installs only what is missing and keeps installed versions.
@@ -76,8 +79,10 @@
 #  11. firewalld: a custom workstation default zone (SSH and Plex Remote
 #      Access on 32400/tcp broadly reachable because WAN port forwarding is in
 #      use; everything else rejected) plus a
-#      source-bound workstation-lan zone for the LAN 192.168.1.0/24 and the
-#      SD-WAN 192.168.2.0/23 with the profile's LAN services
+#      source-bound workstation-lan zone for the LAN 192.168.0.0/23 and the
+#      SD-WAN 192.168.2.0/23 with the profile's LAN services (full adds
+#      Cro-Mag Rally's; the games profile opens every game's through its
+#      own workstation-lan-games policy)
 #  12. auditd with curated high-signal rules (identity/auth files, sudoers,
 #      sshd config, unit/cron/shell-rc persistence, module loads, time
 #      changes, mounts, auditd itself; no per-execve logging)
@@ -683,13 +688,74 @@ render_lan_zone() {
   printf '<?xml version="1.0" encoding="utf-8"?>\n'
   printf '<zone>\n'
   printf '  <short>Workstation LAN</short>\n'
-  printf '  <description>Trusted LAN (192.168.1.0/24) and SD-WAN (192.168.2.0/23) sources: services that must never be reachable from the Internet. firewalld classifies each packet into exactly one zone, so SSH is listed here too: LAN peers never fall through to the default workstation zone, which keeps SSH reachable for WAN port forwarding.</description>\n'
-  printf '  <source address="192.168.1.0/24"/>\n'
+  printf '  <description>Trusted LAN (192.168.0.0/23) and SD-WAN (192.168.2.0/23) sources: services that must never be reachable from the Internet. firewalld classifies each packet into exactly one zone, so SSH is listed here too: LAN peers never fall through to the default workstation zone, which keeps SSH reachable for WAN port forwarding.</description>\n'
+  printf '  <source address="192.168.0.0/23"/>\n'
   printf '  <source address="192.168.2.0/23"/>\n'
   for service in "$@"; do
     printf '  <service name="%s"/>\n' "${service}"
   done
   printf '</zone>\n'
+}
+
+# Networked games get one firewalld service each under
+# files/etc/firewalld/services/game-*.xml (the file name is the service name).
+# full adds the one it installs (Cro-Mag Rally) to the zone above; the
+# standalone games profile opens all of them through render_games_policy.
+GAMES_FIREWALL_POLICY=workstation-lan-games
+
+# game_firewall_services: the game service names, sorted in the C locale so
+# every rendering that lists them is deterministic.
+game_firewall_services() {
+  local file
+  for file in "${FILES}"/etc/firewalld/services/game-*.xml; do
+    [[ -e ${file} ]] || continue
+    file=${file##*/}
+    printf '%s\n' "${file%.xml}"
+  done | LC_ALL=C sort
+}
+
+# render_games_policy <service>...: the games profile's firewalld policy,
+# opening the game services to LAN peers (traffic the workstation-lan zone
+# classifies, addressed to this host). A policy rather than more services in
+# that zone: core/full render the zone file whole and would drop anything the
+# games profile added, while a separate file leaves each profile owning, and
+# --check comparing, only its own.
+render_games_policy() {
+  local service
+  printf '<?xml version="1.0" encoding="utf-8"?>\n'
+  printf '<policy target="CONTINUE">\n'
+  printf '  <short>Workstation LAN games</short>\n'
+  printf '  <description>Game hosting and LAN discovery ports, opened to the workstation-lan sources only. Installed by the games profile beside the zone that core/full render.</description>\n'
+  printf '  <ingress-zone name="workstation-lan"/>\n'
+  printf '  <egress-zone name="HOST"/>\n'
+  for service in "$@"; do
+    printf '  <service name="%s"/>\n' "${service}"
+  done
+  printf '</policy>\n'
+}
+
+# install_game_firewall_services: put every game service definition in
+# /etc/firewalld/services; sets FIREWALL_CHANGED when one was written.
+install_game_firewall_services() {
+  local service
+  while read -r service; do
+    put_file -s "${FILES}/etc/firewalld/services/${service}.xml" \
+      "/etc/firewalld/services/${service}.xml"
+    if (( PUT_FILE_CHANGED )); then FIREWALL_CHANGED=1; fi
+  done < <(game_firewall_services)
+}
+
+# check_game_firewall_services: --check mirror of install_game_firewall_services.
+check_game_firewall_services() {
+  local service
+  while read -r service; do
+    if cmp -s "${FILES}/etc/firewalld/services/${service}.xml" \
+        "/etc/firewalld/services/${service}.xml"; then
+      check_report CURRENT "file /etc/firewalld/services/${service}.xml"
+    else
+      check_report DRIFT "file /etc/firewalld/services/${service}.xml"
+    fi
+  done < <(game_firewall_services)
 }
 
 # render_wazuh_config <stock-ossec.conf> <manager>: the agent configuration
@@ -2185,6 +2251,9 @@ print_games_plan() {
   printf '      until at least %s%% of the %s filesystem stays free; installed in transactions of up to\n' "${GAMES_RESERVE_PERCENT}" "${GAMES_TARGET}"
   printf '      %s GiB (a larger game alone) without weak dependencies, through a dnf cache on that filesystem\n' "$(( GAMES_BATCH_BYTES / 1024 / 1024 / 1024 ))"
   printf '      (packages are not kept)\n'
+  printf 'PLAN: firewalld policy %s opening the game services to the workstation-lan sources\n' "${GAMES_FIREWALL_POLICY}"
+  printf '      (skipped until core/full has set up that zone):\n'
+  printf '  %s\n' "$(game_firewall_services | paste -sd ' ')"
 }
 
 # run_games_check: read-only state of the games profile against dnf's cached
@@ -2208,11 +2277,70 @@ run_games_check() {
     for name in "${GAMES_SKIP[@]}"; do check_report NOTE "game ${name%% *}: skipped, ${name#* }"; done
     check_report NOTE "space: $(games_space_summary)"
   fi
+  check_games_firewall
   if (( CHECK_DRIFT )); then
     printf 'Result: drift found\n'
     return 2
   fi
   printf 'Result: converged\n'
+}
+
+# games_firewall_ready: firewalld runs and core/full has created the
+# workstation-lan zone the games policy attaches to (a policy naming a
+# missing zone would stop firewalld from loading its configuration).
+games_firewall_ready() {
+  command -v firewall-cmd >/dev/null \
+    && systemctl is-active --quiet firewalld.service \
+    && firewall-cmd --get-zones 2>/dev/null | grep -qw workstation-lan
+}
+
+# check_games_firewall: --check mirror of apply_games_firewall.
+check_games_firewall() {
+  local -a services
+  if ! games_firewall_ready; then
+    check_report NOTE "firewall: no running firewalld with a workstation-lan zone (core/full sets it up); game ports not managed"
+    return 0
+  fi
+  check_game_firewall_services
+  mapfile -t services < <(game_firewall_services)
+  if cmp -s <(render_games_policy "${services[@]}") \
+      "/etc/firewalld/policies/${GAMES_FIREWALL_POLICY}.xml"; then
+    check_report CURRENT "file /etc/firewalld/policies/${GAMES_FIREWALL_POLICY}.xml (rendered)"
+  else
+    check_report DRIFT "file /etc/firewalld/policies/${GAMES_FIREWALL_POLICY}.xml (rendered)"
+  fi
+}
+
+# apply_games_firewall: install the game service definitions and the policy
+# opening them to LAN peers, reload firewalld when either changed, then verify
+# the running policy. Skipped (with a warning) before core/full has set up
+# firewalld, so a games-only host never gets a policy for a missing zone.
+apply_games_firewall() {
+  local -a services
+  local running
+  log "Firewall (policy ${GAMES_FIREWALL_POLICY}: game ports for the workstation-lan sources)"
+  if ! games_firewall_ready; then
+    warn "firewalld is not running with a workstation-lan zone; game ports not opened (run the core or full profile first)"
+    return 0
+  fi
+  mapfile -t services < <(game_firewall_services)
+  FIREWALL_CHANGED=0
+  install_game_firewall_services
+  render_games_policy "${services[@]}" >"${WORK_DIR}/${GAMES_FIREWALL_POLICY}.xml"
+  put_file -s "${WORK_DIR}/${GAMES_FIREWALL_POLICY}.xml" \
+    "/etc/firewalld/policies/${GAMES_FIREWALL_POLICY}.xml"
+  if (( PUT_FILE_CHANGED )); then FIREWALL_CHANGED=1; fi
+  if (( FIREWALL_CHANGED )); then
+    sudo firewall-cmd --check-config \
+      || die "firewalld rejects the game service/policy files; not reloading"
+    sudo firewall-cmd --reload || die "firewalld could not load the game policy"
+    note "firewalld reloaded"
+  fi
+  running=$(firewall-cmd --policy="${GAMES_FIREWALL_POLICY}" --list-services 2>/dev/null \
+    | tr ' ' '\n' | LC_ALL=C sort | paste -sd ' ')
+  [[ ${running} == "${services[*]}" ]] \
+    || die "policy ${GAMES_FIREWALL_POLICY} is not in effect (running: ${running:-none})"
+  note "${GAMES_FIREWALL_POLICY}: ${services[*]}"
 }
 
 # games_sudo_keepalive: keep the sudo timestamp fresh for the whole games run;
@@ -2386,6 +2514,9 @@ run_games_apply() {
   trap cleanup EXIT
 
   log "Done: $(( ${#GAMES_INSTALL[@]} - ${#GAMES_FAILED[@]} )) installed now, ${#GAMES_KEEP[@]} already installed, ${#GAMES_SKIP[@]} skipped, ${#GAMES_FAILED[@]} failed"
+  # Report failed installs before the firewall step, which can die on its own.
+  (( ! ${#GAMES_FAILED[@]} )) || warn "not installed: ${GAMES_FAILED[*]}"
+  apply_games_firewall
   (( ! ${#GAMES_FAILED[@]} )) || die "not installed: ${GAMES_FAILED[*]}"
 }
 
@@ -2587,6 +2718,9 @@ select_profile() {
     # Media servers join the LAN zone with the profile that installs them;
     # transmission-daemon's RPC/peer ports are full-profile only as well.
     FIREWALL_LAN_SERVICES+=(navidrome owntone transmission)
+    # Cro-Mag Rally (GAME_REPO_PKGS_FULL) is the one networked game full
+    # installs; the games profile opens the rest through its own policy.
+    FIREWALL_LAN_SERVICES+=(game-cro-mag-rally)
     if (( IS_X86_64 )); then
       SELECTED_PKGS+=("${PKGS_FULL_X86_64[@]}")
       SELECTED_SERVICES+=("${SERVICES_FULL_X86_64[@]}")
@@ -2639,8 +2773,10 @@ print_plan() {
   printf 'PLAN: ClamAV: freshclam daemon + one-time DB bootstrap, clamd@scan,\n'
   printf '      notify-only on-access for ~/Downloads, /run/media mount watcher (read-only scans)\n'
   printf 'PLAN: firewalld workstation default zone (ssh, plex-remote, dhcpv6-client, mdns; reject\n'
-  printf '      otherwise) + workstation-lan source zone (192.168.1.0/24, 192.168.2.0/23):\n'
+  printf '      otherwise) + workstation-lan source zone (192.168.0.0/23, 192.168.2.0/23):\n'
   printf '  %s\n' "${FIREWALL_LAN_SERVICES[*]}"
+  printf 'PLAN: game firewalld service definitions (opened only where the zone or the games policy names them):\n'
+  printf '  %s\n' "$(game_firewall_services | paste -sd ' ')"
   printf 'PLAN: auditd with curated high-signal rules (no per-execve logging)\n'
   printf 'PLAN: AIDE baseline over /etc, /usr/local, /root (initialized once; daily check timer)\n'
   printf 'PLAN: Wazuh agent from the disabled-by-default wazuh repo%s\n' \
@@ -2676,6 +2812,7 @@ check_security_state() {
   else
     check_report DRIFT "file /etc/firewalld/zones/workstation-lan.xml (rendered)"
   fi
+  check_game_firewall_services
   for unit in clamav-freshclam.service clamd@scan.service clamav-clamonacc.service \
               clamav-media-scan.service firewalld.service auditd.service aide-check.timer; do
     if systemctl is-enabled --quiet "${unit}" 2>/dev/null; then
@@ -3327,6 +3464,7 @@ put_file -s "${FILES}/etc/firewalld/services/lancache.xml" /etc/firewalld/servic
 (( PUT_FILE_CHANGED )) && FIREWALL_CHANGED=1
 put_file -s "${FILES}/etc/firewalld/services/plex-remote.xml" /etc/firewalld/services/plex-remote.xml
 (( PUT_FILE_CHANGED )) && FIREWALL_CHANGED=1
+install_game_firewall_services
 enable_unit firewalld.service
 systemctl is-active --quiet firewalld.service || sudo systemctl start firewalld.service
 systemctl is-active --quiet firewalld.service \
@@ -3387,7 +3525,7 @@ fi
 # Fail closed: verify the effective policy.
 [[ $(firewall-cmd --get-default-zone 2>/dev/null) == workstation ]] \
   || die "the default firewalld zone is not workstation"
-for lan_source in 192.168.1.0/24 192.168.2.0/23; do
+for lan_source in 192.168.0.0/23 192.168.2.0/23; do
   firewall-cmd --zone=workstation-lan --list-sources 2>/dev/null \
     | grep -qw "${lan_source}" \
     || die "workstation-lan does not include ${lan_source}"

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Warcraft III LAN</short>
+  <description>Warcraft III LAN games (Classic 1.27, and Reforged through Battle.net): UDP 6112 LAN broadcast and TCP 6112 join connection.</description>
+  <port protocol="tcp" port="6112"/>
+  <port protocol="udp" port="6112"/>
+</service>

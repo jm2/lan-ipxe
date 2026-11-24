@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Call of Duty: MW Remastered (H1-Mod) LAN</short>
+  <description>H1-Mod net_port, UDP 27016.</description>
+  <port protocol="udp" port="27016"/>
+</service>

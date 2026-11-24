@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Enemy Territory: Quake Wars (openETQW) LAN</short>
+  <description>openETQW net_port UDP 27733 and the next ports it binds to when that one is taken. The source port lets LAN-search replies back in: they answer a broadcast, which connection tracking cannot match.</description>
+  <port protocol="udp" port="27733-27740"/>
+  <source-port protocol="udp" port="27733"/>
+</service>

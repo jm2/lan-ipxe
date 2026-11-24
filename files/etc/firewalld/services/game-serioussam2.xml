@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Serious Sam 2 LAN</short>
+  <description>Serious Sam 2 server ports UDP 25600-25601.</description>
+  <port protocol="udp" port="25600-25601"/>
+</service>

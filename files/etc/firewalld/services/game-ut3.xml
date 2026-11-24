@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Unreal Tournament 3 LAN</short>
+  <description>UT3 game port UDP 7777, LAN announce UDP 14001 and GameSpy query UDP 6500. The source port lets LAN announce replies back in.</description>
+  <port protocol="udp" port="7777"/>
+  <port protocol="udp" port="14001"/>
+  <port protocol="udp" port="6500"/>
+  <source-port protocol="udp" port="14001"/>
+</service>

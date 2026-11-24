@@ -346,14 +346,26 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   FedoraWorkstation default: a custom `workstation` zone keeps SSH and Plex Remote
   Access (32400/tcp only) broadly reachable (WAN port forwarding is in use) and
   rejects everything else, while the
-  source-bound `workstation-lan` zone (192.168.1.0/24 + SD-WAN 192.168.2.0/23) opens
+  source-bound `workstation-lan` zone (192.168.0.0/23 + SD-WAN 192.168.2.0/23) opens
   SSH (firewalld puts each packet in exactly one zone, so LAN peers never fall
   through to the default zone) plus the LAN services — Cockpit, GNOME Remote
   Desktop, mDNS/printer discovery, iperf3, and the hand-run LanCache (HTTP/HTTPS/DNS),
   NFS (with mountd/rpcbind) and Samba in every profile; Navidrome, OwnTone, Plex
   (with its DLNA/GDM ports), Transmission's RPC/peer ports and Steam in-home
   streaming in full. Arch opens the media servers, Transmission and iperf3 in
-  every profile because its hosts run them outside the script. auditd runs with curated high-signal rules (identity/auth
+  every profile because its hosts run them outside the script. Each networked game
+  has its own firewalld service (`files/etc/firewalld/services/game-*.xml`, hosting
+  and LAN-discovery ports): full adds Cro-Mag Rally's, the one networked game it
+  installs, to `workstation-lan`, and the standalone games profile opens all of them
+  through a separate `workstation-lan-games` policy (ingress `workstation-lan`,
+  egress `HOST`), so it never rewrites the zone core/full own. The games profile
+  skips that step until core/full has set up firewalld. Games whose clients search
+  the LAN from a random port (UT99/UT2004/UT3, the idTech 4 games, Quake II, RVGL,
+  Wreckfest) also carry `<source-port>` entries so the servers' replies get in;
+  firewalld cannot pair a source port with destination ports, so LAN peers sending
+  from those ports reach any UDP port on the host. That is accepted for the trusted
+  LAN sources only: drop the `<source-port>` lines to trade LAN browsing (direct
+  connects still work) for a tighter policy. auditd runs with curated high-signal rules (identity/auth
   files, sudoers, sshd config, unit/cron/shell-rc persistence, module loading, time
   changes, mounts, auditd itself — no per-execve logging); Fedora's stock
   `-a task,never` rule, which silently disables all syscall auditing, is commented out. AIDE is scoped to

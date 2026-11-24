@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Doom 3 (dhewm3) LAN</short>
+  <description>dhewm3 net_port UDP 27666 and the next ports it binds to when that one is taken. The source port lets LAN-search replies back in.</description>
+  <port protocol="udp" port="27666-27673"/>
+  <source-port protocol="udp" port="27666"/>
+</service>

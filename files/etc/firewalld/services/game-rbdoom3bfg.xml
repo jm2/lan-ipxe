@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Doom 3 BFG (RBDoom3BFG) LAN</short>
+  <description>RBDoom3BFG net_port UDP 27015 (upstream BFG multiplayer is experimental). The source port lets LAN-search replies back in.</description>
+  <port protocol="udp" port="27015"/>
+  <source-port protocol="udp" port="27015"/>
+</service>

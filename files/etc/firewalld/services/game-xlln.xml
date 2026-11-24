@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>XLiveLessNess (GFWL LAN)</short>
+  <description>XLiveLessNess, the Games for Windows Live replacement DiRT 2 uses for LAN play: shared broadcast port UDP 39000 and per-instance ports 39001-39004 (up to four local instances).</description>
+  <port protocol="udp" port="39000-39004"/>
+</service>

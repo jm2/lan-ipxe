@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Goldberg Steam emulator (gbe-fork) LAN</short>
+  <description>gbe-fork LAN play (AoE II/III DE, AoM Retold, DiRT 3, DiRT 4, DiRT Showdown, GRID 2019, FlatOut 2 and Wreckfest from Steam, Wreckfest 2, Serious Sam 3 and Fusion, CoD Infinite Warfare and WWII, and the stock-exe modes of the other CoD packages): listen_port 47584 (TCP and UDP) and its LAN broadcast range UDP 47584-47593.</description>
+  <port protocol="tcp" port="47584"/>
+  <port protocol="udp" port="47584-47593"/>
+</service>

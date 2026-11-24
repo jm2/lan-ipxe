@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Unreal Tournament 2004 LAN</short>
+  <description>UT2004: game port UDP 7777, query 7778, GameSpy query 7787, server LAN listener 10777 and client LANPort 11777. The source port lets LAN-search replies back in.</description>
+  <port protocol="udp" port="7777-7778"/>
+  <port protocol="udp" port="7787"/>
+  <port protocol="udp" port="10777"/>
+  <port protocol="udp" port="11777"/>
+  <source-port protocol="udp" port="10777"/>
+</service>

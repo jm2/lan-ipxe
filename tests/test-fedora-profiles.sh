@@ -400,6 +400,46 @@ test_security_renders() (
     grep -Fq "<service name=\"${item}\"/>" <<<"${out_full}" \
       || fail "full LAN zone omits ${item}"
   done
+  # Cro-Mag Rally is the networked game full installs; core installs none.
+  grep -Fq '<service name="game-cro-mag-rally"/>' <<<"${out_full}" \
+    || fail 'full LAN zone omits Cro-Mag Rally'
+  ! grep -Fq '<service name="game-' <<<"${out_core}" \
+    || fail 'core LAN zone opens a game service'
+  # Every game service definition: game- prefix, valid ports, no clash with
+  # a stock firewalld service, and listed in the games profile's policy.
+  local -a services
+  local policy service file port stock=/usr/lib/firewalld/services
+  # The sourced script resolved FILES against /dev/fd; point it at the repo.
+  FILES=${REPO_ROOT}/files
+  mapfile -t services < <(game_firewall_services)
+  (( ${#services[@]} > 1 )) || fail 'no game firewalld service definitions found'
+  for service in "${FIREWALL_LAN_SERVICES[@]}"; do
+    [[ ${service} != game-* || " ${services[*]} " == *" ${service} "* ]] \
+      || fail "full LAN zone names ${service}, which has no definition"
+  done
+  policy=$(render_games_policy "${services[@]}")
+  [[ ${policy} == "$(render_games_policy "${services[@]}")" ]] \
+    || fail 'render_games_policy is not deterministic'
+  grep -Fq '<ingress-zone name="workstation-lan"/>' <<<"${policy}" \
+    || fail 'games policy is not bound to the workstation-lan sources'
+  grep -Fq '<egress-zone name="HOST"/>' <<<"${policy}" \
+    || fail 'games policy does not target this host'
+  for service in "${services[@]}"; do
+    file=${REPO_ROOT}/files/etc/firewalld/services/${service}.xml
+    grep -Fq "<service name=\"${service}\"/>" <<<"${policy}" \
+      || fail "games policy omits ${service}"
+    [[ ! -e ${stock}/${service}.xml ]] || fail "${service} shadows a stock firewalld service"
+    grep -q '<port protocol=' "${file}" || fail "${service} opens no ports"
+    while read -r port; do
+      [[ ${port} =~ ^([0-9]+)(-([0-9]+))?$ ]] || fail "${service}: bad port ${port}"
+      (( BASH_REMATCH[1] >= 1 && BASH_REMATCH[1] <= 65535 )) \
+        && { [[ -z ${BASH_REMATCH[3]} ]] \
+             || (( BASH_REMATCH[3] > BASH_REMATCH[1] && BASH_REMATCH[3] <= 65535 )); } \
+        || fail "${service}: port out of range ${port}"
+    done < <(sed -n 's/.*<port protocol="\(tcp\|udp\)" port="\([^"]*\)".*/\2/p' "${file}")
+    ! grep '<port ' "${file}" | grep -qvE 'protocol="(tcp|udp)"' \
+      || fail "${service}: a port is neither tcp nor udp"
+  done
   if [[ $(uname -m) == x86_64 ]]; then
     for item in plexmediaserver steam-streaming; do
       grep -Fq "<service name=\"${item}\"/>" <<<"${out_full}" \

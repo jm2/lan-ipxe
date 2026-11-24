@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Wreckfest LAN</short>
+  <description>Wreckfest Steam port UDP 27015, query UDP 27016 (also bound by in-game Create Server) and game port UDP 33540. The source ports let LAN-search replies back in.</description>
+  <port protocol="udp" port="27015-27016"/>
+  <port protocol="udp" port="33540"/>
+  <source-port protocol="udp" port="27015-27020"/>
+  <source-port protocol="udp" port="26900-26905"/>
+</service>

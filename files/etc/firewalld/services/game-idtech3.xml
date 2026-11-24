@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Quake III engine games LAN</short>
+  <description>Quake III Arena (quake3e), Star Trek Voyager: Elite Force (Lilium Voyager) and Wolfenstein: Enemy Territory (ET: Legacy): net_port UDP 27960 and the ports LAN search and extra local servers use.</description>
+  <port protocol="udp" port="27960-27963"/>
+</service>

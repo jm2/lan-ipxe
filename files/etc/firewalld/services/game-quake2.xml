@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Quake II (Yamagi, Q2RTX) LAN</short>
+  <description>Quake II server port UDP 27910. The source port lets LAN-search replies back in.</description>
+  <port protocol="udp" port="27910"/>
+  <source-port protocol="udp" port="27910"/>
+</service>

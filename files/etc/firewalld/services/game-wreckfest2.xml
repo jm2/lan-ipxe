@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Wreckfest 2 LAN</short>
+  <description>Wreckfest 2 game port UDP 30100 (its LAN discovery goes through the gbe-fork service).</description>
+  <port protocol="udp" port="30100"/>
+</service>

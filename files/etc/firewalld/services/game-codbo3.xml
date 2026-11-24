@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Call of Duty: Black Ops III (BOIII) LAN</short>
+  <description>BOIII server port, UDP 27017.</description>
+  <port protocol="udp" port="27017"/>
+</service>
