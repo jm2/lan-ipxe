@@ -481,6 +481,79 @@ Windows helpers (called by `setup-win11-workstation.ps1`, also usable standalone
 - `enable-hyperv-win11.ps1` — enables Hyper-V through the supported optional-feature
   API on eligible Windows editions and refuses the unsupported Windows 11 Home hack.
 
+### Controller host — `setup-fedora-controllers.sh`
+
+`setup-fedora-controllers.sh` sets up a Rocky/EL10 controller box: UniFi OS Server, Omada, Shadowsocks, Cockpit and a
+dnsmasq LAN resolver (DNS only, never DHCP). The resolver uses the HaGeZi Pro blocklist and Cloudflare + Google upstreams
+over IPv4 and IPv6. The script is self-contained: it writes every helper and unit itself, and it is idempotent. Run
+`--help` to see the component flags.
+
+#### Dry run (`--dry-run`)
+
+`--dry-run` (or `DRY_RUN=1`) takes the same flags as a real run and walks every step against the live host without
+changing anything. It still needs root, because it reads root-only state.
+
+- **Read-only queries run for real**, so every decision matches a real run: rpm, `systemctl is-active`/`is-enabled`,
+  firewalld zone and service queries, podman image identities, `tune2fs -l`, and the UniFi OS release metadata.
+- **Host-changing commands are printed instead of run**, as `[dry-run] would ...` lines. The packages listed are the
+  ones still missing; the unit lines show enable/start/stop/restart decisions; the firewall lines are net zone changes.
+- **File writes go to a private overlay** under `${TMPDIR:-/var/tmp}`. The script's own later reads see the would-be
+  content, so the restart decisions are the real ones, and Quadlet and `dnsmasq --test` validation run on the merged
+  result. The run ends with a diff of every file it would create, change or remove, secrets redacted.
+  `DRY_RUN_KEEP=1` keeps the rendered files for inspection.
+- **Lancache preview.** With `--lancache`, the dry run runs the would-be `lancache-gen` into the overlay, so the report
+  shows the exact overrides it would install. It also probes the heartbeat once to say whether the overrides would go
+  live.
+- **Reported but not done:** pulling images (restart decisions assume the local copy is current), downloading and
+  running the UniFi OS installer (its URL gets a HEAD check), readiness waits, and the MongoDB user check.
+
+`tests/test-controller-dry-run.sh` runs the dry run in a throwaway Rocky 10 container as root, using shims that log
+any mutating call. It covers five scenarios: a fresh host, an existing DNS box with the legacy Steam toggle and
+small-storage on, DNS turned off, a fresh UniFi OS install, and a host already converged by a previous run. Each one
+must leave the filesystem byte-identical and send no mutating call to a shim. The converged host must also show zero
+file changes and no restarts. A separate check confirms the dry-run restart hash equals the real one.
+
+#### LanCache steering (`--lancache <ip>`)
+
+The site with the cache runs `--lancache 192.168.1.11` (enthoo). dnsmasq then answers every
+[uklans/cache-domains](https://github.com/uklans/cache-domains) name (Steam, Epic, Battle.net, Riot, Windows Update and
+others) with the cache's IPv4 address. If the cache goes down, the overrides are withdrawn and clients download straight
+from the CDNs. There is no `lancache-dns` container, and enthoo is never used as a resolver.
+
+| Piece | Role |
+| --- | --- |
+| `lancache-gen` (`lancache-gen.timer`, weekly) | Clones cache-domains into `/var/lib/cache-domains` (later runs fetch it and hard-reset, which survives upstream history rewrites) and writes `/etc/dnsmasq.lancache/lancache.conf`, which sits outside the conf-dir. If the fetch fails, it still rebuilds from the existing checkout, so a changed cache IP takes effect, and it exits non-zero. For each domain it writes an `address=/<d>/<ip>` line and a `local=/<d>/` line. It refuses a list with fewer than 20 domains, or one that fails `dnsmasq --test`, and keeps the last good file. If the overrides are live, it hands the refresh to the toggle. |
+| `lancache-toggle` (`lancache-toggle.timer`, every 10 s) | Probes `http://<ip>/lancache-heartbeat` with a 2 s timeout. After 3 consecutive passes it copies the overrides to `/etc/dnsmasq.d/50-lancache.conf`; after 2 consecutive misses it removes them. Each change restarts dnsmasq, because SIGHUP doesn't re-read `address=` lines. It refuses a source generated for a different cache IP. Runs are serialised with `flock` on `/run/lancache-toggle.lock`, and counters live in `/run/lancache-toggle/`. Only state changes are logged (`journalctl -t lancache-toggle`); `LogLevelMax=notice` drops systemd's start/finish lines for each probe. |
+| Toggle failure handling | Before installing anything, the toggle runs `dnsmasq --test` on the current config. A config that is already broken is never restarted, and the toggle retries after 10 minutes. The previous live copy is kept until the new one has passed `--test` and a restart. If the overrides break `--test`, the previous state comes back and they stay off until lancache-gen writes a new source. If the restart fails, the previous state comes back, `systemctl restart dnsmasq` recovers DNS, and the toggle retries after 10 minutes. `lancache-ctl enable`/`regen` retry at once. |
+| `lancache-ctl status\|enable\|disable\|regen` | `status` shows whether the overrides are active, the source commit, the counters, the manual flag, any failed attempt with its retry time, and live A/AAAA lookups of `lancache.steamcontent.com`. `disable` creates `/etc/dnsmasq.lancache/disabled`, which keeps the overrides off whatever the heartbeat says (including after a reboot) and applies at once. `enable` clears that flag and any failure hold-off. |
+| `/etc/dnsmasq.d/40-lancache-base.conf` | `local-ttl=30`, always loaded. dnsmasq's default of 0 makes answers from local data uncacheable. With 30, the UXG and clients cache each override for up to 30 s, which saves repeat lookups during big downloads but lets them use the cache IP for up to 30 s after a withdrawal. Worst-case failover is about 20 s of detection plus 30 s. The TTL also applies to `/etc/hosts` answers and blocked names. |
+
+`--no-lancache` (or `--no-dns`) removes the timers, scripts, overrides, the cache-domains checkout and the flag, and then
+restarts dnsmasq. Re-running the script also removes the Steam-only steering this replaced (`lancache-watch.timer`,
+`/etc/dnsmasq.d/lancache.conf`). `tests/test-controller-lancache.sh` runs the real helper text, unprivileged and
+offline. It uses a fixture repo, a fake heartbeat, a stub upstream and a scratch dnsmasq to cover hysteresis, the
+AAAA/TTL answers, the manual flag, refresh, rejection and locking.
+
+Verified November 2026:
+
+- **cache-domains layout:** `cache_domains.json` → `.cache_domains[].domain_files[]` → `.txt` lists that use `#`
+  comments and `*.` wildcards. The list held 131 domains at commit `f7d6206f4769`, and Rocky's `dnsmasq --test` accepts
+  the generated file.
+- **AAAA leak:** an `address=` line on its own does **not** produce NODATA for AAAA. Both dnsmasq 2.90 (EL10) and 2.93
+  forward the AAAA query upstream, so dual-stack clients could reach the CDN over IPv6 and skip the cache. A `local=/<d>/`
+  line next to it, as uklans' own `create-dnsmasq.sh` emits, makes AAAA (and every other non-A type) NOERROR/NODATA.
+  Every other name keeps its A and AAAA records.
+- **Heartbeat:** the monolithic image serves `location = /lancache-heartbeat { return 204; }`
+  (`overlay/etc/nginx/sites-available/cache.conf.d/90_lancache_heartbeat.conf`).
+- **Copy, not symlink:** EL10's SELinux policy gives `dnsmasq_t` no read on `dnsmasq_etc_t` symlinks, so a symlink in
+  `/etc/dnsmasq.d` would be denied. The toggle therefore stages a dotfile (which conf-dir always skips) and renames it
+  into place atomically.
+- **Upstreams:** the IPv6 Cloudflare and Google upstreams are already present beside the IPv4 ones.
+
+**Enthoo requirement:** the monolithic container's `UPSTREAM_DNS` must point at public resolvers (for example
+`1.1.1.1 8.8.8.8`), never at the controller or the UXG. Otherwise nginx resolves the CDN names to itself and loops.
+HTTPS requests for these names reach enthoo's SNI passthrough on port 443. The heartbeat checks only the HTTP cache.
+
 ### `files/` — config payloads
 
 Dotfiles and system config consumed by the workstation setup scripts: `bashrc`,

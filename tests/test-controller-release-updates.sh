@@ -365,6 +365,8 @@ test_service_input_catalog() (
   OMADA_DIR=/test/omada
   # shellcheck disable=SC2034
   SS_DIR=/test/shadowsocks
+  # shellcheck disable=SC2034
+  LANCACHE_BASE_CONF=/test/dnsmasq.d/40-lancache-base.conf
   [[ $(grep -c '^#--- Service input catalog ' "${CONTROLLER}") == 1 ]] \
     || fail 'service input catalog start marker is missing or ambiguous'
   [[ $(grep -c '^#--- End service input catalog ' "${CONTROLLER}") == 1 ]] \
@@ -382,6 +384,12 @@ test_service_input_catalog() (
     || fail 'Mongo identity is incorrectly wired directly to Omada inputs'
   ! array_contains "${SS_IMAGE_STATE}" "${OMADA_DB_FILES[@]}" \
     || fail 'Shadowsocks identity leaked into Mongo inputs'
+  # Toggling lancache on/off must restart dnsmasq once; the toggled overrides
+  # and hagezi list restart it themselves and must stay out of the hash
+  array_contains "${LANCACHE_BASE_CONF}" "${DNSMASQ_FILES[@]}" \
+    || fail 'lancache base fragment is not a dnsmasq restart input'
+  ! array_contains /etc/dnsmasq.d/50-lancache.conf "${DNSMASQ_FILES[@]}" \
+    || fail 'toggled lancache overrides leaked into the dnsmasq restart inputs'
 )
 
 line_of() {
@@ -522,7 +530,7 @@ test_diagnostic_dump_resilience() (
 
 test_new_behaviors_static_wiring() {
   local dryrun_call diag_omada_def diag_uos_def db_diag_call omada_diag_call
-  dryrun_call=$(line_of 'QUADLET_UNIT_DIRS="${QUADLET_DIR}"')
+  dryrun_call=$(line_of 'QUADLET_UNIT_DIRS="$(dry_view_dir "${QUADLET_DIR}")"')
   diag_omada_def=$(line_of 'dump_omada_diagnostics() {')
   diag_uos_def=$(line_of 'dump_uos_diagnostics() {')
   db_diag_call=$(line_of '|| { dump_omada_diagnostics; die "omada-db.service/container failed to start"; }')

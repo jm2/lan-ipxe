@@ -43,8 +43,8 @@
 # Adds a dnsmasq LAN resolver (native package, not a container; DNS only -
 # no dhcp-range is ever configured, so its DHCP/TFTP engine stays off):
 # hagezi pro blocklist refreshed daily, upstreams Cloudflare + Google over
-# IPv4 and IPv6, and optional Steam steering at a local lancache with
-# automatic fallback to the upstreams while the cache is unreachable.
+# IPv4 and IPv6, and optional CDN steering (uklans/cache-domains) at a
+# local lancache, withdrawn automatically while the cache is unreachable.
 #
 # Component flags let another box run a subset. Disabling a component on a
 # rerun stops it and removes script-owned configuration while retaining data.
@@ -76,7 +76,7 @@ ZRAM_MODE=${ZRAM_MODE:-auto}
 LOW_RAM_THRESHOLD_KB=${LOW_RAM_THRESHOLD_KB:-3145728}          # 3 GiB
 SMALL_STORAGE_THRESHOLD_KB=${SMALL_STORAGE_THRESHOLD_KB:-16777216} # 16 GiB
 ZRAM_FULL_RAM_THRESHOLD_KB=${ZRAM_FULL_RAM_THRESHOLD_KB:-3145728} # 3 GiB
-# Optional per-site: IPv4 of a local lancache; empty = no Steam steering
+# Optional per-site: IPv4 of a local lancache; empty = no CDN steering
 LANCACHE_IP=${LANCACHE_IP:-}
 # Optional firewalld zone override; empty selects the outbound LAN interface
 FIREWALL_ZONE=${FIREWALL_ZONE:-}
@@ -110,8 +110,22 @@ UOS_INSTALLER_SHA256=${UOS_INSTALLER_SHA256:-}
 HAGEZI_URL=https://gitlab.com/hagezi/mirror/-/raw/main/dns-blocklists/dnsmasq/pro.txt
 HAGEZI_CONF=/etc/dnsmasq.d/hagezi-pro.conf
 DNS_UPDATE_SCRIPT=/usr/local/sbin/update-hagezi-blocklist
-LANCACHE_CONF=/etc/dnsmasq.d/lancache.conf
-LANCACHE_TOGGLE=/usr/local/sbin/lancache-dns-toggle
+# Lancache steering: lancache-gen builds the overrides outside the conf-dir;
+# lancache-toggle copies them in (or removes them) as the cache comes and goes
+LANCACHE_DIR=/etc/dnsmasq.lancache
+LANCACHE_SRC_CONF=${LANCACHE_DIR}/lancache.conf
+LANCACHE_DISABLE_FLAG=${LANCACHE_DIR}/disabled
+LANCACHE_ACTIVE_CONF=/etc/dnsmasq.d/50-lancache.conf
+LANCACHE_BASE_CONF=/etc/dnsmasq.d/40-lancache-base.conf
+LANCACHE_DOMAINS_URL=${LANCACHE_DOMAINS_URL:-https://github.com/uklans/cache-domains.git}
+LANCACHE_DOMAINS_DIR=/var/lib/cache-domains
+LANCACHE_STATE_DIR=/run/lancache-toggle
+LANCACHE_GEN=/usr/local/sbin/lancache-gen
+LANCACHE_TOGGLE=/usr/local/sbin/lancache-toggle
+LANCACHE_CTL=/usr/local/sbin/lancache-ctl
+# The Steam-only steering this replaced (Aug-Nov 2026); removed on re-run
+LEGACY_LANCACHE_CONF=/etc/dnsmasq.d/lancache.conf
+LEGACY_LANCACHE_TOGGLE=/usr/local/sbin/lancache-dns-toggle
 OMADA_HEAP_MAX=${OMADA_HEAP_MAX:-}
 OMADA_HEAP_MIN=${OMADA_HEAP_MIN:-128m}
 MONGO_CACHE_GB=${MONGO_CACHE_GB:-}
@@ -125,6 +139,229 @@ report_script_error() {
     "${cmd}" "${status}" "${line}" >&2
 }
 trap 'report_script_error "$LINENO" "$BASH_COMMAND"' ERR
+
+#--- Dry-run layer -----------------------------------------------------------
+# --dry-run (DRY_RUN=1) walks the whole script against the live host without
+# changing it. Read-only queries (rpm, systemctl is-active/is-enabled/cat,
+# firewall-cmd --get/--query, podman inspect, tune2fs -l, sysctl -n, the
+# release-metadata GET) run for real, so every decision matches a real run.
+# Everything that would change the host goes through this layer instead:
+#   - File writes land in a private overlay. The script's own later reads of
+#     those files (restart hashes, Quadlet and dnsmasq validation, the
+#     credentials) see the would-be content, and the run ends with a diff of
+#     every file it would create, change or remove, secrets redacted.
+#   - Host-changing commands print "[dry-run] would ..." instead of running.
+#     The overrides below exist only in dry-run mode; they track the unit
+#     state the run would leave so later is-active/is-enabled checks agree.
+#   - Steps that cannot be simulated (the UniFi OS download and installer,
+#     readiness waits, the MongoDB user check) are reported and skipped.
+DRY_RUN=${DRY_RUN:-0}
+DRY_ROOT=
+DRY_OUT=1
+dry_note() { printf '\033[1;36m[dry-run]\033[0m %s\n' "$*" >&"${DRY_OUT}"; }
+dry_plan() { # <what a real run would do>
+  printf '%s\n' "$*" >> "${DRY_ROOT}/actions"
+  dry_note "would $*"
+}
+dry_quote() {
+  local out='' arg quoted
+  for arg; do printf -v quoted '%q' "${arg}"; out+=" ${quoted}"; done
+  printf '%s' "${out# }"
+}
+dry_under_root() { [[ $1 == "${DRY_ROOT}" || $1 == "${DRY_ROOT}"/* ]]; }
+dry_gone() { grep -Fxq -- "$1" "${DRY_ROOT}/gone" 2>/dev/null; }
+dry_same() { [[ $(sha256sum < "$1") == "$(sha256sum < "$2")" ]]; }
+dry_gone_within() { # <path>: <path> or one of its parents was removed
+  local probe=$1
+  while [[ ${probe} == /* ]]; do
+    dry_gone "${probe}" && return 0
+    probe=${probe%/*}
+  done
+  return 1
+}
+dry_path() { # <path>: where the content a real run would leave at <path> is
+  (( DRY_RUN )) || { printf '%s\n' "$1"; return 0; }
+  if [[ -e ${DRY_ROOT}/root$1 || -L ${DRY_ROOT}/root$1 ]]; then
+    printf '%s\n' "${DRY_ROOT}/root$1"
+  elif dry_gone_within "$1"; then
+    printf '%s\n' "${DRY_ROOT}/absent$1"
+  else
+    printf '%s\n' "$1"
+  fi
+}
+dry_write() { # <target> <mode>; content on stdin (never the target's own overlay copy)
+  local target=$1 mode=$2 shadow=${DRY_ROOT}/root$1 kind
+  command mkdir -p "${shadow%/*}"
+  command rm -f "${shadow}"
+  command cat > "${shadow}"
+  command chmod "${mode}" "${shadow}"
+  if [[ ! -f ${target} ]]; then
+    kind="new file"
+  elif ! dry_same "${target}" "${shadow}"; then
+    kind=changed
+  elif [[ $(stat -c %a "${target}") != "$(stat -c %a "${shadow}")" ]]; then
+    kind="mode change"
+  else
+    return 0
+  fi
+  # Once per file: repeated edits (credential appends) show in the report
+  grep -Fxq -- "${target}" "${DRY_ROOT}/noted" 2>/dev/null && return 0
+  printf '%s\n' "${target}" >> "${DRY_ROOT}/noted"
+  dry_note "would write ${target} (${kind}, mode ${mode})"
+}
+dry_view_dir() { # <dir>: a scratch copy of <dir> as a real run would leave it
+  (( DRY_RUN )) || { printf '%s\n' "$1"; return 0; }
+  local view=${DRY_ROOT}/view$1 gone
+  command rm -rf "${view}"
+  command mkdir -p "${view}"
+  if [[ -d $1 ]] && ! dry_gone_within "$1"; then
+    command cp -R --preserve=mode,timestamps "$1"/. "${view}"/
+  fi
+  while IFS= read -r gone; do
+    [[ ${gone} == "$1"/* ]] && command rm -rf "${view}${gone#"$1"}"
+  done < "${DRY_ROOT}/gone"
+  if [[ -d ${DRY_ROOT}/root$1 ]]; then
+    command cp -R --preserve=mode,timestamps "${DRY_ROOT}/root$1"/. "${view}"/
+  fi
+  printf '%s\n' "${view}"
+}
+dry_redact() {
+  command sed -E \
+    -e 's/((PASS|PASSWORD|SECRET|TOKEN)[A-Z_]*=)[^[:space:]]+/\1<redacted>/g' \
+    -e 's/("password"[[:space:]]*:[[:space:]]*")[^"]*"/\1<redacted>"/g' \
+    -e 's#(mongodb://[^:/@]+:)[^@]+@#\1<redacted>@#g'
+}
+dry_diff() { # <old> <new> <label>
+  if command -v diff >/dev/null 2>&1; then
+    diff -u --label "a$3" --label "b$3" "$1" "$2" | dry_redact || true
+  else
+    echo "    (diffutils is not installed; content not shown)"
+  fi
+}
+dry_flush_firewall() { # report the net permanent-zone changes queued so far
+  local key zone kind item have
+  while IFS= read -r key; do
+    [[ -n ${key} ]] || continue
+    IFS='|' read -r zone kind item <<<"${key}"
+    have=0
+    command firewall-cmd -q --permanent ${zone:+"--zone=${zone}"} \
+      "--query-${kind}=${item}" >/dev/null 2>&1 && have=1
+    if [[ ${DRY_FW[${key}]} == 1 && ${have} == 0 ]]; then
+      dry_plan "add firewalld ${kind} ${item} to zone ${zone:-<default>} (permanent)"
+    elif [[ ${DRY_FW[${key}]} == 0 && ${have} == 1 ]]; then
+      dry_plan "remove firewalld ${kind} ${item} from zone ${zone:-<default>} (permanent)"
+    fi
+  done < <(printf '%s\n' "${!DRY_FW[@]}" | sort)
+  DRY_FW=()
+}
+dry_report() {
+  local f path mode new=0 changed=0 removed=0 same=0
+  printf '\n============================================================\n'
+  printf ' Dry run: files a real run would create, change or remove\n'
+  printf '============================================================\n'
+  while IFS= read -r -d '' f; do
+    path=${f#"${DRY_ROOT}/root"}
+    mode=$(stat -c %a "${f}")
+    if [[ ! -f ${path} ]]; then
+      new=$(( new + 1 ))
+      printf '\n+ new %s (mode %s, %s lines)\n' "${path}" "${mode}" "$(wc -l < "${f}")"
+      dry_diff /dev/null "${f}" "${path}"
+    elif ! dry_same "${path}" "${f}"; then
+      changed=$(( changed + 1 ))
+      printf '\n~ changed %s (mode %s)\n' "${path}" "${mode}"
+      dry_diff "${path}" "${f}" "${path}"
+    elif [[ $(stat -c %a "${path}") != "${mode}" ]]; then
+      changed=$(( changed + 1 ))
+      printf '\n~ mode %s -> %s %s\n' "$(stat -c %a "${path}")" "${mode}" "${path}"
+    else
+      same=$(( same + 1 ))
+    fi
+  done < <(find "${DRY_ROOT}/root" -type f -print0 2>/dev/null | sort -z)
+  while IFS= read -r path; do
+    [[ -e ${path} || -L ${path} ]] || continue
+    [[ -e ${DRY_ROOT}/root${path} ]] && continue
+    removed=$(( removed + 1 ))
+    if [[ -d ${path} ]]; then
+      printf '\n- remove %s (directory)\n' "${path}"
+    else
+      printf '\n- remove %s\n' "${path}"
+    fi
+  done < <(sort -u "${DRY_ROOT}/gone")
+  printf '\n Totals: %d new, %d changed, %d removed, %d rewritten unchanged; %d host actions (the [dry-run] lines above)\n' \
+    "${new}" "${changed}" "${removed}" "${same}" "$(wc -l < "${DRY_ROOT}/actions")"
+}
+dry_preview_lancache() {
+  # Run the would-be lancache-gen with every output redirected into the
+  # overlay, so the report shows the exact overrides a real run installs
+  local gen
+  gen=$(dry_path "${LANCACHE_GEN}")
+  if DOMAINS_DIR=${DRY_ROOT}/scratch/cache-domains OUT=${DRY_ROOT}/root${LANCACHE_SRC_CONF} \
+      ACTIVE=${DRY_ROOT}/absent/active TOGGLE=true bash "${gen}" >&"${DRY_OUT}" 2>&1; then
+    dry_note "previewed lancache-gen; ${LANCACHE_SRC_CONF} in the report below is what it writes"
+  else
+    dry_note "lancache-gen preview failed (above); a real run keeps the last good overrides"
+  fi
+  if command curl -fs -o /dev/null --max-time 2 "http://${LANCACHE_IP}/lancache-heartbeat"; then
+    dry_note "lancache heartbeat at ${LANCACHE_IP} answers now: overrides would go live ~30 s after setup"
+  else
+    dry_note "lancache heartbeat at ${LANCACHE_IP} does not answer now: overrides stay off until it does"
+  fi
+}
+dry_finish() { # <exit status>
+  [[ -n ${DRY_ROOT} && -d ${DRY_ROOT} ]] || return 0
+  (( ${#DRY_FW[@]} == 0 )) || dry_flush_firewall
+  dry_report
+  if (( $1 == 0 )); then
+    dry_note "dry run complete; nothing on this host was changed"
+  else
+    dry_note "dry run stopped at the error above, where a real run would stop too; nothing on this host was changed"
+  fi
+  if [[ ${DRY_RUN_KEEP:-0} == 1 ]]; then
+    dry_note "rendered files kept under ${DRY_ROOT}/root"
+  else
+    command rm -rf "${DRY_ROOT}"
+  fi
+  DRY_ROOT=
+}
+
+# Dry-run-aware primitives used by the rest of the script
+atomic_write_file() { # <target> <mode>; content on stdin
+  if (( DRY_RUN )); then dry_write "$1" "$2"; return; fi
+  local target=$1 mode=$2 tmp
+  # A dotfile beside the target: same filesystem (atomic rename), same
+  # SELinux label, and skipped by dnsmasq's conf-dir and the unit scanners
+  tmp=$(mktemp "${target%/*}/.${target##*/}.tmp.XXXXXX")
+  if ! cat > "${tmp}"; then
+    rm -f "${tmp}"
+    return 1
+  fi
+  chmod "${mode}" "${tmp}"
+  mv -f "${tmp}" "${target}"
+}
+atomic_copy_file() { # <source> <target> <mode>
+  if (( DRY_RUN )); then dry_write "$2" "$3" < "$(dry_path "$1")"; return; fi
+  local source=$1 target=$2 mode=$3 tmp
+  tmp=$(mktemp "${target%/*}/.${target##*/}.tmp.XXXXXX")
+  if ! install -m "${mode}" "${source}" "${tmp}"; then
+    rm -f "${tmp}"
+    return 1
+  fi
+  mv -f "${tmp}" "${target}"
+}
+append_line() { # <file> <line>
+  if (( ! DRY_RUN )); then printf '%s\n' "$2" >> "$1"; return; fi
+  local src buf mode=644
+  src=$(dry_path "$1")
+  buf=$(command mktemp "${DRY_ROOT}/buf.XXXXXX")
+  if [[ -f ${src} ]]; then
+    command cat -- "${src}" > "${buf}"
+    mode=$(stat -c %a "${src}")
+  fi
+  printf '%s\n' "$2" >> "${buf}"
+  dry_write "$1" "${mode}" < "${buf}"
+  command rm -f "${buf}"
+}
+#--- End dry-run layer -------------------------------------------------------
 
 #--- Release-update helpers (sourceable by focused tests) --------------------
 validate_uos_release_values() { # <source-label> <version> <url> <sha256>
@@ -275,6 +512,18 @@ image_identity() { # <mutable image reference>; emits stable ID/digest input
 
 refresh_mutable_image() { # <mutable image reference> <identity state file>
   local image=$1 state_file=$2 identity
+  if (( ${DRY_RUN:-0} )); then
+    # No pull: restart decisions use the local copy's identity, so they hold
+    # unless the registry has published a newer image since the last pull
+    dry_plan "pull ${image}"
+    if identity=$(image_identity "${image}" 2>/dev/null); then
+      dry_note "restart decisions assume ${image} has no newer upstream image than the local copy"
+    else
+      identity=$(printf 'reference=%s\nid=<not pulled yet>' "${image}")
+    fi
+    printf '%s\n' "${identity}" | atomic_write_file "${state_file}" 600
+    return 0
+  fi
   log "Refreshing mutable image channel ${image}"
   podman pull -q "${image}" >/dev/null \
     || die "Could not pull image ${image}"
@@ -290,6 +539,358 @@ prune_dangling_images() {
     || die "Could not prune unused dangling container images"
 }
 #--- End release-update helpers ---------------------------------------------
+
+#--- Lancache DNS helpers (sourceable by focused tests) ----------------------
+# Each function prints one installed helper. Paths and the cache IP are baked
+# in as environment-overridable defaults, so tests/test-controller-lancache.sh
+# runs the exact production text unprivileged against a scratch dnsmasq.
+lancache_gen_script() {
+cat <<EOF
+#!/usr/bin/env bash
+# Rebuild the dnsmasq lancache overrides from uklans/cache-domains.
+# Written by setup-fedora-controllers.sh; run weekly by lancache-gen.timer.
+set -euo pipefail
+LANCACHE_IP=\${LANCACHE_IP:-${LANCACHE_IP}}
+REPO_URL=\${REPO_URL:-${LANCACHE_DOMAINS_URL}}
+DOMAINS_DIR=\${DOMAINS_DIR:-${LANCACHE_DOMAINS_DIR}}
+OUT=\${OUT:-${LANCACHE_SRC_CONF}}
+ACTIVE=\${ACTIVE:-${LANCACHE_ACTIVE_CONF}}
+TOGGLE=\${TOGGLE:-${LANCACHE_TOGGLE}}
+# Upstream lists ~130 domains; the floor still catches a gutted checkout
+MIN_DOMAINS=\${MIN_DOMAINS:-20}
+EOF
+cat <<'EOF'
+
+fail() { echo "lancache-gen: $*; keeping the last good ${OUT}" >&2; exit 1; }
+
+# fetch + hard reset, not pull: the shallow checkout is script-owned, and this
+# survives an upstream history rewrite that a fast-forward-only pull cannot
+stale=0
+if [[ -d ${DOMAINS_DIR}/.git ]]; then
+  if ! { git -C "${DOMAINS_DIR}" fetch -q --depth 1 origin HEAD \
+         && git -C "${DOMAINS_DIR}" reset -q --hard FETCH_HEAD; }; then
+    # Still rebuild: a changed cache IP must reach the overrides even while
+    # GitHub is unreachable. Exits non-zero at the end so the failure shows.
+    echo "lancache-gen: cache-domains update failed; rebuilding from the existing checkout" >&2
+    stale=1
+  fi
+else
+  git clone -q --depth 1 "${REPO_URL}" "${DOMAINS_DIR}" || fail "cache-domains clone failed"
+fi
+commit=$(git -C "${DOMAINS_DIR}" rev-parse --short=12 HEAD) || fail "cannot read the checkout's commit"
+files=$(jq -r '.cache_domains[].domain_files[]' "${DOMAINS_DIR}/cache_domains.json") \
+  || fail "cannot parse ${DOMAINS_DIR}/cache_domains.json"
+
+paths=()
+mapfile -t names <<< "${files}"
+for f in "${names[@]}"; do
+  [[ -n ${f} ]] || continue
+  [[ ${f} =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "unexpected domain file name '${f}'"
+  [[ -f ${DOMAINS_DIR}/${f} ]] || fail "cache_domains.json lists missing file ${f}"
+  paths+=("${DOMAINS_DIR}/${f}")
+done
+(( ${#paths[@]} )) || fail "cache_domains.json lists no domain files"
+
+# Comments, CRs, surrounding blanks and the *. wildcard prefix go: dnsmasq's
+# address=/d/ already covers d and every name under it.
+domains=()
+while IFS= read -r d; do
+  if [[ ${d} =~ ^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
+    domains+=("${d}")
+  else
+    echo "lancache-gen: skipping malformed entry '${d}'" >&2
+  fi
+done < <(cat -- "${paths[@]}" | tr -d '\r' | tr '[:upper:]' '[:lower:]' \
+           | sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^\*\.//' \
+           | sed '/^$/d' | sort -u)
+(( ${#domains[@]} >= MIN_DOMAINS )) \
+  || fail "only ${#domains[@]} domains (< ${MIN_DOMAINS})"
+
+# Staged beside the target: same filesystem (atomic mv) and same SELinux label
+dir=${OUT%/*}
+mkdir -p "${dir}"
+tmp=$(mktemp "${dir}/.${OUT##*/}.XXXXXX")
+trap 'rm -f "${tmp}"' EXIT
+{
+  echo "# lancache overrides - generated by lancache-gen; edits are overwritten."
+  echo "# Source: uklans/cache-domains @ ${commit} (${#domains[@]} domains) -> ${LANCACHE_IP}"
+  echo "# address= answers A with the cache. local= answers every other type,"
+  echo "# AAAA included, with NODATA instead of forwarding it: dnsmasq (2.90 on"
+  echo "# EL10, 2.93 too) forwards AAAA upstream when only address= is present,"
+  echo "# which would let dual-stack clients bypass the IPv4-only cache."
+  for d in "${domains[@]}"; do
+    printf 'address=/%s/%s\nlocal=/%s/\n' "${d}" "${LANCACHE_IP}" "${d}"
+  done
+} > "${tmp}"
+if ! out=$(dnsmasq --test --conf-file="${tmp}" 2>&1); then
+  printf '%s\n' "${out}" >&2
+  fail "generated overrides fail dnsmasq --test"
+fi
+
+body() { grep -v '^#' "$1" 2>/dev/null || true; }
+changed=1
+[[ -f ${OUT} && $(body "${tmp}") == "$(body "${OUT}")" ]] && changed=0
+chmod 644 "${tmp}"
+mv -f "${tmp}" "${OUT}"
+trap - EXIT
+
+if (( ! changed )); then
+  echo "lancache domains unchanged (${#domains[@]}, cache-domains ${commit})"
+  exit "${stale}"
+fi
+echo "wrote ${#domains[@]} lancache domains (cache-domains ${commit})"
+# The toggle refreshes the live copy and restarts dnsmasq under its own lock;
+# if a probe holds the lock right now, that probe's successor does it (<=10 s)
+if [[ -e ${ACTIVE} ]]; then
+  "${TOGGLE}" || echo "lancache-gen: toggle refresh failed; the next probe retries" >&2
+fi
+exit "${stale}"
+EOF
+}
+
+lancache_toggle_script() {
+cat <<EOF
+#!/usr/bin/env bash
+# Steer cacheable CDN downloads at the lancache while its heartbeat answers,
+# and withdraw the overrides (clients go straight to the CDNs) while it
+# doesn't. Written by setup-fedora-controllers.sh; run every 10 s by
+# lancache-toggle.timer. Logs state changes only, never individual probes.
+set -u
+HEARTBEAT_URL=\${HEARTBEAT_URL:-http://${LANCACHE_IP}/lancache-heartbeat}
+SRC=\${SRC:-${LANCACHE_SRC_CONF}}
+ACTIVE=\${ACTIVE:-${LANCACHE_ACTIVE_CONF}}
+DISABLE_FLAG=\${DISABLE_FLAG:-${LANCACHE_DISABLE_FLAG}}
+STATE_DIR=\${STATE_DIR:-${LANCACHE_STATE_DIR}}
+LOCK=\${LOCK:-${LANCACHE_STATE_DIR}.lock}
+# Seconds to wait for a running instance; 0 = leave quietly (timer runs)
+LOCK_WAIT=\${LOCK_WAIT:-0}
+UP_N=\${UP_N:-3}      # consecutive heartbeats before enabling
+DOWN_N=\${DOWN_N:-2}  # consecutive misses before withdrawing
+CACHE_IP=\${CACHE_IP:-${LANCACHE_IP}}
+# try-restart applies a change without starting a dnsmasq an admin stopped;
+# RECOVER_CMD brings dnsmasq back after a restart with new overrides failed
+RESTART_CMD=\${RESTART_CMD:-systemctl try-restart dnsmasq.service}
+RECOVER_CMD=\${RECOVER_CMD:-systemctl restart dnsmasq.service}
+TEST_CMD=\${TEST_CMD:-dnsmasq --test}
+# Seconds before retrying after a failure that the overrides didn't cause
+HOLDOFF_S=\${HOLDOFF_S:-600}
+LOGGER=\${LOGGER:-logger}
+EOF
+cat <<'EOF'
+
+note() { # <priority> <message>
+  printf '%s\n' "$2"
+  "${LOGGER}" -t lancache-toggle -p "daemon.$1" -- "$2" 2>/dev/null || true
+}
+count() { # <state file>: a non-negative integer, 0 when absent or garbled
+  local v
+  v=$(cat "${STATE_DIR}/$1" 2>/dev/null) || v=0
+  [[ ${v} =~ ^[0-9]{1,9}$ ]] || v=0
+  printf '%s\n' "${v}"
+}
+body() { grep -v '^#' "$1" 2>/dev/null; }
+# SIGHUP doesn't re-read address=/local= lines; only a restart applies them
+restart_dns() { sh -c "${RESTART_CMD}"; }
+
+mkdir -p "${STATE_DIR}" || exit 1
+exec 9>"${LOCK}" || exit 1
+if (( LOCK_WAIT > 0 )); then
+  flock -w "${LOCK_WAIT}" 9 || exit 0
+else
+  flock -n 9 || exit 0
+fi
+
+passes=$(count passes)
+fails=$(count fails)
+if curl -fs -o /dev/null --max-time 2 "${HEARTBEAT_URL}"; then
+  result=up; fails=0; (( passes < 999999 )) && passes=$(( passes + 1 ))
+else
+  result=down; passes=0; (( fails < 999999 )) && fails=$(( fails + 1 ))
+fi
+echo "${passes}" > "${STATE_DIR}/passes"
+echo "${fails}" > "${STATE_DIR}/fails"
+echo "${result} $(date -Is)" > "${STATE_DIR}/last"
+
+active=0
+[[ -e ${ACTIVE} ]] && active=1
+want=${active} reason=
+if [[ -e ${DISABLE_FLAG} ]]; then
+  want=0 reason="manually disabled (${DISABLE_FLAG})"
+elif (( fails >= DOWN_N )); then
+  want=0 reason="heartbeat missed ${fails} times"
+elif (( passes >= UP_N )); then
+  want=1
+fi
+if (( want )) && [[ ! -s ${SRC} ]]; then
+  want=0 reason="no generated overrides at ${SRC}"
+fi
+# Overrides generated for another cache IP (--lancache moved while
+# lancache-gen could not run) would send clients to a host the heartbeat
+# never checks
+target=$(sed -n 's/^# Source: .* -> //p' "${SRC}" 2>/dev/null | head -n 1)
+if (( want )) && [[ ${target} != "${CACHE_IP}" ]]; then
+  want=0 reason="${SRC} targets ${target:-an unknown address}, not ${CACHE_IP}; waiting for lancache-gen"
+fi
+
+if (( ! want )); then
+  (( active )) || exit 0
+  rm -f "${ACTIVE}"
+  if ! restart_dns; then
+    sh -c "${RECOVER_CMD}" >/dev/null 2>&1 \
+      || note crit "restarting dnsmasq failed after withdrawing the lancache overrides; DNS may be down"
+    note err "lancache overrides withdrawn (${reason}) but the dnsmasq restart failed"
+    exit 1
+  fi
+  note notice "lancache overrides withdrawn: ${reason}; clients resolve the CDNs directly"
+  exit 0
+fi
+
+# Enable, or refresh a live copy whose source lancache-gen has rewritten
+(( active )) && [[ $(body "${SRC}") == "$(body "${ACTIVE}")" ]] && exit 0
+sum=$(sha256sum < "${SRC}" | cut -d' ' -f1)
+now=$(date +%s)
+# After a failure: "<sum> 0" waits for a new source (the overrides were the
+# cause); "<sum> <epoch>" waits until then. lancache-ctl enable/regen clear it.
+read -r failed_sum failed_until 2>/dev/null < "${STATE_DIR}/failed" || failed_sum=
+if [[ ${failed_sum} == "${sum}" ]] \
+    && { [[ ${failed_until:-0} == 0 ]] || (( now < failed_until )); }; then
+  exit 0
+fi
+give_up() { # <hold-off seconds, 0 = until the source changes> <message>
+  local until=0
+  (( $1 > 0 )) && until=$(( now + $1 ))
+  echo "${sum} ${until}" > "${STATE_DIR}/failed"
+  note err "$2"
+  exit 1
+}
+# Never stack a change on a config that is already broken: a restart would
+# take DNS down for reasons unrelated to the overrides
+if ! sh -c "${TEST_CMD}" >/dev/null 2>&1; then
+  give_up "${HOLDOFF_S}" "merged dnsmasq config already fails --test without new lancache overrides; retrying in ${HOLDOFF_S} s"
+fi
+# A copy, not a symlink: EL10's policy denies dnsmasq_t reads of symlinks in
+# /etc/dnsmasq.d. Staged as dotfiles, which conf-dir always skips; the
+# previous live copy is kept until the new one is proven.
+dir=${ACTIVE%/*} name=${ACTIVE##*/}
+prev=
+if (( active )); then
+  prev=$(mktemp "${dir}/.${name}.prev.XXXXXX") || exit 1
+  cp -f "${ACTIVE}" "${prev}" || { rm -f "${prev}"; exit 1; }
+fi
+restore() { # put back exactly what the running dnsmasq loaded
+  if [[ -n ${prev} ]]; then mv -f "${prev}" "${ACTIVE}"; else rm -f "${ACTIVE}"; fi
+}
+tmp=$(mktemp "${dir}/.${name}.XXXXXX") || { [[ -z ${prev} ]] || rm -f "${prev}"; exit 1; }
+if ! { cp -f "${SRC}" "${tmp}" && chmod 644 "${tmp}" && mv -f "${tmp}" "${ACTIVE}"; }; then
+  rm -f "${tmp}"
+  restore
+  note err "could not install ${ACTIVE}"
+  exit 1
+fi
+if ! sh -c "${TEST_CMD}" >/dev/null 2>&1; then
+  restore
+  give_up 0 "lancache overrides make the merged dnsmasq config fail --test; previous state kept until ${SRC} changes"
+fi
+if ! restart_dns; then
+  restore
+  if sh -c "${RECOVER_CMD}" >/dev/null 2>&1; then
+    give_up "${HOLDOFF_S}" "dnsmasq failed to restart with the lancache overrides; restored the previous config, retrying in ${HOLDOFF_S} s"
+  fi
+  note crit "dnsmasq failed to restart with the lancache overrides and again without them; DNS may be down"
+  give_up "${HOLDOFF_S}" "dnsmasq restart failed; retrying in ${HOLDOFF_S} s"
+fi
+[[ -z ${prev} ]] || rm -f "${prev}"
+rm -f "${STATE_DIR}/failed"
+if (( active )); then
+  note notice "lancache overrides refreshed from ${SRC}"
+else
+  note notice "lancache healthy (${passes} heartbeats): CDN downloads now resolve to the cache"
+fi
+EOF
+}
+
+lancache_ctl_script() {
+cat <<EOF
+#!/usr/bin/env bash
+# Inspect or steer the lancache DNS overrides by hand.
+# Written by setup-fedora-controllers.sh.
+set -euo pipefail
+SRC=\${SRC:-${LANCACHE_SRC_CONF}}
+ACTIVE=\${ACTIVE:-${LANCACHE_ACTIVE_CONF}}
+DISABLE_FLAG=\${DISABLE_FLAG:-${LANCACHE_DISABLE_FLAG}}
+STATE_DIR=\${STATE_DIR:-${LANCACHE_STATE_DIR}}
+TOGGLE=\${TOGGLE:-${LANCACHE_TOGGLE}}
+GEN=\${GEN:-${LANCACHE_GEN}}
+DNS_SERVER=\${DNS_SERVER:-127.0.0.1}
+DNS_PORT=\${DNS_PORT:-53}
+PROBE_NAME=\${PROBE_NAME:-lancache.steamcontent.com}
+EOF
+cat <<'EOF'
+
+usage() {
+  cat <<USAGE
+Usage: ${0##*/} [status|enable|disable|regen]
+  status   overrides, heartbeat counters, manual flag, and a live lookup
+  disable  force the overrides off (survives reboots) and apply it now
+  enable   clear the manual flag; the heartbeat decides again
+  regen    rebuild the overrides from uklans/cache-domains now
+USAGE
+}
+state() { cat "${STATE_DIR}/$1" 2>/dev/null || echo "$2"; }
+lookup() { # <type>
+  local answer
+  answer=$(dig +short +time=2 +tries=1 -p "${DNS_PORT}" "@${DNS_SERVER}" "$1" "${PROBE_NAME}" 2>&1 \
+           | paste -sd ' ' -) || true
+  printf '%-10s: %s\n' "$1" "${answer:-(no answer)}"
+}
+status() {
+  if [[ -e ${ACTIVE} ]]; then
+    echo "overrides : ACTIVE (${ACTIVE})"
+  else
+    echo "overrides : inactive"
+  fi
+  if [[ -s ${SRC} ]]; then
+    echo "generated : $(sed -n 's/^# Source: //p' "${SRC}")"
+  else
+    echo "generated : none yet (${SRC})"
+  fi
+  if [[ -e ${DISABLE_FLAG} ]]; then
+    echo "manual    : DISABLED (${DISABLE_FLAG}); '${0##*/} enable' clears it"
+  else
+    echo "manual    : not disabled"
+  fi
+  echo "heartbeat : last $(state last never); passes=$(state passes 0) fails=$(state fails 0)"
+  echo "            (on after 3 consecutive passes, off after 2 misses)"
+  if [[ -s ${STATE_DIR}/failed ]]; then
+    local until
+    read -r _ until < "${STATE_DIR}/failed"
+    if [[ ${until:-0} == 0 ]]; then
+      echo "last try  : FAILED; off until ${SRC} changes ('${0##*/} enable' retries now)"
+    else
+      echo "last try  : FAILED; retry after $(date -d "@${until}" '+%F %T') ('${0##*/} enable' retries now)"
+    fi
+  fi
+  if command -v dig >/dev/null 2>&1; then
+    echo "lookup    : ${PROBE_NAME} @${DNS_SERVER}#${DNS_PORT}"
+    lookup A
+    lookup AAAA
+  fi
+}
+
+case ${1:-status} in
+  status)  status ;;
+  disable) mkdir -p "${DISABLE_FLAG%/*}"; touch "${DISABLE_FLAG}"
+           LOCK_WAIT=15 "${TOGGLE}" || true; status ;;
+  enable)  rm -f "${DISABLE_FLAG}" "${STATE_DIR}/failed"
+           LOCK_WAIT=15 "${TOGGLE}" || true; status ;;
+  regen)   rm -f "${STATE_DIR}/failed"
+           exec "${GEN}" ;;
+  -h|--help) usage ;;
+  *)       usage >&2; exit 2 ;;
+esac
+EOF
+}
+#--- End lancache DNS helpers ------------------------------------------------
 
 usage() {
   cat <<EOF
@@ -307,9 +908,10 @@ Options:
   --dns / --no-dns                  enable/disable the dnsmasq LAN DNS server
                                     (hagezi pro blocklist, Cloudflare+Google
                                     upstreams over IPv4+IPv6)
-  --lancache <ip> / --no-lancache   steer Steam downloads at a lancache on
-                                    <ip>; auto-falls back to the upstreams
-                                    while the cache is unreachable (needs dns)
+  --lancache <ip> / --no-lancache   steer uklans/cache-domains downloads
+                                    (Steam, Epic, Battle.net, ...) at a
+                                    lancache on <ip>; withdrawn automatically
+                                    while its heartbeat fails (needs dns)
   --cockpit / --no-cockpit          force Cockpit on/off
   --auto-cockpit                     enable Cockpit unless a constrained
                                     resource profile is active (default)
@@ -323,13 +925,19 @@ Options:
   --auto-zram                       enable zram when no non-zram swap is active
                                     (default)
   --firewall-zone <zone>            firewalld zone for LAN-facing services
+  --dry-run                         walk every step against this host and
+                                    report what would change - package,
+                                    unit, firewall and image actions plus a
+                                    diff of every file (secrets redacted) -
+                                    without changing anything (still root)
   -h, --help                        show this help and exit
 
 Controllers, Shadowsocks, and DNS default to enabled. Cockpit and resource
 profiles default to auto. Environment equivalents are ENABLE_OMADA,
 ENABLE_UNIFI_OS, ENABLE_SHADOWSOCKS, ENABLE_DNS (0|1), ENABLE_COCKPIT,
 LOW_RAM_MODE, SMALL_STORAGE_MODE, ZRAM_MODE (auto|on|off|0|1), LANCACHE_IP,
-and FIREWALL_ZONE. Arguments override the environment. MongoDB is provisioned
+FIREWALL_ZONE, and DRY_RUN (0|1; DRY_RUN_KEEP=1 keeps the rendered files).
+Arguments override the environment. MongoDB is provisioned
 only for Omada. Zram auto mode ignores already-active /dev/zram devices when
 deciding whether the host has another swap provider.
 OMADA_IMAGE and SS_IMAGE may override their default moving container channels
@@ -344,7 +952,8 @@ Examples:
   ${0##*/}                                # full t640 deployment
   ${0##*/} --no-unifi-os --no-cockpit     # t240-compatible subset
   ENABLE_UNIFI_OS=0 ${0##*/}              # same idea via environment
-  ${0##*/} --lancache 192.168.1.99        # the site with the Steam cache
+  ${0##*/} --lancache 192.168.1.11        # the site with the lancache
+  ${0##*/} --dry-run --lancache 192.168.1.11   # preview that run first
 EOF
 }
 
@@ -377,15 +986,16 @@ while (( $# )); do
                       [[ -n ${LANCACHE_IP} ]] || die "--lancache needs an IP argument"
                       shift ;;
     --no-lancache)    LANCACHE_IP= ;;
+    --dry-run)        DRY_RUN=1 ;;
     -h|--help)        usage; exit 0 ;;
     *)                usage >&2; die "Unknown option: $1" ;;
   esac
   shift
 done
 
-[[ ${EUID} -eq 0 ]] || die "Run as root."
+[[ ${EUID} -eq 0 ]] || die "Run as root (a dry run reads root-only state too)."
 
-for flag in ENABLE_OMADA ENABLE_UNIFI_OS ENABLE_SHADOWSOCKS ENABLE_DNS; do
+for flag in ENABLE_OMADA ENABLE_UNIFI_OS ENABLE_SHADOWSOCKS ENABLE_DNS DRY_RUN; do
   [[ ${!flag} =~ ^[01]$ ]] || die "${flag} must be 0 or 1 (got '${!flag}')"
 done
 normalize_mode() {
@@ -412,6 +1022,279 @@ if [[ -n ${LANCACHE_IP} ]]; then
   (( ENABLE_DNS )) || die "--lancache requires the dns component (drop --no-dns)"
   [[ ${LANCACHE_IP} =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] \
     || die "LANCACHE_IP must be an IPv4 address (got '${LANCACHE_IP}')"
+fi
+
+#--- Dry-run command overrides (defined only for --dry-run) ------------------
+if (( DRY_RUN )); then
+  DRY_ROOT=$(command mktemp -d "${TMPDIR:-/var/tmp}/controller-dry-run.XXXXXX")
+  : > "${DRY_ROOT}/actions"
+  : > "${DRY_ROOT}/gone"
+  # [dry-run] lines bypass the >/dev/null on the commands they replace
+  exec {DRY_OUT}>&1
+  declare -A DRY_ACTIVE=() DRY_ENABLED=() DRY_FW=()
+  trap 'dry_finish $?' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  dry_unit() { if [[ $1 == *.* ]]; then printf '%s' "$1"; else printf '%s.service' "$1"; fi; }
+  dry_unit_active() {
+    local unit
+    unit=$(dry_unit "$1")
+    if [[ -v "DRY_ACTIVE[${unit}]" ]]; then [[ ${DRY_ACTIVE[${unit}]} == 1 ]]; return; fi
+    command systemctl is-active --quiet "${unit}" 2>/dev/null
+  }
+  dry_unit_enabled() {
+    local unit
+    unit=$(dry_unit "$1")
+    if [[ -v "DRY_ENABLED[${unit}]" ]]; then [[ ${DRY_ENABLED[${unit}]} == 1 ]]; return; fi
+    command systemctl is-enabled --quiet "${unit}" 2>/dev/null
+  }
+  systemctl() {
+    local arg sub='' now=0 quiet=0 units=() unit what
+    for arg; do
+      case ${arg} in
+        --now) now=1 ;;
+        -q|--quiet) quiet=1 ;;
+        -*) ;;
+        *) if [[ -z ${sub} ]]; then sub=${arg}; else units+=("${arg}"); fi ;;
+      esac
+    done
+    case ${sub} in
+      is-active|is-enabled)
+        (( quiet )) || { command systemctl "$@"; return; }
+        for unit in "${units[@]}"; do
+          if [[ ${sub} == is-active ]]; then
+            dry_unit_active "${unit}" || return 3
+          else
+            dry_unit_enabled "${unit}" || return 1
+          fi
+        done ;;
+      start)
+        for unit in "${units[@]}"; do
+          unit=$(dry_unit "${unit}")
+          dry_unit_active "${unit}" || dry_plan "start ${unit}"
+          DRY_ACTIVE[${unit}]=1
+        done ;;
+      stop)
+        for unit in "${units[@]}"; do
+          unit=$(dry_unit "${unit}")
+          if dry_unit_active "${unit}"; then dry_plan "stop ${unit}"; fi
+          DRY_ACTIVE[${unit}]=0
+        done ;;
+      restart)
+        for unit in "${units[@]}"; do
+          unit=$(dry_unit "${unit}")
+          dry_plan "restart ${unit}"
+          DRY_ACTIVE[${unit}]=1
+        done ;;
+      try-restart)
+        for unit in "${units[@]}"; do
+          unit=$(dry_unit "${unit}")
+          if dry_unit_active "${unit}"; then dry_plan "restart ${unit}"; fi
+        done ;;
+      enable|disable)
+        for unit in "${units[@]}"; do
+          unit=$(dry_unit "${unit}")
+          what=
+          if [[ ${sub} == enable ]]; then
+            dry_unit_enabled "${unit}" || what=enable
+            if (( now )) && ! dry_unit_active "${unit}"; then what=${what:+${what} and }start; fi
+            DRY_ENABLED[${unit}]=1
+            (( now )) && DRY_ACTIVE[${unit}]=1
+          else
+            if dry_unit_enabled "${unit}"; then what=disable; fi
+            if (( now )) && dry_unit_active "${unit}"; then what=${what:+${what} and }stop; fi
+            DRY_ENABLED[${unit}]=0
+            (( now )) && DRY_ACTIVE[${unit}]=0
+          fi
+          if [[ -n ${what} ]]; then dry_plan "${what} ${unit}"; fi
+        done ;;
+      daemon-reload) dry_plan "reload systemd units (systemctl daemon-reload)" ;;
+      cat|show|status|list-*|is-failed|is-system-running|get-default|'')
+        command systemctl "$@"
+        return ;;
+      *) dry_plan "run: systemctl $(dry_quote "$@")" ;;
+    esac
+    return 0
+  }
+  dnf() {
+    local arg sub='' pkgs=() missing=() updates rc=0
+    for arg; do
+      case ${arg} in
+        -*) ;;
+        *) if [[ -z ${sub} ]]; then sub=${arg}; else pkgs+=("${arg}"); fi ;;
+      esac
+    done
+    case ${sub} in
+      install)
+        for arg in "${pkgs[@]}"; do
+          rpm -q --quiet --whatprovides "${arg}" 2>/dev/null || missing+=("${arg}")
+        done
+        if (( ${#missing[@]} )); then dry_plan "install packages: ${missing[*]}"; fi ;;
+      upgrade)
+        updates=$(command dnf -q check-update 2>/dev/null) || rc=$?
+        case ${rc} in
+          0) dry_note "no Rocky package updates are pending" ;;
+          100) dry_plan "upgrade these packages (dnf -y upgrade --refresh):"
+               sed -n 's/^\(..*\)$/      \1/p' <<<"${updates}" >&"${DRY_OUT}" ;;
+          *) dry_note "could not list pending updates (dnf check-update exited ${rc}); a real run applies whatever is pending" ;;
+        esac ;;
+      needs-restarting|check-update|list|info|repoquery|repolist|history)
+        command dnf "$@"; return ;;
+      *) dry_plan "run: dnf $(dry_quote "$@")" ;;
+    esac
+    return 0
+  }
+  podman() {
+    case "${1:-} ${2:-}" in
+      'image inspect'|'image exists'|'container exists'|'container inspect'|'inspect '*|'logs '*|'ps '*|'images '*|'version '*|'info '*)
+        command podman "$@" ;;
+      *) dry_plan "run: podman $(dry_quote "$@")" ;;
+    esac
+  }
+  firewall-cmd() {
+    local arg zone='' op='' item=''
+    for arg; do
+      case ${arg} in
+        --get-*|--query-*|--list-*|--info-*|--state) command firewall-cmd "$@"; return ;;
+        --zone=*) zone=${arg#--zone=} ;;
+        --add-service=*|--remove-service=*|--add-port=*|--remove-port=*)
+          op=${arg%%=*} item=${arg#*=} ;;
+      esac
+    done
+    if [[ -n ${op} ]]; then
+      # Queue the desired state; the reload reports only net changes, so the
+      # script's remove-then-add convergence doesn't read as churn
+      if [[ ${op} == --add-* ]]; then
+        DRY_FW["${zone}|${op#--add-}|${item}"]=1
+      else
+        DRY_FW["${zone}|${op#--remove-}|${item}"]=0
+      fi
+      return 0
+    fi
+    [[ " $* " == *' --reload '* ]] && dry_flush_firewall
+    dry_plan "run: firewall-cmd $(dry_quote "$@")"
+  }
+  tune2fs() {
+    if [[ ${1:-} == -l ]]; then command tune2fs "$@"; else dry_plan "run: tune2fs $(dry_quote "$@")"; fi
+  }
+  sysctl() {
+    local arg
+    for arg; do
+      case ${arg} in
+        -w|--write|--system|-p|--load*) dry_plan "run: sysctl $(dry_quote "$@")"; return 0 ;;
+      esac
+    done
+    command sysctl "$@"
+  }
+  restorecon() { dry_plan "run: restorecon $(dry_quote "$@")"; }
+  sync() { :; }
+  rm() {
+    local arg paths=()
+    for arg; do [[ ${arg} == -* ]] || paths+=("${arg}"); done
+    for arg in "${paths[@]}"; do
+      if dry_under_root "${arg}"; then command rm -rf -- "${arg}"; continue; fi
+      command rm -rf -- "${DRY_ROOT}/root${arg}"
+      if [[ -e ${arg} || -L ${arg} ]] && ! dry_gone "${arg}"; then
+        printf '%s\n' "${arg}" >> "${DRY_ROOT}/gone"
+        if [[ -d ${arg} && ! -L ${arg} ]]; then
+          dry_plan "remove ${arg} (directory)"
+        else
+          dry_plan "remove ${arg}"
+        fi
+      fi
+    done
+  }
+  mkdir() {
+    local arg
+    for arg; do
+      [[ ${arg} == -* ]] && continue
+      if dry_under_root "${arg}"; then command mkdir -p -- "${arg}"; continue; fi
+      [[ -d ${arg} ]] || dry_plan "create directory ${arg}"
+    done
+  }
+  install() {
+    local directory=0 mode='' args=() arg
+    while (( $# )); do
+      case $1 in
+        -d) directory=1 ;;
+        -m) mode=$2; shift ;;
+        -m*) mode=${1#-m} ;;
+        -*) ;;
+        *) args+=("$1") ;;
+      esac
+      shift
+    done
+    if (( directory )); then
+      for arg in "${args[@]}"; do
+        if dry_under_root "${arg}"; then command mkdir -p -- "${arg}"; continue; fi
+        [[ -d ${arg} ]] || dry_plan "create directory ${arg}${mode:+ (mode ${mode})}"
+      done
+      return 0
+    fi
+    if dry_under_root "${args[1]}"; then
+      command install -m "${mode:-755}" "${args[0]}" "${args[1]}"
+      return
+    fi
+    dry_write "${args[1]}" "${mode:-755}" < "$(dry_path "${args[0]}")"
+  }
+  chmod() {
+    local mode=$1 arg
+    shift
+    for arg; do
+      if dry_under_root "${arg}"; then
+        command chmod "${mode}" "${arg}"
+      elif [[ -e ${DRY_ROOT}/root${arg} ]]; then
+        command chmod "${mode}" "${DRY_ROOT}/root${arg}"
+      elif [[ -e ${arg} && $(stat -c %a "${arg}") != "${mode}" ]]; then
+        dry_plan "chmod ${mode} ${arg}"
+      fi
+    done
+  }
+  mv() { if dry_under_root "${!#}"; then command mv "$@"; else dry_plan "run: mv $(dry_quote "$@")"; fi; }
+  cp() { if dry_under_root "${!#}"; then command cp "$@"; else dry_plan "run: cp $(dry_quote "$@")"; fi; }
+  ln() {
+    local arg args=()
+    for arg; do [[ ${arg} == -* ]] || args+=("${arg}"); done
+    if dry_under_root "${args[-1]}"; then command ln "$@"; return; fi
+    [[ $(readlink "${args[-1]}" 2>/dev/null) == "${args[0]}" ]] \
+      || dry_plan "symlink ${args[-1]} -> ${args[0]}"
+  }
+  mktemp() { # temp files the script would keep under /var/lib go to scratch
+    local arg opts=() template=''
+    for arg; do if [[ ${arg} == -* ]]; then opts+=("${arg}"); else template=${arg}; fi; done
+    if [[ ${template} == */* ]] && ! dry_under_root "${template}"; then
+      command mkdir -p "${DRY_ROOT}/scratch"
+      template=${DRY_ROOT}/scratch/${template##*/}
+    fi
+    command mktemp "${opts[@]}" ${template:+"${template}"}
+  }
+  curl() { # GETs to stdout or scratch run; downloads into the host do not
+    local arg previous='' output=''
+    for arg; do [[ ${previous} == -o ]] && output=${arg}; previous=${arg}; done
+    if [[ -n ${output} && ${output} != /dev/null ]] && ! dry_under_root "${output}"; then
+      dry_plan "download to ${output}: curl $(dry_quote "$@")"
+      return 0
+    fi
+    command curl "$@"
+  }
+  sed() {
+    local arg in_place=0 args=() file src buf
+    for arg; do if [[ ${arg} == -i ]]; then in_place=1; else args+=("${arg}"); fi; done
+    (( in_place )) || { command sed "$@"; return; }
+    file=${args[-1]}
+    unset 'args[-1]'
+    src=$(dry_path "${file}")
+    if [[ ! -f ${src} ]]; then
+      dry_note "${file} does not exist yet (its package arrives earlier in a real run); edit not previewed"
+      return 0
+    fi
+    buf=$(command mktemp "${DRY_ROOT}/buf.XXXXXX")
+    command sed "${args[@]}" "${src}" > "${buf}"
+    dry_write "${file}" "$(stat -c %a "${src}")" < "${buf}"
+    command rm -f "${buf}"
+  }
+  dry_note "DRY RUN: nothing on this host will be changed; '[dry-run] would ...' lines and the closing file report show what a real run does"
 fi
 
 #--- Platform and resource preflight ---------------------------------------
@@ -573,6 +1456,10 @@ dnf -y install "${BASE_PACKAGES[@]}" >/dev/null
 if (( ENABLE_DNS )); then
   dnf -y install dnsmasq >/dev/null
 fi
+if [[ -n ${LANCACHE_IP} ]]; then
+  # lancache-gen uses git+jq (baseline); lancache-ctl status uses dig
+  dnf -y install bind-utils >/dev/null
+fi
 if (( ENABLE_COCKPIT )); then
   log "Installing Cockpit host, files, updates, Podman, and storage modules"
   # cockpit-system (pulled by cockpit) already supplies services, logs,
@@ -588,25 +1475,6 @@ systemctl enable --now firewalld.service >/dev/null 2>&1 \
 
 # State is needed while reconciling resource profiles below.
 install -d -m 700 "${STATE_DIR}"
-atomic_write_file() { # <target> <mode>; content on stdin
-  local target=$1 mode=$2 tmp
-  tmp=$(mktemp "${target}.tmp.XXXXXX")
-  if ! cat > "${tmp}"; then
-    rm -f "${tmp}"
-    return 1
-  fi
-  chmod "${mode}" "${tmp}"
-  mv -f "${tmp}" "${target}"
-}
-atomic_copy_file() { # <source> <target> <mode>
-  local source=$1 target=$2 mode=$3 tmp
-  tmp=$(mktemp "${target}.tmp.XXXXXX")
-  if ! install -m "${mode}" "${source}" "${tmp}"; then
-    rm -f "${tmp}"
-    return 1
-  fi
-  mv -f "${tmp}" "${target}"
-}
 
 #--- Zram swap and compressed-swap paging policy ----------------------------
 # Keep the original state filename so hosts managed by the previous low-RAM
@@ -695,7 +1563,7 @@ EOF
     else
       systemctl start dev-zram0.swap >/dev/null 2>&1 \
         || die "Could not activate dev-zram0.swap; see journalctl -eu dev-zram0.swap"
-      zram_swap_is_active \
+      (( DRY_RUN )) || zram_swap_is_active \
         || die "dev-zram0.swap started but /dev/zram0 is absent from the active swap table"
     fi
   elif any_zram_swap_is_active; then
@@ -835,22 +1703,22 @@ if (( SMALL_STORAGE_ACTIVE )); then
   if [[ ! -f ${KERNEL_LIMIT_STATE} ]]; then
     CURRENT_KERNEL_LIMIT=$(sed -n -E 's/^[[:space:]]*installonly_limit[[:space:]]*=[[:space:]]*([^[:space:]#]+).*/\1/p' /etc/dnf/dnf.conf | tail -1)
     if (( LEGACY_SMALL_STORAGE_PROFILE )) && [[ ${CURRENT_KERNEL_LIMIT:-} == 2 ]]; then
-      printf '%s\n' 3 > "${KERNEL_LIMIT_STATE}"
+      printf '%s\n' 3 | atomic_write_file "${KERNEL_LIMIT_STATE}" 644
     else
-      printf '%s\n' "${CURRENT_KERNEL_LIMIT:-__unset__}" > "${KERNEL_LIMIT_STATE}"
+      printf '%s\n' "${CURRENT_KERNEL_LIMIT:-__unset__}" | atomic_write_file "${KERNEL_LIMIT_STATE}" 644
     fi
   fi
   if grep -qE '^[[:space:]]*installonly_limit[[:space:]]*=' /etc/dnf/dnf.conf; then
     sed -i -E 's/^[[:space:]]*installonly_limit[[:space:]]*=.*/installonly_limit=2/' /etc/dnf/dnf.conf
   else
-    printf '%s\n' 'installonly_limit=2' >> /etc/dnf/dnf.conf
+    append_line /etc/dnf/dnf.conf 'installonly_limit=2'
   fi
 
   mkdir -p /etc/systemd/journald.conf.d
   JOURNAL_CONTENT=$'# Written by setup-fedora-controllers.sh for SMALL_STORAGE_MODE.\n[Journal]\nSystemMaxUse=100M'
   JOURNAL_CHANGED=0
   if [[ $(cat "${JOURNAL_DROPIN}" 2>/dev/null || true) != "${JOURNAL_CONTENT}" ]]; then
-    printf '%s\n' "${JOURNAL_CONTENT}" > "${JOURNAL_DROPIN}"
+    printf '%s\n' "${JOURNAL_CONTENT}" | atomic_write_file "${JOURNAL_DROPIN}" 644
     JOURNAL_CHANGED=1
   fi
   # Remove the old filename only when its exact content proves script ownership.
@@ -874,12 +1742,12 @@ if (( SMALL_STORAGE_ACTIVE )); then
           CURRENT_RESERVE=$(( ROOT_BLOCK_COUNT * 5 / 100 ))
         fi
       fi
-      printf '%s\n' "${CURRENT_RESERVE}" > "${EXT4_RESERVE_STATE}"
+      printf '%s\n' "${CURRENT_RESERVE}" | atomic_write_file "${EXT4_RESERVE_STATE}" 644
     fi
     tune2fs -m 1 "${ROOT_SOURCE}" >/dev/null
     tune2fs -l "${ROOT_SOURCE}" 2>/dev/null \
       | awk -F: '/Reserved block count/ {gsub(/[[:space:]]/, "", $2); print $2}' \
-      > "${EXT4_RESERVE_APPLIED_STATE}"
+      | atomic_write_file "${EXT4_RESERVE_APPLIED_STATE}" 644
     log "ext4 root reserve set to 1% on ${ROOT_SOURCE}"
   else
     warn "small-storage profile requested but root is ${ROOT_FSTYPE}; ext4 reserve adjustment skipped"
@@ -957,12 +1825,16 @@ set_automatic() {
   # Set key = value under [commands], replacing an existing line or
   # inserting after the section header. Idempotent; preserves comments.
   local key=$1 val=$2 f=/etc/dnf/automatic.conf
-  if grep -qE "^${key}[[:space:]]*=" "${f}"; then
+  if (( DRY_RUN )) && [[ ! -f $(dry_path "${f}") ]]; then
+    dry_note "${f} arrives with dnf-automatic; a real run then sets ${key} = ${val}"
+    return 0
+  fi
+  if grep -qE "^${key}[[:space:]]*=" "$(dry_path "${f}")"; then
     sed -i -E "s/^${key}[[:space:]]*=.*/${key} = ${val}/" "${f}"
   else
     sed -i "/^\[commands\]/a ${key} = ${val}" "${f}"
   fi
-  grep -q "^${key} = ${val}$" "${f}" \
+  grep -q "^${key} = ${val}$" "$(dry_path "${f}")" \
     || die "Could not set ${key} in ${f}"
 }
 set_automatic apply_updates yes
@@ -1017,6 +1889,7 @@ LEGACY_OMADA_WAS_ACTIVE=0
 stop_unit_and_verify_inactive() {
   local unit=$1
   systemctl stop "${unit}.service" >/dev/null 2>&1 || true
+  (( ! DRY_RUN )) || return 0
   ! systemctl is-active --quiet "${unit}.service" || return 1
   if [[ ${unit} == unifi-db || ${unit} == omada-db ]] \
       && podman container exists "${unit}" 2>/dev/null \
@@ -1027,6 +1900,7 @@ stop_unit_and_verify_inactive() {
 start_unit_and_verify_active() {
   local unit=$1
   systemctl start "${unit}.service" || return 1
+  (( ! DRY_RUN )) || return 0
   systemctl is-active --quiet "${unit}.service" || return 1
   if [[ ${unit} == unifi-db || ${unit} == omada-db ]]; then
     podman container exists "${unit}" 2>/dev/null || return 1
@@ -1263,14 +2137,31 @@ OMADA_FILES=("${QUADLET_DIR}/omada.container" "${OMADA_DIR}/omada.env"
              "${OMADA_IMAGE_STATE}")
 SS_FILES=("${QUADLET_DIR}/shadowsocks.container" "${SS_DIR}/config.json"
           "${SS_IMAGE_STATE}")
-# hagezi-pro.conf and lancache.conf are excluded on purpose: their own
-# updater/toggle already restart dnsmasq exactly when they change
-DNSMASQ_FILES=(/etc/dnsmasq.conf /etc/dnsmasq.d/lan-dns.conf)
+# hagezi-pro.conf and 50-lancache.conf are excluded on purpose: their own
+# updater/toggle already restart dnsmasq exactly when they change. The
+# lancache base fragment changes the hash when it appears or disappears;
+# removing an override file sets DNSMASQ_FORCE_RESTART instead, because the
+# hash skips files that are absent.
+DNSMASQ_FILES=(/etc/dnsmasq.conf /etc/dnsmasq.d/lan-dns.conf
+               "${LANCACHE_BASE_CONF}")
 #--- End service input catalog ----------------------------------------------
 
 # The || true keeps a missing input file from tripping set -e/pipefail:
 # it still changes the hash (restart), it must never kill the script
-input_hash() { { sha256sum "$@" 2>/dev/null || true; } | sha256sum | awk '{print $1}'; }
+input_hash() {
+  if (( DRY_RUN )); then
+    # Same digest as below, computed over the content a real run would leave
+    local file view
+    for file; do
+      view=$(dry_path "${file}")
+      if [[ -f ${view} ]]; then
+        printf '%s  %s\n' "$(sha256sum < "${view}" | awk '{print $1}')" "${file}"
+      fi
+    done | sha256sum | awk '{print $1}'
+    return
+  fi
+  { sha256sum "$@" 2>/dev/null || true; } | sha256sum | awk '{print $1}'
+}
 needs_restart() {  # <svc> <input files...>
   local svc=$1; shift
   systemctl is-active --quiet "${svc}.service" || return 0
@@ -1280,7 +2171,7 @@ needs_restart() {  # <svc> <input files...>
 }
 record_applied() {  # <svc> <input files...>
   local svc=$1; shift
-  input_hash "$@" > "${STATE_DIR}/${svc}.applied"
+  input_hash "$@" | atomic_write_file "${STATE_DIR}/${svc}.applied" 644
 }
 
 #--- Credentials (generated once, reused on rerun) --------------------------
@@ -1315,15 +2206,15 @@ if (( NEED_CREDENTIALS )); then
   else
     log "Reusing credentials from ${CRED_FILE}"
   fi
-  grep -q '^MONGO_ROOT_PASS=' "${CRED_FILE}" \
-    || echo "MONGO_ROOT_PASS=$(openssl rand -hex 24)" >> "${CRED_FILE}"
-  grep -q '^MONGO_OMADA_PASS=' "${CRED_FILE}" \
-    || echo "MONGO_OMADA_PASS=$(openssl rand -hex 24)" >> "${CRED_FILE}"
-  grep -q '^SS_PASSWORD=' "${CRED_FILE}" \
-    || echo "SS_PASSWORD=$(openssl rand -base64 32)" >> "${CRED_FILE}"
+  grep -q '^MONGO_ROOT_PASS=' "$(dry_path "${CRED_FILE}")" \
+    || append_line "${CRED_FILE}" "MONGO_ROOT_PASS=$(openssl rand -hex 24)"
+  grep -q '^MONGO_OMADA_PASS=' "$(dry_path "${CRED_FILE}")" \
+    || append_line "${CRED_FILE}" "MONGO_OMADA_PASS=$(openssl rand -hex 24)"
+  grep -q '^SS_PASSWORD=' "$(dry_path "${CRED_FILE}")" \
+    || append_line "${CRED_FILE}" "SS_PASSWORD=$(openssl rand -base64 32)"
   chmod 600 "${CRED_FILE}"
   # shellcheck source=/dev/null
-  source "${CRED_FILE}"
+  source "$(dry_path "${CRED_FILE}")"
   if (( LEGACY_OMADA_DB )) && [[ -f ${LEGACY_CRED_FILE} ]]; then
     LEGACY_MONGO_ROOT_PASS=$(sed -n 's/^MONGO_ROOT_PASS=//p' "${LEGACY_CRED_FILE}" | tail -1)
     LEGACY_MONGO_OMADA_PASS=$(sed -n 's/^MONGO_OMADA_PASS=//p' "${LEGACY_CRED_FILE}" | tail -1)
@@ -1509,25 +2400,44 @@ fi
 
 if (( ENABLE_MONGO || ENABLE_OMADA || ENABLE_SHADOWSOCKS )); then
   QUADLET_GENERATOR=/usr/lib/systemd/system-generators/podman-system-generator
+  if (( DRY_RUN )) && [[ ! -x ${QUADLET_GENERATOR} ]]; then
+    dry_note "podman is not installed yet; a real run validates the Quadlets once it is"
+  else
   [[ -x ${QUADLET_GENERATOR} ]] || die "Podman Quadlet generator is missing"
+  # dry_view_dir is the directory itself on a real run, the would-be copy on a dry run
   if (( LEGACY_UNIFI_QUADLETS )); then
-    if ! STAGED_QUADLET_DIAGNOSTICS=$(QUADLET_UNIT_DIRS="${QUADLET_STAGE_DIR}:${QUADLET_DIR}" \
+    if ! STAGED_QUADLET_DIAGNOSTICS=$(QUADLET_UNIT_DIRS="$(dry_view_dir "${QUADLET_STAGE_DIR}"):$(dry_view_dir "${QUADLET_DIR}")" \
         "${QUADLET_GENERATOR}" --dryrun 2>&1); then
       warn "${STAGED_QUADLET_DIAGNOSTICS}"
       die "Staged Quadlets failed generator validation; legacy services remain untouched"
     fi
     log "Staged replacement Quadlets passed generator validation"
   else
-    if ! QUADLET_DIAGNOSTICS=$(QUADLET_UNIT_DIRS="${QUADLET_DIR}" \
+    if ! QUADLET_DIAGNOSTICS=$(QUADLET_UNIT_DIRS="$(dry_view_dir "${QUADLET_DIR}")" \
         "${QUADLET_GENERATOR}" --dryrun 2>&1); then
       warn "${QUADLET_DIAGNOSTICS}"
       die "Configured Quadlets in ${QUADLET_DIR} failed generator validation"
     fi
     log "Configured Quadlets passed generator validation"
   fi
+  fi
 fi
 
 #--- dnsmasq: LAN DNS (no DHCP) + hagezi pro blocklist ----------------------
+# dnsmasq --test on the configuration a restart would load; on a dry run
+# that is the would-be dnsmasq.conf and conf-dir, assembled in scratch
+dnsmasq_config_test() {
+  if (( ! DRY_RUN )); then dnsmasq --test; return; fi
+  local view conf=${DRY_ROOT}/dnsmasq-test.conf
+  if ! command -v dnsmasq >/dev/null 2>&1; then
+    dry_note "dnsmasq is not installed yet; a real run tests its merged config before restarting it"
+    return 0
+  fi
+  view=$(dry_view_dir /etc/dnsmasq.d)
+  command sed -E "s#^([[:space:]]*conf-dir=)/etc/dnsmasq\.d#\1${view}#" \
+    "$(dry_path /etc/dnsmasq.conf)" > "${conf}"
+  dnsmasq --test --conf-file="${conf}"
+}
 if (( ENABLE_DNS )); then
 log "Configuring dnsmasq (DNS only, hagezi pro blocklist)"
 
@@ -1537,7 +2447,7 @@ log "Configuring dnsmasq (DNS only, hagezi pro blocklist)"
 # itself for the host, and repoint resolv.conf off the (now dead) stub.
 if systemctl is-active --quiet systemd-resolved; then
   mkdir -p /etc/systemd/resolved.conf.d
-  cat > /etc/systemd/resolved.conf.d/10-no-stub-listener.conf <<EOF
+  atomic_write_file /etc/systemd/resolved.conf.d/10-no-stub-listener.conf 644 <<EOF
 [Resolve]
 DNSStubListener=no
 EOF
@@ -1547,9 +2457,12 @@ EOF
   systemctl restart systemd-resolved
 fi
 
+if (( DRY_RUN )) && [[ ! -f $(dry_path /etc/dnsmasq.conf) ]]; then
+  dry_note "/etc/dnsmasq.conf arrives with the dnsmasq package; a real run then checks its conf-dir and local-service lines"
+else
 # Fedora/EL enable conf-dir in the stock dnsmasq.conf; make sure of it
-grep -Eq '^[[:space:]]*conf-dir=/etc/dnsmasq\.d' /etc/dnsmasq.conf \
-  || echo 'conf-dir=/etc/dnsmasq.d' >> /etc/dnsmasq.conf
+grep -Eq '^[[:space:]]*conf-dir=/etc/dnsmasq\.d' "$(dry_path /etc/dnsmasq.conf)" \
+  || append_line /etc/dnsmasq.conf 'conf-dir=/etc/dnsmasq.d'
 
 # Stock Fedora/EL dnsmasq.conf ships an ACTIVE local-service line (newer
 # builds even local-service=host = localhost-only). Our except-interface
@@ -1558,8 +2471,9 @@ grep -Eq '^[[:space:]]*conf-dir=/etc/dnsmasq\.d' /etc/dnsmasq.conf \
 # isn't providing. (Idempotent: once commented, the pattern no longer
 # matches.)
 sed -i -E 's/^[[:space:]]*local-service.*/#&/' /etc/dnsmasq.conf
+fi
 
-cat > /etc/dnsmasq.d/lan-dns.conf <<EOF
+atomic_write_file /etc/dnsmasq.d/lan-dns.conf 644 <<EOF
 # LAN resolver - written by setup-fedora-controllers.sh; edits are overwritten.
 # DNS only: no dhcp-range is configured anywhere, so the DHCP/TFTP engine
 # never activates (the router keeps doing DHCP).
@@ -1639,10 +2553,9 @@ if systemctl is-active --quiet dnsmasq.service; then
 fi
 echo "installed ${lines}-line blocklist"
 EOF
-} > "${DNS_UPDATE_SCRIPT}"
-chmod 755 "${DNS_UPDATE_SCRIPT}"
+} | atomic_write_file "${DNS_UPDATE_SCRIPT}" 755
 
-cat > /etc/systemd/system/hagezi-update.service <<EOF
+atomic_write_file /etc/systemd/system/hagezi-update.service 644 <<EOF
 [Unit]
 Description=Refresh hagezi pro dnsmasq blocklist
 Wants=network-online.target
@@ -1653,7 +2566,7 @@ Type=oneshot
 ExecStart=${DNS_UPDATE_SCRIPT}
 EOF
 
-cat > /etc/systemd/system/hagezi-update.timer <<EOF
+atomic_write_file /etc/systemd/system/hagezi-update.timer 644 <<EOF
 [Unit]
 Description=Daily hagezi pro blocklist refresh
 
@@ -1666,70 +2579,97 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-# Optional lancache steering. dnsmasq answers lancache.steamcontent.com
-# (the single hostname modern Steam probes for cache discovery - the whole
-# uklans/cache-domains steam.txt) with the cache IP; the address= entry
-# also gives AAAA a NODATA answer, closing the IPv6 bypass. dnsmasq can't
-# health-check, so a minutely timer probes the cache and toggles the
-# override file: cache down -> file removed -> Steam resolves through the
-# normal upstreams straight to the real CDN.
+# Optional lancache steering with health-gated failover. dnsmasq answers
+# every uklans/cache-domains name (Steam, Epic, Battle.net, Riot, Windows
+# Update, ...) with the cache's IPv4 address and AAAA with NODATA, so
+# dual-stack clients fetch over IPv4 through the cache; every other name
+# keeps its normal A and AAAA. dnsmasq can't health-check, so:
+#   lancache-gen    (weekly) rebuilds ${LANCACHE_SRC_CONF},
+#                   outside the conf-dir, validated before it replaces the
+#                   last good copy
+#   lancache-toggle (every 10 s) probes /lancache-heartbeat (204 on the
+#                   monolithic image): 3 passes copy the overrides into
+#                   ${LANCACHE_ACTIVE_CONF}, 2 misses remove them -
+#                   each followed by a dnsmasq restart, the only way it
+#                   re-reads address= lines
+#   lancache-ctl    status / enable / disable (a flag that beats the
+#                   heartbeat) / regen
+# local-ttl=30 (always loaded) lets the UXG and clients cache an override
+# answer for up to 30 s. dnsmasq's default of 0 means no caching at all, so
+# this trades up to 30 s of extra failover after a withdrawal for far fewer
+# repeat lookups during large downloads. Enthoo is never a resolver: no
+# lancache-dns container, nothing forwarded to it.
 if [[ -n ${LANCACHE_IP} ]]; then
-log "Writing ${LANCACHE_TOGGLE} (cache at ${LANCACHE_IP})"
-{
-cat <<EOF
-#!/usr/bin/env bash
-# Steer Steam at the local lancache while it is healthy; fall back to
-# normal upstream resolution while it is not.
-# Written by setup-fedora-controllers.sh; run minutely by lancache-watch.timer.
-set -euo pipefail
-CACHE_IP="${LANCACHE_IP}"
-CONF="${LANCACHE_CONF}"
-STATE=/run/lancache-dns.state
-# Consecutive failed probes before falling back (hysteresis vs one lost probe)
-FAIL_LIMIT=2
+log "Writing lancache steering helpers (cache at ${LANCACHE_IP})"
+mkdir -p "${LANCACHE_DIR}"
+atomic_write_file "${LANCACHE_BASE_CONF}" 644 <<EOF
+# Written by setup-fedora-controllers.sh (lancache steering); edits are overwritten.
+# Answers from local data - the lancache address= overrides that
+# lancache-toggle copies into 50-lancache.conf, but also /etc/hosts entries
+# and blocked names - carry a 30 s TTL. dnsmasq's default is 0 (never
+# cached): 30 s saves repeat lookups, while the UXG and clients may keep
+# using ${LANCACHE_IP} for up to 30 s after a withdrawal.
+local-ttl=30
 EOF
-cat <<'EOF'
-if curl -sf -o /dev/null --max-time 3 "http://${CACHE_IP}/lancache-heartbeat"; then
-  fails=0
-else
-  fails=$(( $(cat "$STATE" 2>/dev/null || echo 0) + 1 ))
-fi
-echo "$fails" > "$STATE"
+# Atomic: the timer may be running the old toggle while it is replaced
+lancache_gen_script | atomic_write_file "${LANCACHE_GEN}" 755
+lancache_toggle_script | atomic_write_file "${LANCACHE_TOGGLE}" 755
+lancache_ctl_script | atomic_write_file "${LANCACHE_CTL}" 755
 
-want="address=/lancache.steamcontent.com/${CACHE_IP}"
-if (( fails == 0 )); then
-  # Content check, not just existence: heals a stale IP after --lancache moves
-  if [[ ! -f $CONF ]] || [[ $(<"$CONF") != "$want" ]]; then
-    printf '%s\n' "$want" > "$CONF"
-    systemctl try-restart dnsmasq.service
-    echo "lancache healthy - Steam steering enabled"
-  fi
-elif (( fails >= FAIL_LIMIT )) && [[ -f $CONF ]]; then
-  rm -f "$CONF"
-  systemctl try-restart dnsmasq.service
-  echo "lancache unreachable (${fails} probes) - falling back to upstream DNS"
-fi
-EOF
-} > "${LANCACHE_TOGGLE}"
-chmod 755 "${LANCACHE_TOGGLE}"
-
-cat > /etc/systemd/system/lancache-watch.service <<EOF
+atomic_write_file /etc/systemd/system/lancache-toggle.service 644 <<EOF
 [Unit]
-Description=Probe lancache and toggle dnsmasq Steam steering
+Description=Probe the lancache heartbeat and toggle dnsmasq's lancache overrides
+After=dnsmasq.service
 
 [Service]
 Type=oneshot
 ExecStart=${LANCACHE_TOGGLE}
+# Runs every 10 s: drop PID 1's per-run Starting/Finished lines and the
+# script's stdout. State changes go to syslog at notice/err and still pass.
+LogLevelMax=notice
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
 EOF
 
-cat > /etc/systemd/system/lancache-watch.timer <<EOF
+atomic_write_file /etc/systemd/system/lancache-toggle.timer 644 <<EOF
 [Unit]
-Description=Minutely lancache health probe
+Description=Probe the lancache heartbeat every 10 seconds
 
 [Timer]
 OnBootSec=30s
-OnUnitActiveSec=1min
-AccuracySec=15s
+OnUnitActiveSec=10s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
+EOF
+
+atomic_write_file /etc/systemd/system/lancache-gen.service 644 <<EOF
+[Unit]
+Description=Rebuild the dnsmasq lancache overrides from uklans/cache-domains
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${LANCACHE_GEN}
+# ProtectHome hides /root; an empty HOME keeps git from warning about it
+RuntimeDirectory=lancache-gen
+Environment=HOME=/run/lancache-gen
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+EOF
+
+atomic_write_file /etc/systemd/system/lancache-gen.timer 644 <<EOF
+[Unit]
+Description=Weekly lancache override rebuild
+
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=1h
+Persistent=true
 
 [Install]
 WantedBy=timers.target
@@ -1746,6 +2686,10 @@ UOS_BOOTSTRAP_STATE=${STATE_DIR}/uos-bootstrap-version
 cleanup_controller_setup() {
   local status=$?
   trap - EXIT INT TERM ERR
+  if (( DRY_RUN )); then
+    dry_finish "${status}"
+    exit "${status}"
+  fi
   [[ -z ${UOS_INSTALLER_TMP:-} ]] || rm -f "${UOS_INSTALLER_TMP}"
   [[ -z ${UOS_RELEASE_METADATA_TMP:-} ]] || rm -f "${UOS_RELEASE_METADATA_TMP}"
   if (( status != 0 )); then
@@ -1828,6 +2772,16 @@ if (( ENABLE_UNIFI_OS )) && ! uos_unit_exists; then
   check_uos_path_space /var/tmp 2048
   [[ ${UOS_INSTALLER_SHA256} =~ ^[[:xdigit:]]{64}$ ]] \
     || die "UOS_INSTALLER_SHA256 must be a 64-character SHA-256 digest"
+  if (( DRY_RUN )); then
+    if command curl --proto '=https' --tlsv1.2 -fsIL --connect-timeout 30 --max-time 60 \
+        -o /dev/null "${UOS_INSTALLER_URL}"; then
+      dry_note "UniFi OS Server ${UOS_VERSION} installer answers at ${UOS_INSTALLER_URL}"
+    else
+      warn "UniFi OS Server installer did not answer a HEAD request: ${UOS_INSTALLER_URL}"
+    fi
+    dry_plan "download the UniFi OS Server ${UOS_VERSION} installer and verify SHA-256 ${UOS_INSTALLER_SHA256}"
+    UOS_INSTALLER_TMP=${DRY_ROOT}/uos-installer-not-downloaded
+  else
   UOS_INSTALLER_TMP=$(mktemp "${STATE_DIR}/uos-installer.XXXXXX")
   log "Downloading checksum-published UniFi OS Server ${UOS_VERSION} bootstrap installer"
   curl --proto '=https' --tlsv1.2 -fL --retry 3 --connect-timeout 30 \
@@ -1838,6 +2792,7 @@ if (( ENABLE_UNIFI_OS )) && ! uos_unit_exists; then
     || die "UniFi OS Server installer checksum mismatch (got ${ACTUAL_UOS_SHA})"
   chmod 700 "${UOS_INSTALLER_TMP}"
   log "UniFi OS Server installer checksum verified"
+  fi
 fi
 
 # Refresh enabled mutable channels before stopping an old stack. The identity
@@ -1891,19 +2846,30 @@ if (( ! ENABLE_MONGO )); then
         "${OMADA_DIR}/omada-db.env" "${OMADA_DIR}/init-mongo.sh" \
         "${STATE_DIR}/omada-db.applied"
 fi
+# The Steam-only steering that lancache-gen/-toggle replaced. A running
+# dnsmasq keeps serving a removed override file until it restarts, and the
+# restart hash ignores absent files, so a removal forces that restart below.
+DNSMASQ_FORCE_RESTART=0
+if [[ -e ${LEGACY_LANCACHE_CONF} ]]; then DNSMASQ_FORCE_RESTART=1; fi
+systemctl disable --now lancache-watch.timer 2>/dev/null || true
+rm -f "${LEGACY_LANCACHE_CONF}" "${LEGACY_LANCACHE_TOGGLE}" /run/lancache-dns.state \
+      /etc/systemd/system/lancache-watch.{service,timer}
+if (( ! ENABLE_DNS )) || [[ -z ${LANCACHE_IP} ]]; then
+  if [[ -e ${LANCACHE_ACTIVE_CONF} ]]; then DNSMASQ_FORCE_RESTART=1; fi
+  systemctl disable --now lancache-toggle.timer lancache-gen.timer 2>/dev/null || true
+  systemctl stop lancache-toggle.service lancache-gen.service 2>/dev/null || true
+  rm -f "${LANCACHE_ACTIVE_CONF}" "${LANCACHE_BASE_CONF}" "${LANCACHE_GEN}" \
+        "${LANCACHE_TOGGLE}" "${LANCACHE_CTL}" "${LANCACHE_STATE_DIR}.lock" \
+        /etc/systemd/system/lancache-{toggle,gen}.{service,timer}
+  rm -rf "${LANCACHE_DIR}" "${LANCACHE_DOMAINS_DIR}" "${LANCACHE_STATE_DIR}"
+fi
 if (( ! ENABLE_DNS )); then
-  systemctl disable --now hagezi-update.timer lancache-watch.timer 2>/dev/null || true
+  systemctl disable --now hagezi-update.timer 2>/dev/null || true
   systemctl disable --now dnsmasq.service 2>/dev/null || true
   rm -f /etc/dnsmasq.d/lan-dns.conf "${HAGEZI_CONF}" "${HAGEZI_CONF}.old" \
-        "${LANCACHE_CONF}" "${DNS_UPDATE_SCRIPT}" "${LANCACHE_TOGGLE}" \
-        /run/lancache-dns.state "${STATE_DIR}/dnsmasq.applied" \
-        /etc/systemd/system/hagezi-update.{service,timer} \
-        /etc/systemd/system/lancache-watch.{service,timer}
+        "${DNS_UPDATE_SCRIPT}" "${STATE_DIR}/dnsmasq.applied" \
+        /etc/systemd/system/hagezi-update.{service,timer}
   # Restoring systemd-resolved's stub listener here could break host DNS.
-elif [[ -z ${LANCACHE_IP} ]]; then
-  systemctl disable --now lancache-watch.timer 2>/dev/null || true
-  rm -f "${LANCACHE_CONF}" "${LANCACHE_TOGGLE}" /run/lancache-dns.state \
-        /etc/systemd/system/lancache-watch.{service,timer}
 fi
 
 #--- UniFi OS Server vendor lifecycle --------------------------------------
@@ -1912,6 +2878,10 @@ port_is_listening() {
 }
 wait_for_https() {
   local name=$1 url=$2 timeout=${3:-420} unit=${4:-} elapsed=0
+  if (( DRY_RUN )); then
+    dry_note "skipping the wait for ${name} to answer at ${url}"
+    return 0
+  fi
   until curl -skf -o /dev/null --connect-timeout 3 --max-time 5 "${url}"; do
     if [[ -n ${unit} ]] && ! systemctl is-active --quiet "${unit}"; then
       warn "${unit} stopped being active while waiting for ${name} readiness"
@@ -1963,7 +2933,18 @@ dump_omada_diagnostics() {
   warn "=== End Omada Diagnostics ==="
 }
 if (( ENABLE_UNIFI_OS )); then
-  if [[ -n ${UOS_INSTALLER_TMP} ]]; then
+  if [[ -n ${UOS_INSTALLER_TMP} ]] && (( DRY_RUN )); then
+    if port_is_listening 8080; then
+      dry_note "TCP 8080 is in use now; the real run needs it free before the installer (legacy UniFi, if any, is stopped first)"
+    fi
+    if [[ ${UOS_WEB_PORT} != 8080 ]]; then
+      port_is_listening "${UOS_WEB_PORT}" \
+        && die "TCP port ${UOS_WEB_PORT} is already in use; choose another UOS_WEB_PORT"
+    fi
+    dry_plan "run the UniFi OS Server ${UOS_VERSION} installer (--non-interactive --network-mode pasta --web-port ${UOS_WEB_PORT})"
+    printf '%s\n' "${UOS_VERSION}" | atomic_write_file "${UOS_BOOTSTRAP_STATE}" 600
+    UOS_INSTALLER_TMP=
+  elif [[ -n ${UOS_INSTALLER_TMP} ]]; then
     port_is_listening 8080 \
       && die "TCP port 8080 is still in use after retiring legacy UniFi; refusing to run the UOS installer"
     if [[ ${UOS_WEB_PORT} != 8080 ]]; then
@@ -1983,8 +2964,10 @@ if (( ENABLE_UNIFI_OS )); then
   else
     log "UniFi OS Server ${INSTALLED_UOS_VERSION} already installed; leaving vendor-managed files and version untouched"
   fi
-  uos_updater_unit_exists \
-    || die "UniFi OS installation is missing uosserver-updater.service; repair it explicitly with the matching vendor installer"
+  if (( ! DRY_RUN )) || uos_unit_exists; then
+    uos_updater_unit_exists \
+      || die "UniFi OS installation is missing uosserver-updater.service; repair it explicitly with the matching vendor installer"
+  fi
   systemctl enable uosserver.service uosserver-updater.service >/dev/null 2>&1 \
     || die "could not enable UniFi OS Server and its updater"
   if systemctl is-active --quiet uosserver.service; then
@@ -2074,7 +3057,7 @@ fi
 
 #--- LAN-scoped, convergent firewalld services ------------------------------
 install -d -m 755 /etc/firewalld/services
-cat > /etc/firewalld/services/controller-omada.xml <<EOF
+atomic_write_file /etc/firewalld/services/controller-omada.xml 644 <<EOF
 <?xml version="1.0" encoding="utf-8"?>
 <service>
   <short>Controller host - Omada</short>
@@ -2085,7 +3068,7 @@ cat > /etc/firewalld/services/controller-omada.xml <<EOF
   <port protocol="udp" port="29810"/>
 </service>
 EOF
-cat > /etc/firewalld/services/controller-unifi-os.xml <<EOF
+atomic_write_file /etc/firewalld/services/controller-unifi-os.xml 644 <<EOF
 <?xml version="1.0" encoding="utf-8"?>
 <service>
   <short>Controller host - UniFi OS Server</short>
@@ -2102,7 +3085,7 @@ EOF
 # Feature-only UniFi ports are intentionally not exposed by default:
 # fingerprinting (10101/udp), L2 discovery (1900/udp), and Site Magic
 # (20100-22100/udp). Add them only when the corresponding feature is enabled.
-cat > /etc/firewalld/services/controller-shadowsocks.xml <<EOF
+atomic_write_file /etc/firewalld/services/controller-shadowsocks.xml 644 <<EOF
 <?xml version="1.0" encoding="utf-8"?>
 <service>
   <short>Controller host - Shadowsocks</short>
@@ -2110,7 +3093,7 @@ cat > /etc/firewalld/services/controller-shadowsocks.xml <<EOF
   <port protocol="tcp" port="${SS_PORT}"/><port protocol="udp" port="${SS_PORT}"/>
 </service>
 EOF
-cat > /etc/firewalld/services/controller-dns.xml <<'EOF'
+atomic_write_file /etc/firewalld/services/controller-dns.xml 644 <<'EOF'
 <?xml version="1.0" encoding="utf-8"?>
 <service>
   <short>Controller host - LAN DNS</short>
@@ -2210,6 +3193,7 @@ if (( ENABLE_SHADOWSOCKS )); then SERVICES+=(shadowsocks); fi
 log "Reloading systemd (Quadlet generation)"
 systemctl daemon-reload || die "systemctl daemon-reload failed during Quadlet generation"
 for unit in "${SERVICES[@]}"; do
+  (( ! DRY_RUN )) || break  # generated only by the real daemon-reload
   [[ -f /run/systemd/generator/${unit}.service ]] \
     || die "Quadlet generation failed: /run/systemd/generator/${unit}.service was not created. Debug with: /usr/lib/systemd/system-generators/podman-system-generator --dryrun"
   systemctl cat "${unit}.service" >/dev/null 2>&1 \
@@ -2255,7 +3239,8 @@ if (( ENABLE_MONGO )); then
   }
 
   mongo_wait=0
-  until mongo_user_count | grep '^USERS=1$' >/dev/null; do
+  (( ! DRY_RUN )) || dry_note "skipping the MongoDB user check (it needs the running omada-db container)"
+  until (( DRY_RUN )) || mongo_user_count | grep '^USERS=1$' >/dev/null; do
     sleep 2
     mongo_wait=$(( mongo_wait + 2 ))
     if (( mongo_wait >= 180 )); then
@@ -2286,9 +3271,9 @@ if (( ENABLE_DNS )); then
     || warn "initial Hagezi pull failed; dnsmasq starts unfiltered and the daily timer retries"
   systemctl enable --now hagezi-update.timer >/dev/null 2>&1 \
     || die "could not enable hagezi-update.timer"
-  if needs_restart dnsmasq "${DNSMASQ_FILES[@]}"; then
-    if ! dnsmasq --test >/dev/null 2>&1; then
-      dnsmasq --test 2>&1 | tail -5 || true
+  if needs_restart dnsmasq "${DNSMASQ_FILES[@]}" || (( DNSMASQ_FORCE_RESTART )); then
+    if ! dnsmasq_config_test >/dev/null 2>&1; then
+      dnsmasq_config_test 2>&1 | tail -5 || true
       die "dnsmasq --test failed on the merged configuration"
     fi
     log "Restarting dnsmasq (inputs changed or not running)"
@@ -2301,9 +3286,15 @@ if (( ENABLE_DNS )); then
     log "dnsmasq unchanged; leaving it running"
   fi
   if [[ -n ${LANCACHE_IP} ]]; then
-    systemctl enable --now lancache-watch.timer >/dev/null 2>&1 \
-      || die "could not enable lancache-watch.timer"
-    systemctl start lancache-watch.service
+    (( ! DRY_RUN )) || dry_preview_lancache
+    # A failed fetch keeps the last good overrides; the weekly timer retries
+    systemctl start lancache-gen.service \
+      || warn "lancache-gen failed (see journalctl -u lancache-gen); steering uses the last good overrides, if any"
+    systemctl enable --now lancache-gen.timer lancache-toggle.timer >/dev/null 2>&1 \
+      || die "could not enable the lancache timers"
+    # First probe now; the timer's 10 s cadence takes over (3 passes = ~30 s)
+    systemctl start lancache-toggle.service \
+      || warn "lancache-toggle failed; see journalctl -t lancache-toggle"
   fi
 fi
 
@@ -2371,7 +3362,9 @@ fi
 
 # Quadlet units are enabled by their generated [Install] links.
 for unit in "${SERVICES[@]}"; do
-  if [[ -e /run/systemd/generator/multi-user.target.wants/${unit}.service ]]; then
+  if (( DRY_RUN )); then
+    :
+  elif [[ -e /run/systemd/generator/multi-user.target.wants/${unit}.service ]]; then
     log "${unit}.service will start at boot"
   else
     warn "${unit}.service is not linked into multi-user.target.wants"
@@ -2401,10 +3394,11 @@ HOST_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.*src \([0-9.]*\).*/\1
 [[ -n ${HOST_IP} ]] || HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
 [[ -n ${HOST_IP} ]] || HOST_IP='<host-ip>'
 
+if (( DRY_RUN )); then SUMMARY_TITLE='Dry run (planned end state).'; else SUMMARY_TITLE='Done.'; fi
 cat <<EOF
 
 ============================================================
- Done. Components: omada=${ENABLE_OMADA} unifi_os=${ENABLE_UNIFI_OS} mongodb=${ENABLE_MONGO} shadowsocks=${ENABLE_SHADOWSOCKS} dns=${ENABLE_DNS} cockpit=${ENABLE_COCKPIT} lancache=${LANCACHE_IP:-off}
+ ${SUMMARY_TITLE} Components: omada=${ENABLE_OMADA} unifi_os=${ENABLE_UNIFI_OS} mongodb=${ENABLE_MONGO} shadowsocks=${ENABLE_SHADOWSOCKS} dns=${ENABLE_DNS} cockpit=${ENABLE_COCKPIT} lancache=${LANCACHE_IP:-off}
  Host profiles   : low_ram=${LOW_RAM_ACTIVE} (${LOW_RAM_MODE}), small_storage=${SMALL_STORAGE_ACTIVE} (${SMALL_STORAGE_MODE}), zram=${ZRAM_ACTIVE} (${ZRAM_MODE})
  Root filesystem : ${ROOT_SOURCE} (${ROOT_FSTYPE}), ${ROOT_AVAIL_MB}MiB free at preflight
  Firewall zone   : ${MANAGEMENT_ZONE}
@@ -2430,9 +3424,12 @@ fi
 if (( ENABLE_DNS )); then
   echo " LAN DNS          : ${HOST_IP}:53 tcp+udp; dnsmasq DNS-only, Hagezi Pro daily"
   if [[ -n ${LANCACHE_IP} ]]; then
-    [[ -f ${LANCACHE_CONF} ]] \
-      && echo "                    Steam -> ${LANCACHE_IP} (cache healthy)" \
-      || echo "                    Steam direct (cache ${LANCACHE_IP} unavailable)"
+    if [[ -e ${LANCACHE_ACTIVE_CONF} ]]; then
+      echo "                    CDN downloads -> lancache ${LANCACHE_IP} (healthy)"
+    else
+      echo "                    CDN downloads direct until ${LANCACHE_IP} passes 3 heartbeats (~30 s)"
+    fi
+    echo "                    lancache-ctl status|enable|disable|regen"
   fi
 fi
 if (( NEED_CREDENTIALS )); then
