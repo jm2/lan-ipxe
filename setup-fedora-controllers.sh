@@ -592,7 +592,9 @@ done
 (( ${#paths[@]} )) || fail "cache_domains.json lists no domain files"
 
 # Comments, CRs, surrounding blanks and the *. wildcard prefix go: dnsmasq's
-# address=/d/ already covers d and every name under it.
+# address=/d/ already covers d and every name under it. awk 1, not cat:
+# upstream files may lack a final newline (nintendo.txt does), and cat would
+# glue that last entry to the next file's first line, losing both.
 domains=()
 while IFS= read -r d; do
   if [[ ${d} =~ ^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
@@ -600,7 +602,7 @@ while IFS= read -r d; do
   else
     echo "lancache-gen: skipping malformed entry '${d}'" >&2
   fi
-done < <(cat -- "${paths[@]}" | tr -d '\r' | tr '[:upper:]' '[:lower:]' \
+done < <(awk 1 "${paths[@]}" | tr -d '\r' | tr '[:upper:]' '[:lower:]' \
            | sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^\*\.//' \
            | sed '/^$/d' | sort -u)
 (( ${#domains[@]} >= MIN_DOMAINS )) \

@@ -80,8 +80,10 @@ cat > "${FIX}/cache_domains.json" <<'EOF'
   ]
 }
 EOF
-printf 'lancache.steamcontent.com\n' > "${FIX}/steam.txt"
-printf '# Blizzard\r\n*.cdn.blizzard.com\r\n  Level3.Blizzard.com  \r\n\r\n' > "${FIX}/blizzard.txt"
+# steam.txt lacks a final newline and blizzard.txt opens with a domain, as
+# upstream's nintendo.txt -> origin.txt do: the two must not merge
+printf 'lancache.steamcontent.com' > "${FIX}/steam.txt"
+printf '*.cdn.blizzard.com\r\n# Blizzard\r\n  Level3.Blizzard.com  \r\n\r\n' > "${FIX}/blizzard.txt"
 {
   echo '# twenty-odd plain names'
   for i in $(seq -w 1 20); do echo "cdn${i}.example-cdn.net"; done
@@ -223,7 +225,8 @@ done
 ! grep -q '[*!_ ]' <(grep -v '^#' "${OUT}") || fail 'wildcards or junk leaked into the overrides'
 grep -q "skipping malformed entry 'bad_name!.example.com'" "${T}/gen.err" \
   || fail 'malformed entry was not reported'
-ok 'lancache-gen: comments, CRs, wildcards, case and duplicates normalised; malformed entry skipped'
+! grep -q 'steamcontent.com.*blizzard' "${OUT}" || fail 'a file without a final newline merged into the next'
+ok 'lancache-gen: comments, CRs, wildcards, case, duplicates and missing final newlines normalised; malformed entry skipped'
 
 cp "${OUT}" "${T}/good.conf"
 "${GEN}" 2>/dev/null | grep -q 'unchanged' || fail 'second run should report unchanged'
