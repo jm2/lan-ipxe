@@ -598,8 +598,6 @@ class Workstation:
             formulae = self.manifest['formulae']['core'] + (
                 self.manifest['formulae']['full'] if self.args.profile == 'full' else [])
             casks = [app['cask'] for app in self.selected_apps() if '/' in app.get('cask', '')]
-            if self.args.profile == 'full':
-                casks.append('android/tap/android-cli')
             for kind, names in (('formula', formulae), ('cask', casks)):
                 for name in names:
                     if '/' in name and self.tap_installed(name.rsplit('/', 1)[0]):
@@ -1199,29 +1197,45 @@ class Workstation:
         self.receipts['platform_tools'] = {'root': str(root), 'version': data['version'], 'sha256': data['sha256']}
         self.emit('CHANGED', 'Android platform-tools', str(target))
 
-    def android_cli(self):
-        # Google deprecated sdkmanager for the Android CLI's `android sdk`. Its
-        # official Homebrew tap ships an unversioned cask (never "outdated"), so
+    def android_cli(self, tools):
+        # Google deprecated sdkmanager for the Android CLI's `android sdk`. The
+        # command-line tools now ship its launcher (bin/android, which fetches
+        # and runs the CLI), and their cask links it as $HOMEBREW_PREFIX/bin/android;
         # the CLI's own `android update` keeps it current.
-        cli = self.prefix / 'bin/android'
-        if self.preview or os.access(cli, os.X_OK):
-            self.package('android/tap/android-cli', 'cask')
-        else:
-            self.package('android/tap/android-cli', 'cask', present=False)
+        cli = tools / 'bin/android'
         if self.preview:
             return cli
         if not os.access(cli, os.X_OK):
-            raise RuntimeError('Android CLI cask did not provide ' + str(cli))
+            raise RuntimeError('android-commandlinetools did not provide ' + str(cli))
         if not self.args.no_upgrade:
             self.command([cli, 'update'], mutate=True, capture=False)
         return cli
 
+    def retire_android_cli_cask(self):
+        """Remove the separate Android CLI cask, which claims bin/android too; True if removed."""
+        if not self.cask_installed('android-cli'):
+            return False
+        reason = 'android-commandlinetools ships the Android CLI launcher as bin/android'
+        if self.preview:
+            self.emit('DRIFT', 'cask android-cli', 'remove: ' + reason); return False
+        self.command([self.brew, 'uninstall', '--cask', 'android-cli'], mutate=True, capture=False)
+        if self.cask_installed('android-cli'):
+            raise RuntimeError('Homebrew cask android-cli is still installed')
+        self.emit('CHANGED', 'cask android-cli', 'removed: ' + reason)
+        return True
+
     def android(self):
         root = self.sdk_root()
-        # Still the owner of cmdline-tools/latest (avdmanager, apkanalyzer, ...).
-        self.package('android-commandlinetools', 'cask')
+        # Owner of cmdline-tools/latest (avdmanager, apkanalyzer, ...) and the
+        # Android CLI launcher. A reinstall after retiring the separate CLI cask
+        # links the bin/android that cask held.
+        retired = self.retire_android_cli_cask()
+        if retired and self.cask_installed('android-commandlinetools'):
+            self.package('android-commandlinetools', 'cask', present=False)
+        else:
+            self.package('android-commandlinetools', 'cask')
         tools = self.prefix / 'share/android-commandlinetools/cmdline-tools/latest'
-        cli = self.android_cli()
+        cli = self.android_cli(tools)
         if self.preview:
             required = [sdk_package(name) for name in self.receipts.get('android', {}).get('packages', [])]
             present = required and all((root / name / 'source.properties').exists() for name in required)

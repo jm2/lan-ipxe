@@ -770,7 +770,7 @@ Available packages:
         studio = self.obj.applications / 'Android Studio.app'
         for path in [jdk / 'bin/java', studio / 'Contents/jbr/Contents/Home/bin/java']:
             path.parent.mkdir(parents=True); path.touch()
-        cli = self.obj.prefix / 'bin/android'
+        cli = self.obj.prefix / 'share/android-commandlinetools/cmdline-tools/latest/bin/android'
         cli.parent.mkdir(parents=True, exist_ok=True); cli.touch(); cli.chmod(0o755)
         self.obj.apps = [{'id': 'com.google.android.studio', 'path': studio}]
         self.obj.args.no_upgrade = False
@@ -786,11 +786,12 @@ Available packages:
             return subprocess.CompletedProcess(argv, 0, '', '')
         installed = []
         with patch.object(self.obj, 'sdk_root', return_value=root), \
-                patch.object(self.obj, 'package', side_effect=lambda name, kind='formula': installed.append((name, kind))), \
+                patch.object(self.obj, 'package', side_effect=lambda name, kind='formula', present=True: installed.append((name, kind, present))), \
                 patch.object(self.obj, 'link', side_effect=lambda link, target: links.append((link, target))), \
                 patch.object(self.obj, 'command', side_effect=command):
             self.obj.android()
-        self.assertEqual(installed, [('android-commandlinetools', 'cask'), ('android/tap/android-cli', 'cask')])
+        # The command-line tools' launcher is the CLI; no separate cask claims bin/android.
+        self.assertEqual(installed, [('android-commandlinetools', 'cask', True)])
         argvs = [argv for argv, _ in calls]
         self.assertEqual(argvs[0], [str(cli), 'update'])
         sdk = [str(cli), '--sdk=' + str(root), 'sdk']
@@ -810,6 +811,28 @@ Available packages:
                 patch.object(self.obj, 'link'), patch.object(self.obj, 'command', side_effect=command):
             self.obj.android()
         self.assertEqual(calls, [])
+
+    def test_separate_android_cli_cask_is_retired_and_launcher_relinked(self):
+        self.obj.args.no_upgrade = True
+        for cask in ('android-cli', 'android-commandlinetools'):
+            (self.obj.prefix / 'Caskroom' / cask / '.metadata').mkdir(parents=True)
+        cli = self.obj.prefix / 'share/android-commandlinetools/cmdline-tools/latest/bin/android'
+        cli.parent.mkdir(parents=True); cli.touch(); cli.chmod(0o755)
+        calls, installed = [], []
+        def command(argv, **kwargs):
+            calls.append([str(a) for a in argv[1:]])
+            w.shutil.rmtree(self.obj.prefix / 'Caskroom/android-cli')
+            return subprocess.CompletedProcess(argv, 0, '', '')
+        with patch.object(self.obj, 'command', side_effect=command), \
+                patch.object(self.obj, 'package', side_effect=lambda name, kind='formula', present=True: installed.append((name, present))):
+            self.assertTrue(self.obj.retire_android_cli_cask())
+            self.assertEqual(self.obj.android_cli(cli.parent.parent), cli)
+        self.assertEqual(calls, [['uninstall', '--cask', 'android-cli']])
+        self.assertFalse(self.obj.retire_android_cli_cask(), 'a second run has nothing to retire')
+        self.obj.preview = True
+        (self.obj.prefix / 'Caskroom/android-cli/.metadata').mkdir(parents=True)
+        self.assertFalse(self.obj.retire_android_cli_cask())
+        self.assertEqual(self.obj.events[-1]['status'], 'DRIFT')
 
     def test_tapped_cask_is_tapped_and_found_by_short_name(self):
         self.obj.updated = True
@@ -1015,11 +1038,10 @@ Available packages:
             self.obj.prepare_brew()
         update_idx = calls.index(['update'])
         crush_idx = calls.index(['trust', '--formula', 'charmbracelet/tap/crush'])
-        android_idx = calls.index(['trust', '--cask', 'android/tap/android-cli'])
         outdated_idx = calls.index(['outdated', '--json=v2'])
         self.assertLess(update_idx, crush_idx)
-        self.assertLess(crush_idx, android_idx)
-        self.assertLess(android_idx, outdated_idx)
+        self.assertLess(crush_idx, outdated_idx)
+        self.assertNotIn(['trust', '--cask', 'android/tap/android-cli'], calls)
 
         with patch.object(self.obj, 'command',
                           return_value=subprocess.CompletedProcess(['brew'], 1, '', 'Error: Unknown command: brew trust\n')):
