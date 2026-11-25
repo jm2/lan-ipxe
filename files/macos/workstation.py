@@ -264,20 +264,45 @@ def app_ids(app):
     return {value.lower() for value in [app['id']] + app.get('alternatives', [])}
 
 
-def dock_items(existing, apps):
-    """Retain every unrelated tile and existing order; append missing selected apps."""
-    result = list(existing)
-    ids = {item.get('tile-data', {}).get('bundle-identifier', '').lower() for item in existing}
-    paths = {item.get('tile-data', {}).get('file-data', {}).get('_CFURLString') for item in existing}
-    for app in apps:
-        uri = app['path'].as_uri() + '/'
-        if app['id'].lower() in ids or uri in paths:
+def dock_tile_key(item):
+    data = item.get('tile-data', {})
+    return data.get('bundle-identifier', '').lower(), data.get('file-data', {}).get('_CFURLString')
+
+
+def dock_layout(existing, desired, managed):
+    """Listed apps in listed order, reusing their existing tiles; other managed tiles
+    are dropped; every unmanaged tile keeps its place after the listed tile before it.
+
+    desired: [{'id', 'ids' (lowercase set), 'path'}]; managed: tile -> bool."""
+    def matches(item, app):
+        ident, uri = dock_tile_key(item)
+        return ident in app['ids'] or uri == app['path'].as_uri() + '/'
+    placed = [None] * len(desired)
+    extra = {-1: []}
+    anchor = -1
+    for item in existing:
+        index = next((i for i, app in enumerate(desired) if matches(item, app)), None)
+        if index is not None:
+            if placed[index] is None:  # later duplicates are dropped
+                placed[index] = item
+                anchor = index
             continue
-        result.append({'tile-type': 'file-tile', 'tile-data': {
+        if not managed(item):
+            extra.setdefault(anchor, []).append(item)
+    result = list(extra[-1])
+    for index, app in enumerate(desired):
+        result.append(placed[index] or {'tile-type': 'file-tile', 'tile-data': {
             'bundle-identifier': app['id'], 'file-label': app['path'].stem,
-            'file-type': 41, 'file-data': {'_CFURLString': uri, '_CFURLStringType': 15}}})
-        ids.add(app['id'].lower()); paths.add(uri)
+            'file-type': 41, 'file-data': {'_CFURLString': app['path'].as_uri() + '/', '_CFURLStringType': 15}}})
+        result.extend(extra.get(index, []))
     return result
+
+
+def dock_folder_tile(path):
+    """A Dock folder (persistent-others) shown as a folder icon, opening as a name-sorted grid."""
+    return {'tile-type': 'directory-tile', 'tile-data': {
+        'file-data': {'_CFURLString': path.as_uri() + '/', '_CFURLStringType': 15},
+        'file-label': path.name, 'file-type': 2, 'arrangement': 1, 'displayas': 1, 'showas': 2}}
 
 
 def yamagi_data_root(home, environment):
@@ -360,6 +385,7 @@ class Workstation:
         self.home = Path(home or Path.home())
         self.prefix = Path(prefix or '/opt/homebrew')
         self.applications = Path(applications or '/Applications')
+        self.system_applications = Path('/System/Applications')
         self.command_line_tools = COMMAND_LINE_TOOLS
         self.state = self.home / 'Library/Application Support/lan-ipxe/workstation'
         self.manifest = read_json(PAYLOAD / 'manifest.json')
@@ -512,14 +538,16 @@ class Workstation:
         self.receipts.setdefault('links', {})[str(path)] = str(target)
         self.emit('CHANGED', str(path), 'public command/link')
 
-    def scan_apps(self):
+    def scan_apps(self, roots=None):
         result = []
-        for root in (self.applications, self.home / 'Applications'):
+        for root in roots or (self.applications, self.home / 'Applications'):
             if not root.exists():
                 continue
             # One nested level includes ETLegacy without traversing bundle contents.
             paths = list(root.glob('*.app')) + list(root.glob('*/*.app'))
             for path in paths:
+                if path.is_symlink():  # Games-folder links, not installs
+                    continue
                 try:
                     info = read_plist(path / 'Contents/Info.plist')
                     if info.get('CFBundleIdentifier'):
@@ -744,7 +772,7 @@ class Workstation:
     def application(self, app):
         current = self.app_for(app)
         if current and current['store']:
-            self.emit('EXCLUDED', app['name'], 'App Store installation ignored'); return
+            self.emit('EXCLUDED', app['name'], 'App Store copy kept (the App Store updates it; the cask is not installed over it)'); return
         if app.get('cask'):
             owned = (self.prefix / 'Caskroom' / app['cask'] / '.metadata').is_dir()
             if current and not owned:
@@ -1346,13 +1374,8 @@ class Workstation:
         for key in ('Default Window Settings', 'Startup Window Settings'):
             self.preference(domain, key, 'Clear Dark', current)
         dock = self.preferences('com.apple.dock')
-        order = {}
-        for index, spec in enumerate(self.selected_apps()):
-            for identifier in app_ids(spec):
-                order.setdefault(identifier, index)
-        candidates = [app for app in self.apps if app['id'].lower() in order and not app['store']]
-        candidates.sort(key=lambda a: order[a['id'].lower()])
-        self.preference('com.apple.dock', 'persistent-apps', dock_items(dock.get('persistent-apps', []), candidates), dock)
+        self.preference('com.apple.dock', 'persistent-apps',
+                        dock_layout(dock.get('persistent-apps', []), *self.dock_plan()), dock)
         self.emit('NOTE', 'Desktop preferences', 'Some global changes take effect in new apps or after logout; no logout/reboot is initiated')
 
     def xcode(self):
@@ -1429,6 +1452,59 @@ class Workstation:
         if not self.preview:
             self.emit('NOTE', 'Power', self.command(['/usr/bin/pmset', '-g', 'custom']).stdout.strip())
 
+    def dock_plan(self):
+        """The installed apps manifest['dock'] lists, and which Dock tiles it manages."""
+        installed = self.apps + self.scan_apps([self.system_applications])
+        selected = {app['name'] for app in self.selected_apps()}
+        managed_ids = set()
+        for spec in self.manifest['apps']:
+            managed_ids |= app_ids(spec)
+        desired = []
+        for entry in self.manifest['dock']['apps']:
+            managed_ids.add(entry['id'].lower())
+            spec = next((app for app in self.manifest['apps'] if entry['id'].lower() in app_ids(app)), None)
+            if spec and spec['name'] not in selected:
+                continue
+            ids = app_ids(spec) if spec else {entry['id'].lower()}
+            found = next((app for app in installed if app['id'].lower() in ids), None)
+            if found:
+                desired.append({'id': found['id'], 'ids': ids, 'path': found['path']})
+        system = self.system_applications.as_uri() + '/'
+
+        def managed(item):
+            ident, uri = dock_tile_key(item)
+            return ident in managed_ids or (uri or '').startswith(system)
+        return desired, managed
+
+    def games_folder(self):
+        """Full profile: one Dock folder of links to the installed games, not a tile each."""
+        folder = self.home / self.manifest['dock']['games_folder']
+        wanted = {}
+        for spec in self.selected_apps():
+            found = spec.get('game') and self.app_for(spec)
+            if found:
+                wanted[folder / found['path'].name] = found['path']
+        for path, target in wanted.items():
+            self.link(path, target)
+        for name, target in list(self.receipts.get('links', {}).items()):
+            path = Path(name)
+            if path.parent != folder or path in wanted:
+                continue
+            if path.is_symlink() and os.readlink(path) == target:
+                if self.preview:
+                    self.emit('DRIFT', str(path), 'remove link to a game no longer installed'); continue
+                path.unlink()
+                self.emit('CHANGED', str(path), 'removed link to a game no longer installed')
+            if not self.preview:
+                self.receipts['links'].pop(name, None)
+        dock = self.preferences('com.apple.dock')
+        others = dock.get('persistent-others', [])
+        uri = folder.as_uri() + '/'
+        if not any(dock_tile_key(item)[1] == uri for item in others):
+            self.preference('com.apple.dock', 'persistent-others', [dock_folder_tile(folder)] + list(others), dock)
+        else:
+            self.emit('CURRENT', 'Dock Games folder', str(folder))
+
     def selected_apps(self):
         return [app for app in self.manifest['apps'] if app['profile'] == 'core' or self.args.profile == 'full']
 
@@ -1498,6 +1574,8 @@ class Workstation:
         self.attempt('Shell configuration', self.shell)
         self.attempt('Editor configuration', self.editor)
         self.attempt('Desktop configuration', self.desktop)
+        if self.args.profile == 'full':
+            self.attempt('Games folder', self.games_folder)
         for selected, label, method in [(self.args.with_xcode, 'Xcode', self.xcode),
                                         (self.args.with_sharing, 'Sharing', self.sharing),
                                         (self.args.with_power_settings, 'Power', self.power)]:

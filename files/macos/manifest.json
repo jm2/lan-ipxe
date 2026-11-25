@@ -168,6 +168,27 @@
       "cask": "xrg"
     },
     {
+      "name": "BBEdit",
+      "app": "BBEdit.app",
+      "id": "com.barebones.bbedit",
+      "profile": "core",
+      "cask": "bbedit"
+    },
+    {
+      "name": "GrandPerspective",
+      "app": "GrandPerspective.app",
+      "id": "net.sourceforge.grandperspectiv",
+      "profile": "core",
+      "cask": "grandperspective"
+    },
+    {
+      "name": "Windows App",
+      "app": "Windows App.app",
+      "id": "com.microsoft.rdc.macos",
+      "profile": "core",
+      "cask": "windows-app"
+    },
+    {
       "name": "VLC",
       "app": "VLC.app",
       "id": "org.videolan.vlc",
@@ -247,6 +268,7 @@
     },
     {
       "name": "GOG Galaxy",
+      "game": true,
       "app": "GOG Galaxy.app",
       "id": "com.gog.galaxy",
       "profile": "full",
@@ -268,6 +290,7 @@
     },
     {
       "name": "SuperTuxKart",
+      "game": true,
       "app": "SuperTuxKart.app",
       "id": "net.sourceforge.supertuxkart",
       "profile": "full",
@@ -309,6 +332,7 @@
     },
     {
       "name": "Cro-Mag Rally",
+      "game": true,
       "app": "Cro-Mag Rally.app",
       "id": "io.jor.cromagrally",
       "profile": "full",
@@ -320,6 +344,7 @@
     },
     {
       "name": "Billy Frontier",
+      "game": true,
       "app": "Billy Frontier.app",
       "id": "io.jor.billyfrontier",
       "profile": "full",
@@ -331,6 +356,7 @@
     },
     {
       "name": "Bugdom",
+      "game": true,
       "app": "Bugdom.app",
       "id": "io.jor.bugdom",
       "profile": "full",
@@ -342,6 +368,7 @@
     },
     {
       "name": "Bugdom 2",
+      "game": true,
       "app": "Bugdom 2.app",
       "id": "io.jor.bugdom2",
       "profile": "full",
@@ -353,6 +380,7 @@
     },
     {
       "name": "Mighty Mike",
+      "game": true,
       "app": "Mighty Mike.app",
       "id": "io.jor.mightymike",
       "profile": "full",
@@ -364,6 +392,7 @@
     },
     {
       "name": "Nanosaur",
+      "game": true,
       "app": "Nanosaur.app",
       "id": "io.jor.nanosaur",
       "profile": "full",
@@ -375,6 +404,7 @@
     },
     {
       "name": "Nanosaur 2",
+      "game": true,
       "app": "Nanosaur 2.app",
       "id": "io.jor.nanosaur2",
       "profile": "full",
@@ -386,6 +416,7 @@
     },
     {
       "name": "Otto Matic",
+      "game": true,
       "app": "Otto Matic.app",
       "id": "io.jor.ottomatic",
       "profile": "full",
@@ -405,6 +436,7 @@
     },
     {
       "name": "dhewm3",
+      "game": true,
       "app": "dhewm3.app",
       "id": "com.macsourceports.dhewm3",
       "profile": "full",
@@ -415,6 +447,7 @@
     },
     {
       "name": "yquake2",
+      "game": true,
       "app": "yquake2.app",
       "id": "com.macsourceports.yquake2",
       "profile": "full",
@@ -425,6 +458,7 @@
     },
     {
       "name": "Prey2006",
+      "game": true,
       "app": "Prey2006.app",
       "id": "com.macsourceports.Prey2006",
       "profile": "full",
@@ -435,6 +469,7 @@
     },
     {
       "name": "ioquake3",
+      "game": true,
       "app": "ioquake3.app",
       "id": "com.macsourceports.ioquake3",
       "profile": "full",
@@ -448,6 +483,7 @@
     },
     {
       "name": "Unreal Tournament",
+      "game": true,
       "app": "UnrealTournament.app",
       "id": "com.oldunreal.unrealtournament",
       "profile": "full",
@@ -458,6 +494,7 @@
     },
     {
       "name": "ET Legacy",
+      "game": true,
       "app": "ET Legacy.app",
       "id": "com.etlegacy.etl",
       "profile": "full",
@@ -469,6 +506,7 @@
     },
     {
       "name": "Maelstrom",
+      "game": true,
       "app": "Maelstrom.app",
       "id": "com.macsourceports.Maelstrom",
       "profile": "full",
@@ -481,6 +519,40 @@
       ]
     }
   ],
+  "dock": {
+    "comment": "Dock layout after Finder, in order. Listed apps appear when installed (manifest apps only when their profile is selected); Dock tiles of other Apple apps and of manifest apps not listed here are removed, and tiles of anything else keep their place. Full-profile apps marked game appear in the Games folder instead.",
+    "apps": [
+      {"name": "Apps", "id": "com.apple.apps.launcher"},
+      {"name": "XRG", "id": "com.piatekjimenez.XRG"},
+      {"name": "App Store", "id": "com.apple.AppStore"},
+      {"name": "Google Chrome", "id": "com.google.Chrome"},
+      {"name": "Maps", "id": "com.apple.Maps"},
+      {"name": "Find My", "id": "com.apple.findmy"},
+      {"name": "FaceTime", "id": "com.apple.FaceTime"},
+      {"name": "Phone", "id": "com.apple.mobilephone"},
+      {"name": "Messages", "id": "com.apple.MobileSMS"},
+      {"name": "WeChat", "id": "com.tencent.xinWeChat"},
+      {"name": "Tributary", "id": "io.github.jm2.tributary"},
+      {"name": "Balun", "id": "io.github.jm2.Balun"},
+      {"name": "TV", "id": "com.apple.TV"},
+      {"name": "Music", "id": "com.apple.Music"},
+      {"name": "Games", "id": "com.apple.games"},
+      {"name": "BBEdit", "id": "com.barebones.bbedit"},
+      {"name": "Zed", "id": "dev.zed.Zed"},
+      {"name": "Visual Studio Code", "id": "com.microsoft.VSCode"},
+      {"name": "Antigravity", "id": "com.google.antigravity"},
+      {"name": "Claude", "id": "com.anthropic.claudefordesktop"},
+      {"name": "Windows App", "id": "com.microsoft.rdc.macos"},
+      {"name": "Transom", "id": "io.github.jm2.Transom"},
+      {"name": "GrandPerspective", "id": "net.sourceforge.grandperspectiv"},
+      {"name": "System Settings", "id": "com.apple.systempreferences"},
+      {"name": "Terminal", "id": "com.apple.Terminal"},
+      {"name": "Activity Monitor", "id": "com.apple.ActivityMonitor"},
+      {"name": "Steam", "id": "com.valvesoftware.steam"},
+      {"name": "Battle.net", "id": "net.battle.app"}
+    ],
+    "games_folder": "Applications/Games"
+  },
   "feed_clis": [
     {
       "name": "Antigravity CLI",

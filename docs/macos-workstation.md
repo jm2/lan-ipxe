@@ -18,7 +18,7 @@ The authoritative package/app list is [manifest.json](../files/macos/manifest.js
 
 Full adds OpenJDK/Maven/Gradle, Ruby, GCC/LLVM/lld, additional development libraries (including Vulkan/MoltenVK tools), Android Studio/SDK/NDK, Ollama, optional GUIs, launchers, and native game/engine releases. No Ollama models, emulator/system images, or supplemental game data are downloaded. No daemon is started merely because its formula was installed.
 
-All Mac App Store/mobile apps are excluded, including Xcode installation. An existing Store app with a selected app identity is ignored; its cask edition is not installed over it. Installed unrelated apps, packages, source checkouts, accounts and browser profiles are preserved.
+All Mac App Store/mobile apps are excluded, including Xcode installation. An existing Store app with a selected app identity is kept and left to the App Store; its cask edition is not installed over it (BBEdit, GrandPerspective and Windows App, for example, may already be App Store copies, and an App Store BBEdit license covers only that build). Installed unrelated apps, packages, source checkouts, accounts and browser profiles are preserved.
 
 ## Android
 
@@ -42,7 +42,7 @@ Game releases have reviewed repository/tag/asset/SHA-256 records. Cro-Mag Rally 
 
 Changed managed files are written atomically, with backups under `~/Library/Application Support/lan-ipxe/workstation/backups/`. The state directory and operational logs are private to the user; logs contain action records, not command/authentication output. Symlinked configuration files and command collisions are reported, not replaced. Bash/Zsh managed blocks preserve existing profile content; Vim uses the shared repository settings through a managed source block. Editor JSONC is merged without discarding unrelated keys/comments. Existing extensions remain installed.
 
-Only the preference allowlist is changed. Structured values merge with unrelated dictionary keys. Terminal imports the named **Clear Dark** profile; Dock reconciliation appends missing selected installed app identities and preserves unrelated tiles/order, including Store tiles. Existing Dock bookmarks are retained in place, never copied from the inventory. Dock/Finder restart at most once, only after actual changes. No forced logout or reboot occurs.
+Only the preference allowlist is changed. Structured values merge with unrelated dictionary keys. Terminal imports the named **Clear Dark** profile; The Dock follows the ordered `dock` list in `files/macos/manifest.json`: listed apps that are installed (manifest apps only when their profile is selected) appear in that order after Finder. Tiles of other Apple apps (`/System/Applications`), of manifest apps not on the list, and of listed apps no longer installed are removed. Every other tile (your own apps, Store apps the manifest doesn't know, spacers) keeps its place after the listed app it followed. To keep another manifest or Apple app in the Dock, add it to the list. Existing Dock bookmarks are retained in place, never copied from the inventory. The full profile keeps one **Games** Dock folder (`~/Applications/Games`, a name-sorted grid beside Downloads) of links to the installed apps marked `game`, instead of a Dock tile per game; links to games no longer installed are removed. The games themselves stay where they were installed, so Homebrew, their updaters and the install checks are unaffected. Dock/Finder restart at most once, only after actual changes. No forced logout or reboot occurs.
 
 ## Optional system phases
 

@@ -29,6 +29,7 @@ class ConfigurationTests(unittest.TestCase):
         self.obj = w.Workstation(w.arguments(['--no-upgrade']), home=self.home,
                                  prefix=self.root / 'brew', applications=self.root / 'Applications')
         self.obj.command_line_tools = self.root / 'CommandLineTools'
+        self.obj.system_applications = self.root / 'System/Applications'
         self.output = contextlib.redirect_stdout(io.StringIO())
         self.output.__enter__()
 
@@ -79,14 +80,111 @@ class ConfigurationTests(unittest.TestCase):
             with self.assertRaises(w.Deferred):
                 w.merge_jsonc(invalid, desired)
 
-    def test_dock_preserves_unmanaged_tiles_and_deduplicates(self):
-        old = [{'GUID': 42, 'tile-data': {'bundle-identifier': 'store.app', 'bookmark': b'original'}}]
-        apps = [{'id': 'new.app', 'path': self.home / 'My App.app'}]
-        merged = w.dock_items(old, apps)
-        self.assertEqual(merged[0], old[0])
-        self.assertEqual(w.dock_items(merged, apps), merged)
-        self.assertIn('My%20App.app', merged[1]['tile-data']['file-data']['_CFURLString'])
-        self.assertNotIn('bookmark', merged[1]['tile-data'])
+    def test_dock_layout_orders_listed_drops_managed_and_keeps_unmanaged(self):
+        def tile(ident, guid):
+            return {'GUID': guid, 'tile-data': {'bundle-identifier': ident, 'bookmark': b'original'}}
+        mine, chrome, game, music, mine2 = (tile('com.example.mine', 1), tile('com.google.chrome', 2),
+                                            tile('io.jor.bugdom', 3), tile('com.apple.music', 4), tile('com.example.mine2', 5))
+        old = [mine, music, game, chrome, mine2, tile('com.google.chrome', 6)]
+        desired = [{'id': 'com.google.Chrome', 'ids': {'com.google.chrome'}, 'path': self.home / 'Google Chrome.app'},
+                   {'id': 'new.app', 'ids': {'new.app'}, 'path': self.home / 'My App.app'},
+                   {'id': 'com.apple.Music', 'ids': {'com.apple.music'}, 'path': self.home / 'Music.app'}]
+        managed = lambda item: w.dock_tile_key(item)[0] in {'io.jor.bugdom', 'com.google.chrome', 'com.apple.music', 'new.app'}
+        merged = w.dock_layout(old, desired, managed)
+        # Listed order; existing tiles reused (bookmarks kept); duplicate and unlisted managed
+        # tiles dropped; unmanaged tiles follow the listed tile they followed before.
+        self.assertEqual([item['tile-data']['bundle-identifier'] for item in merged],
+                         ['com.example.mine', 'com.google.chrome', 'com.example.mine2', 'new.app', 'com.apple.music'])
+        self.assertIs(merged[1], chrome)
+        self.assertIs(merged[4], music)
+        self.assertIn('My%20App.app', merged[3]['tile-data']['file-data']['_CFURLString'])
+        self.assertNotIn('bookmark', merged[3]['tile-data'])
+        self.assertEqual(w.dock_layout(merged, desired, managed), merged)
+
+    def test_dock_plan_lists_system_and_selected_apps_and_manages_the_rest(self):
+        system = self.obj.system_applications
+        for name, ident in (('Apps', 'com.apple.apps.launcher'), ('iPhone Mirroring', 'com.apple.ScreenContinuity'),
+                            ('Utilities/Terminal', 'com.apple.Terminal')):
+            self.write_app(system / (name + '.app'), ident)
+        for name, ident in (('Steam', 'com.valvesoftware.steam'), ('Bugdom', 'io.jor.bugdom'),
+                            ('Codex', 'com.openai.codex'), ('Tributary', 'io.github.tributary.Tributary'),
+                            ('Mine', 'com.example.mine')):
+            self.write_app(self.obj.applications / (name + '.app'), ident)
+        self.obj.apps = self.obj.scan_apps()
+        desired, managed = self.obj.dock_plan()
+        # Core: Steam is installed but full-only; Tributary matches by its alternative ID.
+        self.assertEqual([app['id'] for app in desired], ['com.apple.apps.launcher', 'io.github.tributary.Tributary', 'com.apple.Terminal'])
+        ids = [entry['id'] for entry in self.obj.manifest['dock']['apps']]
+        self.assertLess(ids.index('com.microsoft.rdc.macos'), ids.index('io.github.jm2.Transom'))
+        self.assertEqual(ids.index('io.github.jm2.Transom'), ids.index('com.microsoft.rdc.macos') + 1)
+        casks = {spec['id']: spec.get('cask') for spec in self.obj.manifest['apps'] if spec['profile'] == 'core'}
+        self.assertEqual([casks.get(i) for i in ('com.barebones.bbedit', 'net.sourceforge.grandperspectiv', 'com.microsoft.rdc.macos')],
+                         ['bbedit', 'grandperspective', 'windows-app'])
+        self.assertNotIn('com.tencent.xinWeChat', casks, 'WeChat stays unmanaged')
+        self.assertNotIn('com.apple.ScreenContinuity', ids)
+        self.assertFalse(any(spec.get('game') and app_id in w.app_ids(spec)
+                             for spec in self.obj.manifest['apps'] for app_id in (i.lower() for i in ids)))
+        mirroring = {'tile-data': {'bundle-identifier': 'com.apple.ScreenContinuity',
+                                   'file-data': {'_CFURLString': (system / 'iPhone Mirroring.app').as_uri() + '/'}}}
+        self.assertTrue(managed(mirroring))
+        self.assertTrue(managed({'tile-data': {'bundle-identifier': 'com.openai.codex'}}))
+        self.assertTrue(managed({'tile-data': {'bundle-identifier': 'io.jor.bugdom'}}))
+        self.assertTrue(managed({'tile-data': {'bundle-identifier': 'com.tencent.xinWeChat'.lower()}}))
+        self.assertFalse(managed({'tile-data': {'bundle-identifier': 'com.example.mine'}}))
+        self.assertFalse(managed({'tile-type': 'spacer-tile', 'tile-data': {}}))
+        self.obj.args = w.arguments(['--profile', 'full', '--no-upgrade'])
+        desired, _ = self.obj.dock_plan()
+        self.assertEqual([app['id'] for app in desired][-1], 'com.valvesoftware.steam')
+
+    def test_games_folder_links_games_and_adds_one_dock_folder(self):
+        self.obj.args = w.arguments(['--profile', 'full', '--no-upgrade'])
+        bugdom = self.obj.applications / 'Bugdom.app'
+        self.write_app(bugdom, 'io.jor.bugdom')
+        self.write_app(self.obj.applications / 'Steam.app', 'com.valvesoftware.steam')
+        self.obj.apps = self.obj.scan_apps()
+        folder = self.home / 'Applications/Games'
+        stale = folder / 'Nanosaur.app'
+        folder.mkdir(parents=True)
+        stale.symlink_to(self.obj.applications / 'Nanosaur.app')
+        self.obj.receipts['links'] = {str(stale): str(self.obj.applications / 'Nanosaur.app')}
+        dock = {'persistent-others': [{'tile-type': 'directory-tile', 'tile-data': {'file-label': 'Downloads'}}]}
+        with patch.object(self.obj, 'preferences', return_value=dock), \
+                patch.object(self.obj, 'preference') as mock_pref:
+            self.obj.games_folder()
+        self.assertEqual(os.readlink(folder / 'Bugdom.app'), str(bugdom))
+        self.assertFalse((folder / 'Steam.app').exists(), 'launchers stay out of the Games folder')
+        self.assertFalse(stale.is_symlink())
+        self.assertNotIn(str(stale), self.obj.receipts['links'])
+        others = mock_pref.call_args.args[2]
+        self.assertEqual(others[0]['tile-data']['file-label'], 'Games')
+        self.assertEqual(others[0]['tile-data']['showas'], 2)
+        self.assertEqual(others[1]['tile-data']['file-label'], 'Downloads')
+        # The links are not installs, and a second run changes nothing.
+        self.assertEqual([app['path'] for app in self.obj.scan_apps() if app['id'] == 'io.jor.bugdom'], [bugdom])
+        dock['persistent-others'] = others
+        with patch.object(self.obj, 'preferences', return_value=dock), \
+                patch.object(self.obj, 'preference') as mock_pref:
+            self.obj.games_folder()
+        mock_pref.assert_not_called()
+
+    def test_app_store_copies_of_core_casks_are_kept_and_docked(self):
+        for name, ident in (('BBEdit', 'com.barebones.bbedit'), ('GrandPerspective', 'net.sourceforge.grandperspectiv'),
+                            ('Windows App', 'com.microsoft.rdc.macos')):
+            path = self.obj.applications / (name + '.app')
+            self.write_app(path, ident)
+            (path / 'Contents/_MASReceipt').mkdir()
+            (path / 'Contents/_MASReceipt/receipt').write_bytes(b'mas')
+        self.obj.apps = self.obj.scan_apps()
+        specs = [s for s in self.obj.manifest['apps'] if s['name'] in ('BBEdit', 'GrandPerspective', 'Windows App')]
+        self.assertEqual(len(specs), 3)
+        with patch.object(self.obj, 'package', side_effect=AssertionError('cask installed over an App Store copy')), \
+                patch.object(self.obj, 'command', side_effect=AssertionError('command ran')):
+            for spec in specs:
+                self.obj.application(spec)
+        self.assertEqual({(e['status'], e['item']) for e in self.obj.events},
+                         {('EXCLUDED', 'BBEdit'), ('EXCLUDED', 'GrandPerspective'), ('EXCLUDED', 'Windows App')})
+        desired, _ = self.obj.dock_plan()
+        self.assertEqual([app['id'] for app in desired], ['com.barebones.bbedit', 'com.microsoft.rdc.macos', 'net.sourceforge.grandperspectiv'])
 
     def test_store_native_collision_and_optional_failure_continuation(self):
         app = {'id': 'expected', 'name': 'Example', 'app': 'Example.app', 'cask': 'example'}
