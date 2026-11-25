@@ -383,7 +383,7 @@ $GooGetRepoUrl = 'http://192.168.1.11:8080/goo/game-packages'
 # removes one only while it still holds exactly what was written, so a repo
 # someone set up by hand under the same name stays.
 # Packages installed from the game-packages GooGet repo. Core: jm2 tools with
-# no WinGet package (Tributary and Balun stay on their vendor WinGet sources).
+# no WinGet package (Tributary, Balun and Transom stay on their vendor WinGet sources).
 # Full adds the game set the Linux full profiles install: the Pangea ports,
 # with Cro-Mag Rally as jm2's LAN-multiplayer fork. Real package names only:
 # googet 3.4.1 cannot install a dependency that only a Provides satisfies.
@@ -401,7 +401,7 @@ $GooGetRetiredRepos = @(
 # game's .goo download size times $GamesSizeFactor stands in (installed vs.
 # download ran 1.0-2.1x across the repo's games in 2026-11). GooGet itself is
 # built with Go and Git, which the games profile installs from WinGet first.
-$GamesExcludePattern = '^(balun|carryout|crossdock|switchworks|tributary|gbe-hostname)$'
+$GamesExcludePattern = '^(balun|carryout|crossdock|switchworks|transom|tributary|gbe-hostname)$'
 $GamesReservePercent = 20
 $GamesSizeFactor = 1.25
 $GamesBootstrapWingetPackages = @('GoLang.Go', 'Git.Git')
@@ -413,15 +413,17 @@ $GamesBootstrapWingetPackages = @('GoLang.Go', 'Git.Git')
 # absent: nothing there is a system file, and a hard link to one must fail.
 $GooGetAclTrustedSids = @('S-1-5-32-544', 'S-1-5-18')
 
-# Balun (core, beside jm2.Tributary). Its WinGet manifest jm2.Balun is pending
-# review, so apply prefers WinGet as soon as the ID resolves and otherwise
-# falls back to the verified GitHub-release Inno Setup installer. Once the ID
-# is published for good, move it into $WingetPackages and delete the fallback.
-$BalunWingetId = 'jm2.Balun'
-$BalunRepo = 'jm2/balun'
-$BalunDisplayName = 'Balun'
-# Inno Setup silent switches (build-aux/inno/balun.iss documents the same set).
-$BalunInstallerArgs = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-')
+# jm2 apps whose WinGet manifests are pending review (core, beside
+# jm2.Tributary): apply prefers WinGet as soon as an ID resolves and otherwise
+# falls back to the verified GitHub-release Inno Setup installer. Once an ID is
+# published for good, move it into $WingetPackages and drop its entry here.
+# DisplayName is the Inno AppVerName, which the uninstall entry carries.
+$ReleaseApps = @(
+    [pscustomobject]@{ Name = 'Balun'; WingetId = 'jm2.Balun'; Repo = 'jm2/balun'; DisplayName = 'Balun'; AssetFormat = 'balun-windows-{0}-setup.exe' }
+    [pscustomobject]@{ Name = 'Transom'; WingetId = 'jm2.Transom'; Repo = 'jm2/transom'; DisplayName = 'Transom'; AssetFormat = 'transom-windows-{0}-setup.exe' }
+)
+# Inno Setup silent switches (each app's build-aux/inno/*.iss documents the same set).
+$ReleaseAppInstallerArgs = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-')
 
 # winget exit codes (AppInstallerErrors.h). PowerShell parses these hex
 # literals as the negative Int32 values $LASTEXITCODE actually carries.
@@ -1393,10 +1395,11 @@ function Initialize-RustupToolchain {
     return 'current'
 }
 
-#--- Balun (WinGet first, verified GitHub release fallback) -----------------
-# The Inno installer registers a fixed AppId under Uninstall\{...}_is1 with
-# DisplayName "Balun"; per-user installs land under HKCU.
-function Get-BalunInstall {
+#--- jm2 release apps (WinGet first, verified GitHub release fallback) -------
+# Each Inno installer registers a fixed AppId under Uninstall\{...}_is1 with
+# the app's DisplayName; per-user installs land under HKCU.
+function Get-ReleaseAppInstall {
+    param([Parameter(Mandatory = $true)]$App)
     $roots = @(
         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
         'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
@@ -1404,7 +1407,7 @@ function Get-BalunInstall {
     )
     foreach ($root in $roots) {
         $entry = Get-ItemProperty -Path $root -ErrorAction SilentlyContinue |
-            Where-Object { $_.PSObject.Properties.Name -contains 'DisplayName' -and $_.DisplayName -eq $BalunDisplayName } |
+            Where-Object { $_.PSObject.Properties.Name -contains 'DisplayName' -and $_.DisplayName -eq $App.DisplayName } |
             Select-Object -First 1
         if ($entry) {
             return [pscustomobject]@{ Version = [string]$entry.DisplayVersion; Key = [string]$entry.PSChildName }
@@ -1424,7 +1427,7 @@ function Get-WindowsArchitectureName {
     switch ($native) {
         'AMD64' { return 'x86_64' }
         'ARM64' { return 'aarch64' }
-        default { throw "Balun publishes no Windows installer for architecture '$native'" }
+        default { throw "no Windows installer is published for architecture '$native'" }
     }
 }
 
@@ -1472,12 +1475,13 @@ function Get-VerifiedReleaseAsset {
 
 # Resolve the latest stable release asset for this architecture and the one
 # SHA-256 that SHA256SUMS.txt and (when present) GitHub's asset digest agree on.
-function Get-BalunRelease {
-    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$BalunRepo/releases/latest" -Headers @{ 'User-Agent' = 'lan-ipxe-setup' }
+function Get-ReleaseAppRelease {
+    param([Parameter(Mandatory = $true)]$App)
+    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$($App.Repo)/releases/latest" -Headers @{ 'User-Agent' = 'lan-ipxe-setup' }
     if ($release.prerelease -or $release.draft) {
-        throw "latest $BalunRepo release is not a stable release"
+        throw "latest $($App.Repo) release is not a stable release"
     }
-    $assetName = 'balun-windows-{0}-setup.exe' -f (Get-WindowsArchitectureName)
+    $assetName = $App.AssetFormat -f (Get-WindowsArchitectureName)
     $asset = Get-VerifiedReleaseAsset -Release $release -AssetName $assetName -SumsName 'SHA256SUMS.txt'
     return [pscustomobject]@{
         Version = ([string]$release.tag_name).TrimStart('v')
@@ -1487,85 +1491,89 @@ function Get-BalunRelease {
     }
 }
 
-function Install-BalunFromRelease {
-    param([Parameter(Mandatory = $true)]$Release)
-    $dir = Join-Path ([IO.Path]::GetTempPath()) ("balun-{0}" -f [Guid]::NewGuid().ToString('N'))
+function Install-ReleaseAppFromRelease {
+    param(
+        [Parameter(Mandatory = $true)]$App,
+        [Parameter(Mandatory = $true)]$Release
+    )
+    $dir = Join-Path ([IO.Path]::GetTempPath()) ("{0}-{1}" -f $App.Name.ToLowerInvariant(), [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $dir | Out-Null
     try {
         $installer = Join-Path $dir $Release.Name
         Invoke-WebRequest -Uri $Release.Url -OutFile $installer -UseBasicParsing
         $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer).Hash.ToLowerInvariant()
         if ($actual -ne $Release.Sha256) {
-            throw "Balun installer checksum mismatch: expected $($Release.Sha256), got $actual"
+            throw "$($App.Name) installer checksum mismatch: expected $($Release.Sha256), got $actual"
         }
-        $process = Start-Process -FilePath $installer -ArgumentList $BalunInstallerArgs -Wait -PassThru
+        $process = Start-Process -FilePath $installer -ArgumentList $ReleaseAppInstallerArgs -Wait -PassThru
         if ($process.ExitCode -ne 0) {
-            throw "Balun installer exited with $($process.ExitCode)"
+            throw "$($App.Name) installer exited with $($process.ExitCode)"
         }
     }
     finally {
         Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
     }
-    if (-not (Get-BalunInstall)) {
-        throw 'Balun installer finished but no Balun uninstall entry was registered'
+    if (-not (Get-ReleaseAppInstall -App $App)) {
+        throw "$($App.Name) installer finished but no $($App.Name) uninstall entry was registered"
     }
 }
 
 # Returns 'current', 'installed', 'updated', 'deferred' or 'failed'. WinGet owns
-# Balun whenever jm2.Balun resolves; it adopts a release-installed copy in place
-# (same Inno AppId), so Balun is never installed twice.
-function Invoke-BalunStep {
+# an app whenever its ID resolves; it adopts a release-installed copy in place
+# (same Inno AppId), so the app is never installed twice.
+function Invoke-ReleaseAppStep {
     param(
+        [Parameter(Mandatory = $true)]$App,
         [string[]]$InstalledIds = @(),
         [switch]$NoUpgrade
     )
-    $existing = Get-BalunInstall
+    $existing = Get-ReleaseAppInstall -App $App
     try {
-        if (Test-WingetPackageAvailable -Id $BalunWingetId) {
+        if (Test-WingetPackageAvailable -Id $($App.WingetId)) {
             if ($existing -and $NoUpgrade) {
-                Write-Note "Balun $($existing.Version): present (-NoUpgrade)"
+                Write-Note "$($App.Name) $($existing.Version): present (-NoUpgrade)"
                 return 'current'
             }
-            $verb = if ($InstalledIds -contains $BalunWingetId) { 'upgrade' } else { 'install' }
-            Write-Note "Balun: winget $verb $BalunWingetId"
+            $verb = if ($InstalledIds -contains $($App.WingetId)) { 'upgrade' } else { 'install' }
+            Write-Note "$($App.Name): winget $verb $($App.WingetId)"
             if ($verb -eq 'upgrade') {
-                Invoke-Winget upgrade --id $BalunWingetId --exact --source winget --include-unknown --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Host
+                Invoke-Winget upgrade --id $($App.WingetId) --exact --source winget --include-unknown --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Host
             }
             else {
                 # No --no-upgrade: an existing release install is adopted in place.
-                Invoke-Winget install --id $BalunWingetId --exact --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Host
+                Invoke-Winget install --id $($App.WingetId) --exact --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Host
             }
             $code = $LASTEXITCODE
             if ($WingetRebootCodes -contains $code) { $script:RebootNeeded = $true }
             if ($WingetOkCodes.ContainsKey($code)) {
-                Write-Note "Balun: $($WingetOkCodes[$code])"
+                Write-Note "$($App.Name): $($WingetOkCodes[$code])"
                 if ($existing) { return 'updated' }
                 return 'installed'
             }
             if ($WingetDeferredCodes.ContainsKey($code)) {
-                Write-Warning "Balun: $($WingetDeferredCodes[$code])"
+                Write-Warning "$($App.Name): $($WingetDeferredCodes[$code])"
                 return 'deferred'
             }
-            Write-Warning ("Balun: winget {0} exited with 0x{1:X8} ({1})" -f $verb, $code)
+            Write-Warning ("$($App.Name): winget {0} exited with 0x{1:X8} ({1})" -f $verb, $code)
             return 'failed'
         }
 
         if ($existing -and $NoUpgrade) {
-            Write-Note "Balun $($existing.Version): present (-NoUpgrade)"
+            Write-Note "$($App.Name) $($existing.Version): present (-NoUpgrade)"
             return 'current'
         }
-        $release = Get-BalunRelease
+        $release = Get-ReleaseAppRelease -App $App
         if ($existing -and $existing.Version -eq $release.Version) {
-            Write-Note "Balun $($existing.Version): current (GitHub release)"
+            Write-Note "$($App.Name) $($existing.Version): current (GitHub release)"
             return 'current'
         }
-        Write-Note "Balun: installing verified GitHub release $($release.Version) ($($release.Name))"
-        Install-BalunFromRelease -Release $release
+        Write-Note "$($App.Name): installing verified GitHub release $($release.Version) ($($release.Name))"
+        Install-ReleaseAppFromRelease -App $App -Release $release
         if ($existing) { return 'updated' }
         return 'installed'
     }
     catch {
-        Write-Warning "Balun: $($_.Exception.Message)"
+        Write-Warning "$($App.Name): $($_.Exception.Message)"
         return 'failed'
     }
 }
@@ -3289,9 +3297,11 @@ if ($DryRun) {
     Write-Note '    PowerShell-<version>-win-<x64|arm64>.msi, SHA-256 checked against hashes.sha256 and the asset digest,'
     Write-Note "    msiexec /quiet $($PowerShellMsiProperties -join ' '); a newer non-LTS install is uninstalled first;"
     Write-Note '    skipped while this run executes from that pwsh, and when present and -NoUpgrade; then any Store copy is removed'
-    Write-Note "Balun: WinGet $BalunWingetId when it resolves; otherwise the latest stable $BalunRepo release"
-    Write-Note '    balun-windows-<x86_64|aarch64>-setup.exe, SHA-256 checked against SHA256SUMS.txt and the asset digest,'
-    Write-Note "    run silently ($($BalunInstallerArgs -join ' ')); skipped when present and -NoUpgrade"
+    foreach ($app in $ReleaseApps) {
+        Write-Note "$($app.Name): WinGet $($app.WingetId) when it resolves; otherwise the latest stable $($app.Repo) release"
+        Write-Note "    $($app.AssetFormat -f '<x86_64|aarch64>'), SHA-256 checked against SHA256SUMS.txt and the asset digest,"
+        Write-Note "    run silently ($($ReleaseAppInstallerArgs -join ' ')); skipped when present and -NoUpgrade"
+    }
     Write-Note "Ventoy: latest stable $VentoyRepo release ventoy-<version>-windows.zip, SHA-256 checked against sha256.txt and the asset digest,"
     Write-Note '    unpacked to %ProgramFiles%\Ventoy + all-users Start menu shortcut to the native Ventoy2Disk;'
     Write-Note '    replaced whenever the latest release differs from the recorded one (a copy this script did not'
@@ -3444,9 +3454,11 @@ if ($Check) {
     if ($storePwsh.Count) {
         Write-State $false 'PowerShell 7 (Store package)' "$($storePwsh[0].Version); its alias can't run in Codex's sandbox; replaced by the MSI on apply"
     }
-    $balun = Get-BalunInstall
-    $balunOwner = if ($installedIds -contains $BalunWingetId) { "WinGet $BalunWingetId" } else { 'GitHub release' }
-    Write-State ($null -ne $balun) 'Balun' $(if ($balun) { "$($balun.Version) via $balunOwner" } else { 'not installed' })
+    foreach ($app in $ReleaseApps) {
+        $appInstall = Get-ReleaseAppInstall -App $app
+        $appOwner = if ($installedIds -contains $app.WingetId) { "WinGet $($app.WingetId)" } else { 'GitHub release' }
+        Write-State ($null -ne $appInstall) $app.Name $(if ($appInstall) { "$($appInstall.Version) via $appOwner" } else { 'not installed' })
+    }
     $ventoy = Get-VentoyInstall
     Write-State ($null -ne $ventoy) 'Ventoy' $(if ($ventoy) { "$($ventoy.Label) (newer releases checked on apply)" } else { 'not installed' })
 
@@ -3590,9 +3602,12 @@ Write-Step 'PowerShell 7 (LTS MSI from GitHub, not the Store package)'
 $pwshResult = Invoke-PowerShellMsiSwitch -NoUpgrade:$NoUpgrade
 Write-Note "PowerShell 7: $pwshResult"
 
-Write-Step 'Balun (WinGet when published, otherwise verified GitHub release)'
-$balunResult = Invoke-BalunStep -InstalledIds $installedIds -NoUpgrade:$NoUpgrade
-Write-Note "Balun: $balunResult"
+$releaseAppResults = [ordered]@{}
+foreach ($app in $ReleaseApps) {
+    Write-Step "$($app.Name) (WinGet when published, otherwise verified GitHub release)"
+    $releaseAppResults[$app.Name] = Invoke-ReleaseAppStep -App $app -InstalledIds $installedIds -NoUpgrade:$NoUpgrade
+    Write-Note "$($app.Name): $($releaseAppResults[$app.Name])"
+}
 
 Write-Step 'Ventoy (verified GitHub release)'
 $ventoyResult = Invoke-VentoyStep -NoUpgrade:$NoUpgrade
@@ -3633,9 +3648,10 @@ Write-Note "native CLIs: $($nativeResult.Installed.Count) installed now, $($nati
 if ($nativeResult.Failed.Count) { Write-Note "failed: $($nativeResult.Failed -join ', ')" }
 Write-Note "OpenCode native installs: $($openCodeResult.Removed.Count) removed, $($openCodeResult.Failed.Count) failed"
 if ($openCodeResult.Failed.Count) { Write-Note "failed: $($openCodeResult.Failed -join ', ')" }
-if ($balunResult -eq 'deferred') { Write-Note 'deferred (re-run after a reboot): Balun' }
+$deferredApps = @($releaseAppResults.Keys | Where-Object { $releaseAppResults[$_] -eq 'deferred' })
+if ($deferredApps.Count) { Write-Note "deferred (re-run after a reboot): $($deferredApps -join ', ')" }
 if ($googetResult -eq 'deferred') { Write-Note 'deferred (re-run once Go is installed): GooGet' }
 Write-Note "game-packages: $($gooResult.Installed.Count) installed now, $($gooResult.Current.Count) current, $($gooResult.Deferred.Count) deferred, $($gooResult.Failed.Count) failed"
 if ($gooResult.Deferred.Count) { Write-Note "deferred (install once enthoo answers): $($gooResult.Deferred -join ', ')" }
 if ($gooResult.Failed.Count) { Write-Note "failed: $($gooResult.Failed -join ', ')" }
-if ($wingetResult.Failed.Count -or $openCodeResult.Failed.Count -or $nativeResult.Failed.Count -or $rustResult -eq 'failed' -or $balunResult -eq 'failed' -or $ventoyResult -eq 'failed' -or $gooseDesktopResult -eq 'failed' -or $pwshResult -eq 'failed' -or $googetResult -eq 'failed' -or $gooResult.Failed.Count) { exit 1 }
+if ($wingetResult.Failed.Count -or $openCodeResult.Failed.Count -or $nativeResult.Failed.Count -or $rustResult -eq 'failed' -or @($releaseAppResults.Values) -contains 'failed' -or $ventoyResult -eq 'failed' -or $gooseDesktopResult -eq 'failed' -or $pwshResult -eq 'failed' -or $googetResult -eq 'failed' -or $gooResult.Failed.Count) { exit 1 }

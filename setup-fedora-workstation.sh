@@ -40,7 +40,7 @@
 #
 # What it does, in order:
 #   1. signed third-party repos: VS Code, the jmsqrd/tributary,
-#      jmsqrd/balun, jmsqrd/switchworks, jmsqrd/crossdock and jmsqrd/carryout
+#      jmsqrd/balun, jmsqrd/transom, jmsqrd/switchworks, jmsqrd/crossdock and jmsqrd/carryout
 #      coprs, RPM Fusion free+nonfree,
 #      Chrome, Charm (Crush),
 #      sing-box; on
@@ -109,7 +109,7 @@ FILES=${SCRIPT_DIR}/files
 ARCH=$(uname -m)
 FEDORA_MIN_VERSION=41
 
-COPRS=(jmsqrd/tributary jmsqrd/balun jmsqrd/switchworks jmsqrd/crossdock jmsqrd/carryout)
+COPRS=(jmsqrd/tributary jmsqrd/balun jmsqrd/transom jmsqrd/switchworks jmsqrd/crossdock jmsqrd/carryout)
 # Completed with the release number after preflight; no rpm call at load time
 # keeps --dry-run usable on non-Fedora hosts.
 RPMFUSION_FREE_URL_BASE=https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-
@@ -129,7 +129,7 @@ GAME_PACKAGES_KEY_FILE=/etc/pki/rpm-gpg/RPM-GPG-KEY-game-packages
 # runtimes: the games depend on what they need), keeping
 # GAMES_RESERVE_PERCENT of the filesystem holding GAMES_TARGET free.
 SELECT_GAMES_AWK=${SCRIPT_DIR}/lib/select-games.awk
-GAMES_EXCLUDE='(balun|carryout|crossdock|switchworks|tributary)(-bin)?|netatalk-appletalk|owntone-server|geysermc-bin|knockoutcity-server|agelanserver(-companion)?-bin|gamelaunch|gbe-fork-bin|xlln-bin|wine-ipv6only|umu-launcher|steamcmd|gconf|gtk2|openssl-1[.]0|xf86miscproto|lib[a-z0-9_.+-]*'
+GAMES_EXCLUDE='(balun|carryout|crossdock|switchworks|transom|tributary)(-bin)?|netatalk-appletalk|owntone-server|geysermc-bin|knockoutcity-server|agelanserver(-companion)?-bin|gamelaunch|gbe-fork-bin|xlln-bin|wine-ipv6only|umu-launcher|steamcmd|gconf|gtk2|openssl-1[.]0|xf86miscproto|lib[a-z0-9_.+-]*'
 GAMES_TARGET=/opt
 GAMES_RESERVE_PERCENT=20
 # Consecutive games share one transaction up to this many bytes.
@@ -410,6 +410,7 @@ PKGS=(
   texinfo
   tmux
   transmission-cli
+  transom
   tree
   tributary
   udisks2-lvm2

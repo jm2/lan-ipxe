@@ -69,7 +69,7 @@ test_profile_selection() (
   # fallback), never from the plain AUR list.
   local entry repo_names=()
   for entry in "${GAME_REPO_PKGS[@]}"; do repo_names+=("${entry%%|*}"); done
-  [[ ${repo_names[*]} == 'balun-bin carryout-bin crossdock-bin tributary-bin' ]] \
+  [[ ${repo_names[*]} == 'balun-bin carryout-bin crossdock-bin transom-bin tributary-bin' ]] \
     || fail "core game-packages set is ${repo_names[*]}"
   for entry in "${GAME_REPO_PKGS_CORE[@]}" "${GAME_REPO_PKGS_FULL[@]}"; do
     ! array_contains "${entry%%|*}" "${PKGS_AUR_CORE[@]}" "${PKGS_AUR_FULL[@]}" \
@@ -96,7 +96,7 @@ test_profile_selection() (
   done
   repo_names=()
   for entry in "${GAME_REPO_PKGS[@]}"; do repo_names+=("${entry%%|*}"); done
-  for package in "${games_repo[@]}" balun-bin tributary-bin crossdock-bin carryout-bin; do
+  for package in "${games_repo[@]}" balun-bin transom-bin tributary-bin crossdock-bin carryout-bin; do
     array_contains "${package}" "${repo_names[@]}" || fail "full game-packages set omits ${package}"
   done
   array_contains 'cro-mag-rally-net-bin|cro-mag-rally-net' "${GAME_REPO_PKGS[@]}" \
@@ -204,7 +204,7 @@ test_check_exit_codes() (
   pacman_conf_has_game_packages_include() { return 0; }
   GAME_PACKAGES_CONF=${TEST_ROOT}/check-game-packages.conf
   : >"${GAME_PACKAGES_CONF}"
-  game_installed=' balun-bin carryout-bin crossdock-bin tributary-bin '
+  game_installed=' balun-bin carryout-bin crossdock-bin transom-bin tributary-bin '
   pacman() {
     case $1 in
       -Sg) return 0 ;;
@@ -270,11 +270,11 @@ test_check_exit_codes() (
   rc=0; output=$(run_check) || rc=$?
   [[ ${rc} == 0 ]] || fail "restored goose check exited ${rc}: ${output}"
   # A package installed from neither the repository nor the AUR is drift.
-  game_installed=' balun-bin carryout-bin crossdock-bin '
+  game_installed=' balun-bin carryout-bin crossdock-bin transom-bin '
   rc=0; output=$(run_check) || rc=$?
   [[ ${rc} == 2 && ${output} == *'DRIFT    game-packages package tributary-bin: not installed'* ]] \
     || fail 'a missing game-packages package was not drift'
-  game_installed=' balun-bin carryout-bin crossdock-bin tributary-bin '
+  game_installed=' balun-bin carryout-bin crossdock-bin transom-bin tributary-bin '
   PROFILE=full; select_profile full
   # The differently named AUR build of jm2's Cro-Mag Rally is a note: a run
   # that reaches the LAN replaces it with the repository package.
@@ -624,14 +624,22 @@ printf 'PASS Arch argument parsing and usage errors\n'
 test_game_packages_repo
 
 # Packages game-packages publishes install from it while crossdock answers
-# (replacing a differently named AUR build), and fall back to the AUR off it.
+# (replacing a differently named AUR build), and fall back to the AUR off it
+# or while the repository does not publish them.
 test_game_repo_install() (
   load_helpers
   select_profile full
-  local calls=${TEST_ROOT}/game-repo-calls synced=1
-  local -A have=([balun-bin]=1 [cro-mag-rally-net]=1)
+  local calls=${TEST_ROOT}/game-repo-calls synced=1 entry
+  local -A have=([balun-bin]=1 [cro-mag-rally-net]=1) published=()
+  for entry in "${GAME_REPO_PKGS[@]}"; do published[${entry%%|*}]=1; done
   game_packages_repo_synced() { (( synced )); }
-  pacman() { [[ $1 == -Q ]] || return 97; [[ -n ${have[$2]:-} ]]; }
+  pacman() {
+    case $1 in
+      -Q) [[ -n ${have[$2]:-} ]] ;;
+      -Si) [[ $2 == game-packages/* && -n ${published[${2#game-packages/}]:-} ]] ;;
+      *) return 97 ;;
+    esac
+  }
   sudo() {
     printf '%s\n' "$*" >>"${calls}"
     [[ $1 == pacman ]] || fail "unexpected privileged command: $*"
@@ -644,7 +652,7 @@ test_game_repo_install() (
   install_game_repo_pkgs >/dev/null
   [[ $(sed -n 1p "${calls}") == 'pacman -Rns --noconfirm cro-mag-rally-net' ]] \
     || fail "the AUR Cro-Mag Rally was not removed for its repository successor: $(cat "${calls}")"
-  [[ $(sed -n 2p "${calls}") == 'pacman -S --needed --noconfirm balun-bin carryout-bin crossdock-bin tributary-bin bugdom bugdom2 cro-mag-rally-net-bin mightymike nanosaur nanosaur2 ottomatic steamcmd' ]] \
+  [[ $(sed -n 2p "${calls}") == 'pacman -S --needed --noconfirm balun-bin carryout-bin crossdock-bin transom-bin tributary-bin bugdom bugdom2 cro-mag-rally-net-bin mightymike nanosaur nanosaur2 ottomatic steamcmd' ]] \
     || fail "game-packages packages were not installed from the repository: $(cat "${calls}")"
   (( ${#GAME_REPO_AUR_FALLBACK[@]} == 0 )) || fail 'a reachable repository left AUR fallbacks'
 
@@ -653,15 +661,28 @@ test_game_repo_install() (
   synced=0; have=([balun-bin]=1 [cro-mag-rally-net]=1); : >"${calls}"
   install_game_repo_pkgs >/dev/null
   [[ ! -s ${calls} ]] || fail "an unreachable repository ran: $(cat "${calls}")"
-  [[ ${GAME_REPO_AUR_FALLBACK[*]} == 'carryout-bin crossdock-bin tributary-bin bugdom bugdom2 cro-mag-rally-net mightymike nanosaur nanosaur2 ottomatic steamcmd' ]] \
+  [[ ${GAME_REPO_AUR_FALLBACK[*]} == 'carryout-bin crossdock-bin transom-bin tributary-bin bugdom bugdom2 cro-mag-rally-net mightymike nanosaur nanosaur2 ottomatic steamcmd' ]] \
     || fail "unexpected AUR fallbacks: ${GAME_REPO_AUR_FALLBACK[*]}"
+
+  # Reachable but not (yet) publishing a package: that one falls back to the
+  # AUR unless installed; the rest still install from the repository.
+  synced=1; have=([balun-bin]=1); unset 'published[transom-bin]'; : >"${calls}"
+  install_game_repo_pkgs >/dev/null
+  [[ ${GAME_REPO_AUR_FALLBACK[*]} == transom-bin ]] \
+    || fail "an unpublished package did not fall back to the AUR: ${GAME_REPO_AUR_FALLBACK[*]}"
+  [[ $(cat "${calls}") == *'pacman -S --needed --noconfirm balun-bin carryout-bin crossdock-bin tributary-bin bugdom'* ]] \
+    || fail "an unpublished package was requested from game-packages: $(cat "${calls}")"
+  have=([balun-bin]=1 [transom-bin]=1); : >"${calls}"
+  install_game_repo_pkgs >/dev/null
+  (( ${#GAME_REPO_AUR_FALLBACK[@]} == 0 )) || fail 'an installed unpublished package was queued for the AUR'
+  published[transom-bin]=1
 
   # --no-upgrade installs only what neither source has installed.
   # shellcheck disable=SC2034 # read by the sourced install_game_repo_pkgs
   NO_UPGRADE=1
   synced=1; have=([balun-bin]=1 [cro-mag-rally-net]=1 [bugdom]=1); : >"${calls}"
   install_game_repo_pkgs >/dev/null
-  [[ $(cat "${calls}") == 'pacman -S --needed --noconfirm carryout-bin crossdock-bin tributary-bin bugdom2 mightymike nanosaur nanosaur2 ottomatic steamcmd' ]] \
+  [[ $(cat "${calls}") == 'pacman -S --needed --noconfirm carryout-bin crossdock-bin transom-bin tributary-bin bugdom2 mightymike nanosaur nanosaur2 ottomatic steamcmd' ]] \
     || fail "--no-upgrade touched installed packages: $(cat "${calls}")"
 )
 test_game_repo_install

@@ -92,7 +92,7 @@ test_profile_selection() {
       [[ ${out} != *r8152* ]] || fail "${arch}/${profile}: plan still mentions r8152"
 
       # Core developer surface, present in both profiles.
-      for item in balun tributary switchworks chromium google-chrome-stable code \
+      for item in balun transom tributary switchworks chromium google-chrome-stable code \
           clang clang-devel freerdp freerdp-devel libsecret-devel libwinpr-devel uv \
           ffmpeg ffmpeg-devel gstreamer1-plugin-libav gstreamer1-plugins-bad-freeworld \
           gstreamer1-plugins-ugly mesa-va-drivers-freeworld \
@@ -123,6 +123,7 @@ test_profile_selection() {
         has_line "${item}" "${pkgs}" || fail "${arch}/${profile}: omits the jm2 ${item} package"
       done
       for item in copr:copr.fedorainfracloud.org:jmsqrd:balun \
+          copr:copr.fedorainfracloud.org:jmsqrd:transom \
           copr:copr.fedorainfracloud.org:jmsqrd:tributary \
           copr:copr.fedorainfracloud.org:jmsqrd:switchworks \
           copr:copr.fedorainfracloud.org:jmsqrd:crossdock \

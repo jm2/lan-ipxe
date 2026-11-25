@@ -19,7 +19,7 @@ if ($parseErrors.Count) {
 $tokens.Count | Out-Null
 
 foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetFullStorePackages', 'WingetStorePackageNames', 'WingetLegacyPackages', 'WingetPresenceOnlyPackages',
-                              'RustComponents', 'BalunWingetId', 'BalunRepo', 'BalunDisplayName', 'BalunInstallerArgs', 'PowerShellRepo', 'PowerShellMetadataUrl', 'PowerShellMsiProperties', 'PowerShellMsiLog', 'MsiOkCodes', 'MsiRebootCodes', 'MsiBusyCode', 'MsiBusyAttempts', 'MsiBusyRetrySeconds', 'WingetOkCodes', 'WingetRebootCodes', 'WingetDeferredCodes', 'WingetRemoveOkCodes', 'WingetUserScopeElevatedCode', 'WingetSelfUpdatingCode', 'WingetLaunchAttempts', 'WingetLaunchRetrySeconds', 'WingetInstallTechMismatchCode', 'WingetUninstallWaitSeconds', 'WingetUninstallPollSeconds', 'NativeCliTools', 'WingetPackageArgs', 'GooGetGitHubRepo', 'GooGetPatchedRepo', 'GooGetPatchedCommit', 'GooGetPatchedPulls', 'GooGetRepoName', 'GooGetRepoUrl', 'GooGetRetiredRepos', 'GooGetAclTrustedSids', 'GooGetPackages', 'GooGetFullPackages', 'GooGetProbeTimeoutSeconds',
+                              'RustComponents', 'ReleaseApps', 'ReleaseAppInstallerArgs', 'PowerShellRepo', 'PowerShellMetadataUrl', 'PowerShellMsiProperties', 'PowerShellMsiLog', 'MsiOkCodes', 'MsiRebootCodes', 'MsiBusyCode', 'MsiBusyAttempts', 'MsiBusyRetrySeconds', 'WingetOkCodes', 'WingetRebootCodes', 'WingetDeferredCodes', 'WingetRemoveOkCodes', 'WingetUserScopeElevatedCode', 'WingetSelfUpdatingCode', 'WingetLaunchAttempts', 'WingetLaunchRetrySeconds', 'WingetInstallTechMismatchCode', 'WingetUninstallWaitSeconds', 'WingetUninstallPollSeconds', 'NativeCliTools', 'WingetPackageArgs', 'GooGetGitHubRepo', 'GooGetPatchedRepo', 'GooGetPatchedCommit', 'GooGetPatchedPulls', 'GooGetRepoName', 'GooGetRepoUrl', 'GooGetRetiredRepos', 'GooGetAclTrustedSids', 'GooGetPackages', 'GooGetFullPackages', 'GooGetProbeTimeoutSeconds',
                               'GamesExcludePattern', 'GamesReservePercent', 'GamesSizeFactor', 'GamesBootstrapWingetPackages', 'VentoyRepo', 'VentoyMarkerName')) {
     $assignmentAst = $ast.Find({
         param($node)
@@ -32,7 +32,7 @@ foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetFul
 }
 foreach ($functionName in @('Write-Note', 'Invoke-Winget', 'Invoke-WingetUninstall', 'Get-WingetPackageArgument', 'Get-WingetArpEntry', 'Test-NsisExecutable', 'Remove-WingetPackageForReinstall', 'Wait-WingetPackageRemoved', 'Split-UninstallCommand', 'Invoke-UninstallCommand', 'Invoke-WingetPackageSet', 'Get-RustupStableComponent',
                             'Test-RustupDefaultToolchain', 'Initialize-RustupToolchain',
-                            'Get-NativeProcessorArchitecture', 'Get-WindowsArchitectureName', 'Get-VerifiedReleaseAsset', 'Get-BalunRelease', 'Invoke-BalunStep', 'Get-VentoyRoot', 'Get-VentoyInstall', 'Restore-InterruptedTreeSwap', 'Switch-StagedTree', 'Get-VentoyShortcutTarget', 'Select-VentoyAsset', 'Get-VentoyRelease', 'Find-VentoyAppDirectory', 'Get-VentoyNativeExeName', 'Install-Ventoy', 'Invoke-VentoyStep', 'Get-PowerShellLtsVersion', 'Get-PowerShellLtsRelease', 'Invoke-Msiexec',
+                            'Get-NativeProcessorArchitecture', 'Get-WindowsArchitectureName', 'Get-VerifiedReleaseAsset', 'Get-ReleaseAppRelease', 'Invoke-ReleaseAppStep', 'Get-VentoyRoot', 'Get-VentoyInstall', 'Restore-InterruptedTreeSwap', 'Switch-StagedTree', 'Get-VentoyShortcutTarget', 'Select-VentoyAsset', 'Get-VentoyRelease', 'Find-VentoyAppDirectory', 'Get-VentoyNativeExeName', 'Install-Ventoy', 'Invoke-VentoyStep', 'Get-PowerShellLtsVersion', 'Get-PowerShellLtsRelease', 'Invoke-Msiexec',
                             'Invoke-PowerShellMsiSwitch', 'Select-GooGetSource', 'Test-GooGetPatchPending', 'Get-GooGetConfText', 'Get-GooGetRepoFileText', 'Get-GooGetRetiredRepoFile', 'Read-TextOrEmpty', 'Test-GooGetWriteRight',
                             'Get-GooGetInstalledName', 'Get-GooGetInstalledPackage', 'Invoke-GooGetPackageSet',
                             'Get-GameSourceRank', 'Get-GameKey', 'Select-GamePackage', 'Get-GooGetArchPreference', 'Compare-GooGetVersion', 'Select-GooGetIndexEntry')) {
@@ -81,9 +81,15 @@ Assert-True ($WingetLegacyPackages -contains 'Ventoy.Ventoy') 'a WinGet Ventoy i
 Assert-True ($scriptText -match '(?m)^\$ventoyResult = Invoke-VentoyStep ') 'Ventoy step runs in core and full'
 Assert-True ($scriptText.IndexOf('Invoke-VentoyStep -NoUpgrade') -lt $scriptText.IndexOf('#--- 4. Self-updating native CLIs')) 'Ventoy step is part of the package phase'
 Assert-True ($scriptText.Contains("-or `$ventoyResult -eq 'failed'")) 'a failed Ventoy step fails the run'
-Assert-True ($scriptText -match '(?m)^\$balunResult = Invoke-BalunStep ') 'Balun step runs in every profile (core)'
-Assert-True ($scriptText.IndexOf('Invoke-BalunStep -InstalledIds') -lt $scriptText.IndexOf('#--- 4. Self-updating native CLIs')) 'Balun step is part of the package phase'
-Assert-True (($BalunInstallerArgs -join ' ') -eq '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-') 'Balun uses Inno Setup silent switches'
+Assert-True ($scriptText -match '(?m)^    \$releaseAppResults\[\$app\.Name\] = Invoke-ReleaseAppStep ') 'release-app step runs in every profile (core)'
+Assert-True ($scriptText.IndexOf('Invoke-ReleaseAppStep -App $app -InstalledIds') -lt $scriptText.IndexOf('#--- 4. Self-updating native CLIs')) 'release-app step is part of the package phase'
+Assert-True ($scriptText.Contains("@(`$releaseAppResults.Values) -contains 'failed'")) 'a failed release app fails the run'
+Assert-True ((@($ReleaseApps | ForEach-Object Name) -join ' ') -eq 'Balun Transom') 'Balun and Transom are the release apps'
+foreach ($app in $ReleaseApps) {
+    Assert-True ($app.WingetId -eq "jm2.$($app.Name)" -and $app.Repo -eq "jm2/$($app.Name.ToLowerInvariant())" -and $app.DisplayName -eq $app.Name) "$($app.Name) release-app entry"
+    Assert-True (($app.AssetFormat -f 'x86_64') -eq "$($app.Name.ToLowerInvariant())-windows-x86_64-setup.exe") "$($app.Name) asset name"
+}
+Assert-True (($ReleaseAppInstallerArgs -join ' ') -eq '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-') 'release apps use Inno Setup silent switches'
 foreach ($tool in @($NativeCliTools | Where-Object { $_.RelativePath -like '.local\bin\*' })) {
     # goose also adds .local\bin but is x64-only, so each tool there adds it itself.
     Assert-True ([bool]$tool.AddToUserPath) "$($tool.Name) puts %USERPROFILE%\.local\bin on the user PATH"
@@ -117,7 +123,9 @@ try {
         $text = $output -join "`n"
         Assert-True ($text -match "Profile: $profileName; mode: dry-run") "$profileName dry run announces profile and mode"
         Assert-True ($text -match 'Rustlang\.Rustup') "$profileName dry run lists rustup"
-        Assert-True ($text -match 'Balun: WinGet jm2\.Balun when it resolves') "$profileName dry run lists the Balun plan"
+        Assert-True ($text -match 'Balun: WinGet jm2\.Balun when it resolves; otherwise the latest stable jm2/balun release') "$profileName dry run lists the Balun plan"
+        Assert-True ($text -match 'Transom: WinGet jm2\.Transom when it resolves; otherwise the latest stable jm2/transom release') "$profileName dry run lists the Transom plan"
+        Assert-True ($text -match 'transom-windows-<x86_64\|aarch64>-setup\.exe') "$profileName dry run names the Transom installer"
         Assert-True ($text -match 'Hyper-V: enable') "$profileName dry run lists the Hyper-V step"
         Assert-True ($text -match 'Ventoy: latest stable ventoy/Ventoy release ventoy-<version>-windows\.zip') "$profileName dry run lists the Ventoy release plan"
         Assert-True ($text -match 'a copy this script did not') "$profileName dry run says an unrecorded Ventoy is replaced"
@@ -513,20 +521,21 @@ $script:BalunExisting = $null
 $script:BalunWingetExit = 0
 function global:winget { $script:BalunCalls += ($args -join '|'); $global:LASTEXITCODE = $script:BalunWingetExit }
 function Test-WingetPackageAvailable { param($Id) $script:BalunCalls += "show|$Id"; return $script:BalunWinget }
-function Get-BalunInstall { return $script:BalunExisting }
-function Get-BalunRelease { $script:BalunCalls += 'release'; [pscustomobject]@{ Version = '0.2.0'; Name = 'balun-windows-x86_64-setup.exe'; Url = 'u'; Sha256 = 'a' * 64 } }
-function Install-BalunFromRelease { param($Release) $script:BalunCalls += "release-install|$($Release.Version)" }
+$balunApp = $ReleaseApps | Where-Object Name -eq 'Balun'
+function Get-ReleaseAppInstall { param($App) $script:QueriedApp = $App.Name; return $script:BalunExisting }
+function Get-ReleaseAppRelease { param($App) $script:BalunCalls += "release|$($App.Name)"; [pscustomobject]@{ Version = '0.2.0'; Name = ($App.AssetFormat -f 'x86_64'); Url = 'u'; Sha256 = 'a' * 64 } }
+function Install-ReleaseAppFromRelease { param($App, $Release) $script:BalunCalls += "release-install|$($Release.Version)"; $script:InstalledApp = $App.Name }
 function Invoke-BalunCase {
-    param([bool]$Winget, $Existing, [string[]]$InstalledIds, [bool]$NoUpgrade)
+    param([bool]$Winget, $Existing, [string[]]$InstalledIds, [bool]$NoUpgrade, $App = $balunApp)
     $script:BalunCalls = @(); $script:BalunWinget = $Winget; $script:BalunExisting = $Existing
-    return (Invoke-BalunStep -InstalledIds $InstalledIds -NoUpgrade:$NoUpgrade 6>$null 3>$null)
+    return (Invoke-ReleaseAppStep -App $App -InstalledIds $InstalledIds -NoUpgrade:$NoUpgrade 6>$null 3>$null)
 }
 try {
     $old = [pscustomobject]@{ Version = '0.1.1'; Key = '{3B7A0CD1-33F6-5D60-9973-2B7A1B53E02A}_is1' }
     $status = Invoke-BalunCase $true $null @() $false
     Assert-True ($status -eq 'installed') "WinGet installs Balun when the ID resolves (got $status)"
     Assert-True (@($script:BalunCalls | Where-Object { $_ -like 'install|--id|jm2.Balun|*' }).Count -eq 1) 'WinGet install of jm2.Balun'
-    Assert-True ($script:BalunCalls -notcontains 'release') 'no release fallback when WinGet resolves'
+    Assert-True ($script:BalunCalls -notcontains 'release|Balun') 'no release fallback when WinGet resolves'
 
     $status = Invoke-BalunCase $true $old @() $false
     Assert-True ($status -eq 'updated') "WinGet adopts a release-installed Balun (got $status)"
@@ -543,7 +552,7 @@ try {
     Assert-True ($status -eq 'installed' -and $script:BalunCalls -contains 'release-install|0.2.0') 'release fallback installs when WinGet lacks the ID'
 
     $status = Invoke-BalunCase $false $old @() $true
-    Assert-True ($status -eq 'current' -and $script:BalunCalls -notcontains 'release') '-NoUpgrade skips the release lookup for an installed Balun'
+    Assert-True ($status -eq 'current' -and $script:BalunCalls -notcontains 'release|Balun') '-NoUpgrade skips the release lookup for an installed Balun'
 
     $status = Invoke-BalunCase $false ([pscustomobject]@{ Version = '0.2.0'; Key = 'k' }) @() $false
     Assert-True ($status -eq 'current' -and $script:BalunCalls -notcontains 'release-install|0.2.0') 'matching release version is current'
@@ -555,15 +564,22 @@ try {
     $status = Invoke-BalunCase $true $null @() $false
     Assert-True ($status -eq 'failed') 'WinGet failure is reported'
     $script:BalunWingetExit = 0
+
+    $transomApp = $ReleaseApps | Where-Object Name -eq 'Transom'
+    $status = Invoke-BalunCase $true $null @() $false $transomApp
+    Assert-True ($status -eq 'installed' -and @($script:BalunCalls | Where-Object { $_ -like 'install|--id|jm2.Transom|*' }).Count -eq 1) 'WinGet installs jm2.Transom when the ID resolves'
+    $status = Invoke-BalunCase $false $null @() $false $transomApp
+    Assert-True ($status -eq 'installed' -and $script:BalunCalls -contains 'release|Transom' -and $script:BalunCalls -contains 'release-install|0.2.0') 'Transom falls back to its own release'
+    Assert-True ($script:QueriedApp -eq 'Transom' -and $script:InstalledApp -eq 'Transom') 'Transom install state and installer are its own'
 }
 finally {
     Remove-Item -Path function:global:winget -ErrorAction SilentlyContinue
 }
 
 # Release resolution cross-checks SHA256SUMS.txt against the GitHub digest.
-${function:Get-BalunRelease} = $ast.Find({
+${function:Get-ReleaseAppRelease} = $ast.Find({
     param($node)
-    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-BalunRelease'
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-ReleaseAppRelease'
 }, $true).Body.GetScriptBlock()
 $sum = 'c' * 64
 $script:ReleaseDigest = "sha256:$sum"
@@ -586,19 +602,19 @@ Set-Item -Path function:Invoke-WebRequest -Value {
 $savedArch = $env:PROCESSOR_ARCHITECTURE; $savedWow = $env:PROCESSOR_ARCHITEW6432
 try {
     $env:PROCESSOR_ARCHITECTURE = 'AMD64'; $env:PROCESSOR_ARCHITEW6432 = $null
-    $release = Get-BalunRelease
+    $release = Get-ReleaseAppRelease -App $balunApp
     Assert-True ($release.Name -eq 'balun-windows-x86_64-setup.exe' -and $release.Sha256 -eq $sum -and $release.Version -eq '0.2.0') 'release asset and checksum resolved for x86_64'
     $env:PROCESSOR_ARCHITEW6432 = 'ARM64'
     $threw = $false
-    try { Get-BalunRelease | Out-Null } catch { $threw = $_.Exception.Message -match 'lacks exactly one' }
+    try { Get-ReleaseAppRelease -App $balunApp | Out-Null } catch { $threw = $_.Exception.Message -match 'lacks exactly one' }
     Assert-True $threw 'aarch64 host selects the aarch64 asset (absent in this fixture)'
     $env:PROCESSOR_ARCHITEW6432 = $null
     $script:ReleaseDigest = "sha256:$('e' * 64)"
     $threw = $false
-    try { Get-BalunRelease | Out-Null } catch { $threw = $_.Exception.Message -match 'disagrees' }
+    try { Get-ReleaseAppRelease -App $balunApp | Out-Null } catch { $threw = $_.Exception.Message -match 'disagrees' }
     Assert-True $threw 'digest/SHA256SUMS disagreement is rejected'
     $script:ReleaseDigest = ''
-    Assert-True ((Get-BalunRelease).Sha256 -eq $sum) 'missing GitHub digest falls back to SHA256SUMS.txt alone'
+    Assert-True ((Get-ReleaseAppRelease -App $balunApp).Sha256 -eq $sum) 'missing GitHub digest falls back to SHA256SUMS.txt alone'
 }
 finally {
     $env:PROCESSOR_ARCHITECTURE = $savedArch; $env:PROCESSOR_ARCHITEW6432 = $savedWow

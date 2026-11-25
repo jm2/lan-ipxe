@@ -285,6 +285,17 @@
       "strict_source": false
     },
     {
+      "name": "Transom",
+      "app": "Transom.app",
+      "id": "io.github.jm2.Transom",
+      "profile": "core",
+      "repo": "jm2/transom",
+      "tag": "v0.1.0",
+      "asset": "transom-macos-aarch64.dmg",
+      "sha256": "426d06b7f20c464a9464ef386c83cc3c093158929f3daee9a6814ddcaf5d554f",
+      "strict_source": false
+    },
+    {
       "name": "Tributary",
       "app": "Tributary.app",
       "id": "io.github.jm2.tributary",

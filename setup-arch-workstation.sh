@@ -51,7 +51,7 @@
 #      working off the LAN (pacman fails a sync when any repository is down)
 #   2. pacman -Syu, replaces jre-openjdk and distro rust with jdk-openjdk and
 #      rustup, then installs the official-repo package set, the packages
-#      game-packages publishes (balun, tributary, crossdock, carryout; full adds
+#      game-packages publishes (balun, tributary, transom, crossdock, carryout; full adds
 #      the Pangea games including jm2's Cro-Mag Rally fork, and steamcmd) from
 #      that repository while crossdock answers (their AUR builds otherwise),
 #      and the per-user rustup stable toolchain (rustfmt, clippy, rust-analyzer)
@@ -118,7 +118,7 @@ GAME_PACKAGES_TOGGLE=/usr/local/libexec/game-packages-repo
 # runtimes: the games depend on what they need), keeping
 # GAMES_RESERVE_PERCENT of the filesystem holding GAMES_TARGET free.
 SELECT_GAMES_AWK=${SCRIPT_DIR}/lib/select-games.awk
-GAMES_EXCLUDE='(balun|carryout|crossdock|switchworks|tributary)(-bin)?|netatalk-appletalk|owntone-server|geysermc-bin|knockoutcity-server|agelanserver(-companion)?-bin|gamelaunch|gbe-fork-bin|xlln-bin|wine-ipv6only|umu-launcher|steamcmd|gconf|gtk2|openssl-1[.]0|xf86miscproto|lib[a-z0-9_.+-]*'
+GAMES_EXCLUDE='(balun|carryout|crossdock|switchworks|transom|tributary)(-bin)?|netatalk-appletalk|owntone-server|geysermc-bin|knockoutcity-server|agelanserver(-companion)?-bin|gamelaunch|gbe-fork-bin|xlln-bin|wine-ipv6only|umu-launcher|steamcmd|gconf|gtk2|openssl-1[.]0|xf86miscproto|lib[a-z0-9_.+-]*'
 GAMES_TARGET=/opt
 GAMES_RESERVE_PERCENT=20
 # Consecutive games share one transaction up to this many bytes.
@@ -410,11 +410,13 @@ PKGS_AUR_FULL=(
 # whenever crossdock answers, which also replaces an AUR build installed
 # earlier: a same-named one is upgraded from the repository by the next sync,
 # a differently named one is removed for its repository successor. Off the
-# LAN, the AUR fallback installs in the AUR phase instead.
+# LAN, or while the repository does not publish a package yet, the AUR
+# fallback installs in the AUR phase instead.
 GAME_REPO_PKGS_CORE=(
   "balun-bin|balun-bin"
   "carryout-bin|carryout-bin"
   "crossdock-bin|crossdock-bin"
+  "transom-bin|transom-bin"
   "tributary-bin|tributary-bin"
 )
 GAME_REPO_PKGS_FULL=(
@@ -622,10 +624,12 @@ game_packages_repo_synced() {
 
 # install_game_repo_pkgs: installs GAME_REPO_PKGS from game-packages when it is
 # reachable (replacing differently named AUR builds) and otherwise leaves each
-# missing one's AUR fallback in GAME_REPO_AUR_FALLBACK for the AUR phase.
+# missing one's AUR fallback in GAME_REPO_AUR_FALLBACK for the AUR phase. A
+# package the reachable repository does not publish (yet) falls back the same
+# way, so adding one here never waits on crossdock.
 GAME_REPO_AUR_FALLBACK=()
 install_game_repo_pkgs() {
-  local entry repo aur want=() replace=()
+  local entry repo aur want=() replace=() unpublished=()
   GAME_REPO_AUR_FALLBACK=()
   if ! game_packages_repo_synced; then
     for entry in "${GAME_REPO_PKGS[@]}"; do
@@ -637,6 +641,11 @@ install_game_repo_pkgs() {
   fi
   for entry in "${GAME_REPO_PKGS[@]}"; do
     repo=${entry%%|*} aur=${entry#*|}
+    if ! pacman -Si "game-packages/${repo}" &>/dev/null; then
+      unpublished+=("${repo}")
+      pacman -Q "${repo}" &>/dev/null || GAME_REPO_AUR_FALLBACK+=("${aur}")
+      continue
+    fi
     pacman -Q "${repo}" &>/dev/null && (( NO_UPGRADE )) && continue
     if [[ ${aur} != "${repo}" ]] && pacman -Q "${aur}" &>/dev/null; then
       (( NO_UPGRADE )) && continue
@@ -658,7 +667,9 @@ install_game_repo_pkgs() {
       pacman -Q "${repo}" &>/dev/null || die "${repo} is not installed after installing it from game-packages"
     done
   fi
-  note "game-packages: ${#GAME_REPO_PKGS[@]} package(s) from the LAN repository"
+  (( ${#unpublished[@]} )) \
+    && note "game-packages does not publish ${unpublished[*]}: ${GAME_REPO_AUR_FALLBACK[*]:-nothing} from the AUR instead this run"
+  note "game-packages: $(( ${#GAME_REPO_PKGS[@]} - ${#unpublished[@]} )) package(s) from the LAN repository"
 }
 
 # ensure_multilib <required>: enables [multilib] (needed before any lib32-* or

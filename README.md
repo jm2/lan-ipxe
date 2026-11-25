@@ -226,15 +226,16 @@ them `-Profile`, `-Check`, `-DryRun`, `-NoUpgrade`):
   Wazuh agent against that manager. Without it the agent is installed but left
   disabled: no manager exists yet, and an agent newer than its manager cannot connect.
 
-Every platform installs Balun alongside Tributary in core (`balun` from the
-`jmsqrd/balun` COPR on Fedora, `balun-bin` on Arch, release apps on macOS
-and Windows). Fedora, Arch and Windows also install jm2's crossdock and carryout in
+Every platform installs Balun and Transom alongside Tributary in core (`balun` and
+`transom` from the `jmsqrd/balun` and `jmsqrd/transom` COPRs on Fedora, `balun-bin` and
+`transom-bin` on Arch, release apps on macOS and Windows). Fedora, Arch and Windows also install jm2's crossdock and carryout in
 core (the `jmsqrd/crossdock` and `jmsqrd/carryout` COPRs on Fedora, `crossdock-bin` and
 `carryout-bin` on Arch, the `crossdock` and `carryout` GooGet packages on Windows).
 
 Anything the LAN's game-packages repository (crossdock on enthoo, built from
 jm2/game-packages) publishes comes from it in place of the AUR, Flathub or nothing: on
-Arch `balun-bin`, `tributary-bin`, `crossdock-bin`, `carryout-bin` and, in full,
+Arch `balun-bin`, `transom-bin`, `tributary-bin`, `crossdock-bin`, `carryout-bin` (each
+from the AUR while the repository does not publish it yet) and, in full,
 `bugdom`, `bugdom2`, `cro-mag-rally-net-bin`, `mightymike`, `nanosaur`, `nanosaur2`,
 `ottomatic` and `steamcmd`; on Fedora's full profile the same Pangea games as RPMs
 (x86_64 and aarch64) instead of the `io.jor.*` Flatpaks; on Windows `crossdock` and
@@ -295,7 +296,7 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   `aide` + `wazuh-agent` from the AUR — their privileged setup (AIDE database init,
   Wazuh enablement) runs right after the interactive AUR phase.
 - `setup-fedora-workstation.sh` — run as your normal user; Fedora 41+ (dnf5). Adds the
-  signed third-party repos (`files/etc/yum.repos.d/`, the Tributary/Balun/Switchworks coprs, RPM Fusion,
+  signed third-party repos (`files/etc/yum.repos.d/`, the Tributary/Balun/Transom/Switchworks coprs, RPM Fusion,
   Microsoft VS Code, Chrome, Charm (for Crush), sing-box; the PowerShell repo on x86_64, plus the Steam/Plex
   repos in the full profile), installs the dnf and flatpak sets,
   applies available DNF/Flatpak updates, and installs Zed plus native AI tools. Rust
@@ -428,9 +429,9 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   end (exit code 1) without stopping the run. `-HyperV`
   additionally enables the supported Windows optional feature on Pro, Enterprise, or
   Education; Windows 11 Home is rejected. Rust comes only from `Rustlang.Rustup`
-  (legacy Rust MSI packages are removed). Balun has no WinGet package yet, so it
-  installs from its SHA-256-verified GitHub release (silent Inno Setup) and switches to
-  `jm2.Balun` automatically once that ID resolves. GooGet is built from the head of
+  (legacy Rust MSI packages are removed). Balun and Transom have no WinGet packages yet,
+  so each installs from its SHA-256-verified GitHub release (silent Inno Setup) and switches
+  to `jm2.Balun` / `jm2.Transom` automatically once that ID resolves. GooGet is built from the head of
   `google/googet` with the core Go toolchain (`go install module@commit`, with the build
   pinned to Go's default module proxy and checksum database so local `GOSUMDB`/`GOPRIVATE`
   overrides can't skip source verification; the newest prebuilt `googet.exe` is
