@@ -57,7 +57,7 @@ Rosetta is installed through Apple's interactive license flow only when a select
 - Chromium and MakeMKV casks are currently disabled. Chrome/Firefox are enabled; existing MakeMKV copies remain outside management. GDB needs Darwin signing/privileges, so Apple LLDB supplies native debugging.
 - Maelstrom uses the native Mac Source Ports release; its disabled cask is not used.
 - Battle.net's fresh installer is interactive and is reported with the official download page. Existing Battle.net clients are retained. Launcher content stays manual.
-- UT2004's current patch channel is a preview; existing copies are retained and its data layout is reported. No full-game installer is invoked.
+- Unreal Tournament (UT99) and UT2004 follow OldUnreal's newest release, release candidates and previews included: each run installs the engine when it is missing and replaces any older copy, ours or not, with the newest release's macOS disk image, verified against the SHA-256 digest GitHub publishes (a release without one is deferred). Game data in `~/Library/Application Support` is untouched and still reported; no full-game installer is invoked. `--no-upgrade` keeps the installed engine (or installs the reviewed pin).
 - OpenArena, Tremulous, Maniadrive, Airshipper and Unigine Heaven have no reviewed maintained native ARM64 artifact in this manifest. They remain documented exceptions, rather than unverified source builds or Intel/Linux substitutes.
 - Browser extensions/sync, sign-ins, permissions dialogs and app first-launch prompts remain personal actions. Automatic OS updates and existing security settings are preserved.
 

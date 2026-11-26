@@ -488,9 +488,24 @@
       "id": "com.oldunreal.unrealtournament",
       "profile": "full",
       "repo": "OldUnreal/UnrealTournamentPatches",
-      "tag": "v469e",
-      "asset": "OldUnreal-UTPatch469e-macOS.dmg",
-      "sha256": "b6b3a1f462e4b702df0eecf90d663ef1f847cc36aadca1ec6dd35278d091fa0d"
+      "tag": "v469f-rc7",
+      "asset": "OldUnreal-UTPatch469f-macOS.dmg",
+      "sha256": "4c436702bddc82f973c1a7f8b37d52ba4eb773eee594441ce6aa2e94e4bc5d7c",
+      "channel": "prerelease",
+      "asset_pattern": "^OldUnreal-UTPatch[0-9]+[a-z]?-macOS\\.dmg$"
+    },
+    {
+      "name": "UT2004",
+      "game": true,
+      "app": "UT2004.app",
+      "id": "com.oldunreal.UT2004",
+      "profile": "full",
+      "repo": "OldUnreal/UT2004Patches",
+      "tag": "3374-rc3",
+      "asset": "OldUnreal-UT2004Patch3374-macOS.dmg",
+      "sha256": "8c9bd030127c2fd37c2565aad59cb5f4dbb696909e01c1cb975aecf7e38b8e7c",
+      "channel": "prerelease",
+      "asset_pattern": "^OldUnreal-UT2004Patch[0-9]+-macOS\\.dmg$"
     },
     {
       "name": "ET Legacy",
@@ -574,10 +589,6 @@
     {
       "name": "MakeMKV",
       "reason": "Homebrew cask disabled; preserve existing copy, manual vendor install if desired."
-    },
-    {
-      "name": "UT2004",
-      "reason": "Current OldUnreal channel is preview; preserve existing app and report manual data paths."
     },
     {
       "name": "GDB",

@@ -163,7 +163,7 @@
     "source": "https://github.com/OldUnreal/UnrealTournamentPatches#macos-installation"
   },
   {
-    "name": "UT2004 (existing/manual engine)",
+    "name": "UT2004",
     "ids": [
       "com.oldunreal.UT2004"
     ],
@@ -178,7 +178,7 @@
       "StaticMeshes",
       "Textures"
     ],
-    "note": "Populate Animations/, Help/, KarmaData/, Maps/, Music/, Prefabs/, Sounds/, Speech/, StaticMeshes/, Textures/, Web/. Do not copy the original System/ folder. Current engine channel is preview, so fresh engine installation is manual.",
+    "note": "Populate Animations/, Help/, KarmaData/, Maps/, Music/, Prefabs/, Sounds/, Speech/, StaticMeshes/, Textures/, Web/ (or use OldUnreal's macOS assets installer). Do not copy the original System/ folder. The engine follows the newest OldUnreal release candidate/preview.",
     "source": "https://github.com/OldUnreal/UT2004Patches#macos-installation"
   },
   {

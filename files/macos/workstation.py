@@ -696,9 +696,33 @@ class Workstation:
             raise RuntimeError('Artifact SHA-256 mismatch')
         return digest
 
+    def prerelease_channel(self, app):
+        # The newest release, release candidates and previews included: GitHub
+        # lists a repository's releases newest first.
+        releases = json.loads(self.fetch('https://api.github.com/repos/' + app['repo'] + '/releases?per_page=20'))
+        if not isinstance(releases, list):
+            raise RuntimeError('Malformed release list for ' + app['repo'])
+        data = next((item for item in releases if isinstance(item, dict) and not item.get('draft')), None)
+        if data is None:
+            raise Deferred('No published release for ' + app['repo'])
+        assets = [a for a in data.get('assets', []) if re.fullmatch(app['asset_pattern'], a.get('name', ''))]
+        if len(assets) != 1:
+            raise Deferred('Ambiguous or missing macOS asset in ' + app['repo'] + ' ' + str(data.get('tag_name')))
+        digest = assets[0].get('digest', '') or ''
+        if not re.fullmatch('sha256:[0-9a-f]{64}', digest):
+            if data.get('tag_name') == app['tag'] and assets[0]['name'] == app['asset']:
+                return app['tag'], app['asset'], app['sha256']
+            raise Deferred('Newest release has no verifiable digest: ' + app['repo'] + ' ' + str(data.get('tag_name')))
+        return data['tag_name'], assets[0]['name'], digest[7:]
+
     def release(self, app):
-        # Reviewed pins for games; GUI application releases can resolve newer stable tags.
-        if app['profile'] == 'full' or self.args.no_upgrade:
+        # Reviewed pins for games; GUI application releases can resolve newer stable
+        # tags, and channel "prerelease" apps always follow the newest RC/preview.
+        if self.args.no_upgrade:
+            return app['tag'], app['asset'], app['sha256']
+        if app.get('channel') == 'prerelease':
+            return self.prerelease_channel(app)
+        if app['profile'] == 'full':
             return app['tag'], app['asset'], app['sha256']
         data = json.loads(self.fetch('https://api.github.com/repos/' + app['repo'] + '/releases/latest'))
         if data.get('prerelease') or data.get('draft'):
@@ -716,6 +740,8 @@ class Workstation:
 
     def direct_app(self, app, current):
         receipt = self.receipts.get('apps', {}).get(app['id'], {})
+        if app.get('channel') == 'prerelease' and app.get('repo'):
+            return self.channel_app(app, current, receipt)
         if current and not app.get('strict_source'):
             self.emit('CURRENT', app['name'], 'existing native app retained'); return
         if current and receipt.get('repo') == app.get('repo') and receipt.get('sha256') == app.get('sha256'):
@@ -766,6 +792,62 @@ class Workstation:
                     'path': str(destination), 'executable_sha256': executable_digest}
                 self.apps = self.scan_apps()
                 self.emit('CHANGED', app['name'], 'verified release ' + tag)
+
+    def channel_app(self, app, current, receipt):
+        # Engines that ship only as release candidates/previews (OldUnreal's UT
+        # patches): install when missing and replace any copy, ours or not,
+        # whose release is not the newest. Game data lives outside the bundle.
+        if current and self.args.no_upgrade:
+            self.emit('CURRENT', app['name'], 'kept at its current release (--no-upgrade)'); return
+        if self.preview:
+            self.emit('CURRENT' if current else 'DRIFT', app['name'],
+                      'newest ' + app['repo'] + ' release candidate/preview checked during apply'); return
+        tag, asset, checksum = self.release(app)
+        if current and receipt.get('tag') == tag and receipt.get('sha256') == checksum \
+                and receipt.get('path') == str(current['path']):
+            executable = current['path'] / 'Contents/MacOS' / current['info']['CFBundleExecutable']
+            if executable.is_file() and hashlib.sha256(executable.read_bytes()).hexdigest() == receipt.get('executable_sha256'):
+                self.emit('CURRENT', app['name'], app['repo'] + ' ' + tag); return
+        url = 'https://github.com/' + app['repo'] + '/releases/download/' + urllib.parse.quote(tag, safe='') + '/' + asset
+        with tempfile.TemporaryDirectory(prefix='macos-workstation-') as temporary:
+            image = Path(temporary) / 'release.dmg'
+            digest = self.download_verified(url, checksum, image)
+            with self.mounted(image) as mount:
+                ids = app_ids(app)
+                candidates = [p for p in mount.glob('*.app') if read_plist(p / 'Contents/Info.plist').get('CFBundleIdentifier', '').lower() in ids]
+                if len(candidates) != 1:
+                    raise RuntimeError('Expected one matching app in ' + app['name'] + ' release')
+                source = candidates[0]
+                info = self.validate_app(source, app)
+                executable_digest = hashlib.sha256((source / 'Contents/MacOS' / info['CFBundleExecutable']).read_bytes()).hexdigest()
+                destination = current['path'] if current else self.applications / app['app']
+                if not current and destination.exists():
+                    raise Deferred('Application destination collision: ' + str(destination))
+                parent = destination.parent
+                staged = parent / ('.lan-ipxe-' + uuid.uuid4().hex + '.app')
+                backup = parent / ('.lan-ipxe-' + uuid.uuid4().hex + '.previous.app')
+                privileged = not os.access(parent, os.W_OK)
+                prefix = ['/usr/bin/sudo'] if privileged else []
+                try:
+                    self.command(prefix + ['/usr/bin/ditto', source, staged], mutate=True, capture=not privileged)
+                    self.validate_app(staged, app)
+                    if current:
+                        self.command(prefix + ['/bin/mv', destination, backup], mutate=True, capture=not privileged)
+                    self.command(prefix + ['/bin/mv', '-n', staged, destination], mutate=True, capture=not privileged)
+                    if staged.exists():
+                        raise RuntimeError('Application destination appeared during install')
+                except BaseException:
+                    if backup.exists() and not destination.exists():
+                        self.command(prefix + ['/bin/mv', backup, destination], mutate=True, capture=not privileged)
+                    raise
+                finally:
+                    for leftover in (staged, backup):
+                        if leftover.exists():
+                            self.command(prefix + ['/bin/rm', '-rf', leftover], mutate=True, capture=not privileged)
+        self.receipts.setdefault('apps', {})[app['id']] = {'repo': app['repo'], 'tag': tag, 'sha256': digest,
+            'path': str(destination), 'executable_sha256': executable_digest}
+        self.apps = self.scan_apps()
+        self.emit('CHANGED', app['name'], ('updated to ' if current else 'installed ') + app['repo'] + ' ' + tag)
 
     def application(self, app):
         current = self.app_for(app)

@@ -1156,6 +1156,98 @@ Available packages:
         dock_call = next(c for c in mock_pref.call_args_list if c.args[:2] == ('com.apple.dock', 'persistent-apps'))
         self.assertEqual(dock_call.args[2][0]['tile-data']['bundle-identifier'], 'io.github.jm2.tributary')
 
+    def ut_release_list(self, *releases):
+        return json.dumps([{'tag_name': tag, 'draft': draft, 'prerelease': pre,
+                            'assets': [{'name': name, 'digest': digest} for name, digest in assets]}
+                           for tag, draft, pre, assets in releases])
+
+    def test_prerelease_channel_follows_newest_rc_or_preview(self):
+        app = next(a for a in self.obj.manifest['apps'] if a['name'] == 'UT2004')
+        self.assertEqual(app['channel'], 'prerelease')
+        self.assertNotIn('UT2004', [e['name'] for e in self.obj.manifest['exceptions']])
+        ut = next(a for a in self.obj.manifest['apps'] if a['name'] == 'Unreal Tournament')
+        self.assertEqual(ut['channel'], 'prerelease')
+        digest = 'sha256:' + 'a' * 64
+        listing = self.ut_release_list(
+            ('3374-rc4', True, True, [('OldUnreal-UT2004Patch3374-macOS.dmg', digest)]),   # draft: never
+            ('3374-rc3', False, True, [('OldUnreal-UT2004Patch3374-Linux-x.tar.bz2', digest),
+                                       ('OldUnreal-UT2004Patch3374-macOS.dmg', digest)]),
+            ('3374-preview-23', False, True, [('OldUnreal-UT2004Patch3374-macOS.dmg', digest)]))
+        self.obj.args = w.arguments([])
+        with patch.object(self.obj, 'fetch', return_value=listing) as fetch:
+            self.assertEqual(self.obj.release(app), ('3374-rc3', 'OldUnreal-UT2004Patch3374-macOS.dmg', 'a' * 64))
+        self.assertIn('/repos/OldUnreal/UT2004Patches/releases?', fetch.call_args.args[0])
+        # A newest release without a GitHub digest is deferred, not trusted.
+        unverified = self.ut_release_list(('3374-rc9', False, True, [('OldUnreal-UT2004Patch3374-macOS.dmg', '')]))
+        with patch.object(self.obj, 'fetch', return_value=unverified), self.assertRaises(w.Deferred):
+            self.obj.release(app)
+        # UT99's pattern picks only the macOS disk image.
+        ut_listing = self.ut_release_list(('v470-rc1', False, True, [
+            ('OldUnreal-UTPatch470-Linux-amd64.tar.bz2', digest), ('OldUnreal-UTPatch470-macOS.dmg', digest)]))
+        with patch.object(self.obj, 'fetch', return_value=ut_listing):
+            self.assertEqual(self.obj.release(ut)[:2], ('v470-rc1', 'OldUnreal-UTPatch470-macOS.dmg'))
+        # --no-upgrade keeps the reviewed pin.
+        self.obj.args = w.arguments(['--no-upgrade'])
+        self.assertEqual(self.obj.release(app), (app['tag'], app['asset'], app['sha256']))
+
+    def test_prerelease_channel_installs_missing_and_replaces_older_engine(self):
+        app = next(a for a in self.obj.manifest['apps'] if a['name'] == 'UT2004')
+        mount = self.root / 'mount'
+        def bundle(path, payload):
+            (path / 'Contents/MacOS').mkdir(parents=True)
+            (path / 'Contents/MacOS/UT2004').write_text(payload)
+            with (path / 'Contents/Info.plist').open('wb') as stream:
+                plistlib.dump({'CFBundleIdentifier': 'com.oldunreal.UT2004', 'CFBundleExecutable': 'UT2004'}, stream)
+        bundle(mount / 'UT2004.app', 'rc3')
+        @contextlib.contextmanager
+        def fake_mounted(_):
+            yield mount
+        def command(argv, **kwargs):
+            name = Path(str(argv[0])).name
+            if name == 'ditto':
+                w.shutil.copytree(argv[1], argv[2])
+            elif name == 'mv':
+                w.shutil.move(str(argv[-2]), str(argv[-1]))
+            elif name == 'rm':
+                w.shutil.rmtree(argv[-1])
+            return subprocess.CompletedProcess(argv, 0, '', '')
+        self.obj.applications.mkdir(parents=True, exist_ok=True)
+        self.obj.args = w.arguments([])
+        release = ('3374-rc3', app['asset'], 'b' * 64)
+        def run(current):
+            with patch.object(self.obj, 'release', return_value=release), \
+                    patch.object(self.obj, 'download_verified', return_value='b' * 64), \
+                    patch.object(self.obj, 'mounted', side_effect=fake_mounted), \
+                    patch.object(self.obj, 'validate_app', return_value={'CFBundleExecutable': 'UT2004'}), \
+                    patch.object(self.obj, 'scan_apps', return_value=[]), \
+                    patch.object(self.obj, 'command', side_effect=command):
+                self.obj.direct_app(app, current)
+        # Engine missing while its data exists: installed now.
+        run(None)
+        installed = self.obj.applications / 'UT2004.app'
+        self.assertEqual((installed / 'Contents/MacOS/UT2004').read_text(), 'rc3')
+        self.assertEqual(self.obj.events[-1]['status'], 'CHANGED')
+        self.assertEqual(self.obj.receipts['apps']['com.oldunreal.UT2004']['tag'], '3374-rc3')
+        current = {'path': installed, 'info': {'CFBundleExecutable': 'UT2004'}}
+        # Converged: the receipt matches the newest release and the executable.
+        run(current)
+        self.assertEqual(self.obj.events[-1]['status'], 'CURRENT')
+        # An older copy this tool did not install (no receipt) is replaced in place.
+        del self.obj.receipts['apps']['com.oldunreal.UT2004']
+        w.shutil.rmtree(installed)
+        bundle(installed, 'preview-23')
+        run(current)
+        self.assertEqual((installed / 'Contents/MacOS/UT2004').read_text(), 'rc3')
+        self.assertEqual(sorted(p.name for p in self.obj.applications.iterdir()), ['UT2004.app'])
+        # --no-upgrade and preview never download.
+        self.obj.args = w.arguments(['--no-upgrade'])
+        with patch.object(self.obj, 'release', side_effect=AssertionError('no download')):
+            self.obj.direct_app(app, current)
+            self.obj.args = w.arguments([])
+            self.obj.preview = True
+            self.obj.direct_app(app, None)
+        self.assertEqual(self.obj.events[-1]['status'], 'DRIFT')
+
 
 class BootstrapTests(unittest.TestCase):
     def test_missing_brew_clt_preview_and_python_discovery(self):
