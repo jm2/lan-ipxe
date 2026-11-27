@@ -64,7 +64,8 @@
 #   6. GNOME desktop defaults as system dconf keyfiles (plus the
 #      /etc/dconf/profile/user that Arch lacks): Cantarell UI fonts,
 #      minimize/maximize/close, weekday clock, battery percentage, dark style,
-#      dock layout and favorites, the enabled extensions, Freon's per-platform
+#      the classic GNOME icon theme (AUR gnome-icon-theme), Files' detailed
+#      dates and mixed folder/file sorting, dock layout and favorites, the enabled extensions, Freon's per-platform
 #      CPU/GPU panel sensors; retires Dash to Panel and Vitals; merges the
 #      required extensions into an existing user list; then publishes
 #      ~/.config/monitors.xml to GDM and applies the GDM font setting
@@ -474,6 +475,7 @@ MANAGED_FILES=(
   "root|etc/dconf/profile/user|/etc/dconf/profile/user|0644"
   "root|etc/dconf/db/local.d/00-workstation|/etc/dconf/db/local.d/00-workstation|0644"
   "root|etc/dconf/db/local.d/10-shell-arch|/etc/dconf/db/local.d/10-shell|0644"
+  "root|usr/local/share/icons/gnome-adwaita/index.theme|/usr/local/share/icons/gnome-adwaita/index.theme|0644"
   "root|etc/audit/rules.d/50-workstation.rules|/etc/audit/rules.d/50-workstation.rules|0644"
   "root|etc/aide.conf|/etc/aide.conf|0644"
   "root|etc/firewalld/zones/workstation.xml|/etc/firewalld/zones/workstation.xml|0644"
@@ -3315,6 +3317,7 @@ put_file -s "${FILES}/etc/dconf/db/local.d/10-shell-arch" /etc/dconf/db/local.d/
 (( PUT_FILE_CHANGED )) && DCONF_CHANGED=1
 apply_freon_sensors
 (( PUT_FILE_CHANGED )) && DCONF_CHANGED=1
+put_file -s "${FILES}/usr/local/share/icons/gnome-adwaita/index.theme" /usr/local/share/icons/gnome-adwaita/index.theme
 
 log "GDM"
 # Give the login screen the user's monitor layout

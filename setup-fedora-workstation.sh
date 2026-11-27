@@ -101,7 +101,8 @@
 #      default and upgrades never happen implicitly
 #  15. GNOME desktop defaults as system dconf keyfiles (Cantarell UI fonts,
 #      minimize/maximize/close, weekday clock, battery percentage, dark style,
-#      GNOME wallpaper over Fedora's, dock layout and favorites, the enabled
+#      the classic GNOME icon theme, Files' detailed dates and mixed
+#      folder/file sorting, GNOME wallpaper over Fedora's, dock layout and favorites, the enabled
 #      extensions, Freon's per-platform CPU/GPU panel sensors), Desktop Icons
 #      NG from extensions.gnome.org, merges the required extensions into an
 #      existing user list (dropping Fedora's background-logo watermark), then
@@ -287,6 +288,7 @@ PKGS=(
   gmp-devel
   @gnome-desktop
   gnome-extensions-app
+  gnome-icon-theme
   gnome-shell-extension-appindicator
   gnome-shell-extension-apps-menu
   gnome-shell-extension-dash-to-dock
@@ -3160,6 +3162,7 @@ select_profile() {
     "etc/dconf/db/gdm.d/10-font-settings|/etc/dconf/db/gdm.d/10-font-settings"
     "etc/dconf/db/local.d/00-workstation|/etc/dconf/db/local.d/00-workstation"
     "etc/dconf/db/local.d/10-shell-fedora|/etc/dconf/db/local.d/10-shell"
+    "usr/local/share/icons/gnome-adwaita/index.theme|/usr/local/share/icons/gnome-adwaita/index.theme"
     "etc/audit/rules.d/50-workstation.rules|/etc/audit/rules.d/50-workstation.rules"
     "etc/aide.conf|/etc/aide.conf"
     "etc/firewalld/zones/workstation.xml|/etc/firewalld/zones/workstation.xml"
@@ -4147,6 +4150,7 @@ put_file -s "${FILES}/etc/dconf/db/local.d/10-shell-fedora" /etc/dconf/db/local.
 (( PUT_FILE_CHANGED )) && DCONF_CHANGED=1
 apply_freon_sensors
 (( PUT_FILE_CHANGED )) && DCONF_CHANGED=1
+put_file -s "${FILES}/usr/local/share/icons/gnome-adwaita/index.theme" /usr/local/share/icons/gnome-adwaita/index.theme
 install_ding_extension
 
 log "GDM"

@@ -1,0 +1,10 @@
+# The workstation icon theme: no icons of its own. gnome-icon-theme 3.12
+# ("gnome") supplies the classic full-color icons but inherits nothing and
+# lacks almost every modern symbolic icon (Wi-Fi, battery, sidebar...), which
+# GTK would then draw as image-missing; Adwaita fills those in.
+[Icon Theme]
+Name=GNOME (Adwaita fallback)
+Comment=The classic GNOME icons, with Adwaita for symbolic and newer icons
+Inherits=gnome,Adwaita,hicolor
+Directories=
+Example=folder

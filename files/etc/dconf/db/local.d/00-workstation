@@ -7,6 +7,10 @@
 font-name='Cantarell 11'
 document-font-name='Cantarell 12'
 monospace-font-name='Adwaita Mono 11'
+# The classic GNOME icons (gnome-icon-theme) through the gnome-adwaita
+# wrapper theme, which falls back to Adwaita for the symbolic icons
+# gnome-icon-theme lacks (see /usr/local/share/icons/gnome-adwaita).
+icon-theme='gnome-adwaita'
 clock-show-weekday=true
 show-battery-percentage=true
 color-scheme='prefer-dark'
@@ -28,6 +32,15 @@ natural-scroll=false
 # Never suspend on AC power (workstations serve LAN services).
 [org/gnome/settings-daemon/plugins/power]
 sleep-inactive-ac-type='nothing'
+
+# Files: detailed modification dates; folders sorted among files. Nautilus
+# reads the sort order from GTK's file-chooser settings, so Open/Save dialogs
+# follow it too.
+[org/gnome/nautilus/preferences]
+date-time-format='detailed'
+
+[org/gtk/gtk4/settings/file-chooser]
+sort-directories-first=false
 
 # Dock at the bottom (the extension default); hide when any window overlaps.
 [org/gnome/shell/extensions/dash-to-dock]
