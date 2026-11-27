@@ -104,8 +104,8 @@
 #      GNOME wallpaper over Fedora's, dock layout and favorites, the enabled
 #      extensions, Freon's per-platform CPU/GPU panel sensors), Desktop Icons
 #      NG from extensions.gnome.org, merges the required extensions into an
-#      existing user list, then publishes ~/.config/monitors.xml to GDM and
-#      applies the GDM font setting
+#      existing user list (dropping Fedora's background-logo watermark), then
+#      publishes ~/.config/monitors.xml to GDM and applies the GDM font setting
 
 set -euo pipefail
 
@@ -4165,7 +4165,9 @@ if (( DCONF_CHANGED )) || [[ ! -f /etc/dconf/db/gdm || ! -f /etc/dconf/db/local 
   note "dconf databases updated"
 fi
 # After dconf update, so the reset wallpaper falls through to the new default.
-reconcile_user_gnome "" \
+# Fedora's background-logo (its watermark over the wallpaper) is dropped from
+# a saved list too: it belongs with Fedora's wallpaper, which is replaced.
+reconcile_user_gnome background-logo@fedorahosted.org \
   apps-menu@gnome-shell-extensions.gcampax.github.com \
   places-menu@gnome-shell-extensions.gcampax.github.com \
   appindicatorsupport@rgcjonas.gmail.com dash-to-dock@micxgx.gmail.com \
