@@ -184,6 +184,24 @@ test_cpu_platform() (
   [[ $(detect_cpu_platform "${root}/arm") == unknown ]]
 )
 
+test_dock_aliases() (
+  load_helpers "$1"
+  local root=${TEST_ROOT}/dock-${1%.sh}
+  install -d "${root}/rpm/applications" "${root}/flatpak/applications"
+  : >"${root}/rpm/applications/bugdom.desktop"
+  : >"${root}/rpm/applications/chrome.desktop"
+  : >"${root}/flatpak/applications/io.jor.mightymike.desktop"
+  # shellcheck disable=SC2034  # read by the sourced desktop_id_present
+  APP_DATA_DIRS=("${root}/rpm" "${root}/flatpak")
+  # Flatpak -> package and package -> Flatpak, in place; unknown and
+  # not-installed entries are left for the dock to skip.
+  [[ $(swap_dock_aliases "['chrome.desktop', 'io.jor.bugdom.desktop', 'mightymike.desktop', 'gone.desktop']") \
+     == "['chrome.desktop', 'bugdom.desktop', 'io.jor.mightymike.desktop', 'gone.desktop']" ]]
+  # Both forms listed (the shipped default) collapse to the installed one.
+  [[ $(swap_dock_aliases "['bugdom.desktop', 'io.jor.bugdom.desktop']") == "['bugdom.desktop']" ]]
+  [[ $(swap_dock_aliases "['chrome.desktop']") == "['chrome.desktop']" ]]
+)
+
 test_strv_merge() (
   load_helpers "$1"
   [[ $(strv_merge "['a', 'old@x', 'b']" "old@x,gone@y" "['c']" a c d) == "['a', 'b', 'd']" ]]
@@ -203,6 +221,8 @@ for script in setup-arch-workstation.sh setup-fedora-workstation.sh; do
   printf 'PASS %s Freon panel sensors per CPU/GPU platform\n' "${script}"
   test_cpu_platform "${script}"
   printf 'PASS %s CPU platform detection\n' "${script}"
+  test_dock_aliases "${script}"
+  printf 'PASS %s dock launcher aliases\n' "${script}"
   test_strv_merge "${script}"
   printf 'PASS %s enabled-extensions merge\n' "${script}"
 done

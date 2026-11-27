@@ -919,6 +919,51 @@ user_dconf_read() {
   rm -f -- "${profile}"
 }
 
+# Games install as game-packages packages on the LAN and as Flathub Flatpaks
+# off it, under different desktop IDs, and the setup moves a machine between
+# the two. Each pair is "flatpak-id|package-id": a saved dock entry whose
+# launcher is gone is swapped for its installed counterpart in place.
+DOCK_ALIASES=(
+  "io.jor.bugdom.desktop|bugdom.desktop"
+  "io.jor.bugdom2.desktop|bugdom2.desktop"
+  "io.jor.mightymike.desktop|mightymike.desktop"
+)
+
+# desktop_id_present <id>: a launcher with this ID exists in a data dir GNOME
+# Shell reads.
+APP_DATA_DIRS=("${HOME}/.local/share" "${HOME}/.local/share/flatpak/exports/share"
+               /var/lib/flatpak/exports/share /usr/local/share /usr/share)
+desktop_id_present() {
+  local dir
+  for dir in "${APP_DATA_DIRS[@]}"; do
+    [[ -f ${dir}/applications/$1 ]] && return 0
+  done
+  return 1
+}
+
+# swap_dock_aliases <strv>: prints the favorites list with each missing
+# aliased launcher replaced by its installed counterpart.
+swap_dock_aliases() {
+  local item pair a b out=() swapped
+  while IFS= read -r item; do
+    swapped=${item}
+    if ! desktop_id_present "${item}"; then
+      for pair in "${DOCK_ALIASES[@]}"; do
+        a=${pair%%|*} b=${pair#*|}
+        if [[ ${item} == "${a}" ]] && desktop_id_present "${b}"; then swapped=${b}; break; fi
+        if [[ ${item} == "${b}" ]] && desktop_id_present "${a}"; then swapped=${a}; break; fi
+      done
+    fi
+    printf '%s\n' "${out[@]}" | grep -Fxq -- "${swapped}" || out+=("${swapped}")
+  done < <(strv_items "$1")
+  if (( ${#out[@]} == 0 )); then
+    printf '@as []\n'
+  else
+    printf "'%s', " "${out[@]}" | sed -e 's/, $//' -e 's/^/[/' -e 's/$/]/'
+    printf '\n'
+  fi
+}
+
 session_bus_reachable() {
   [[ -n ${DBUS_SESSION_BUS_ADDRESS:-} || -S ${XDG_RUNTIME_DIR:-/run/user/${UID}}/bus ]]
 }
@@ -944,6 +989,17 @@ reconcile_user_gnome() {
       dconf write /org/gnome/shell/enabled-extensions "${merged}" \
         || die "could not update the user's enabled-extensions"
       note "enabled-extensions: merged ${merged}"
+    fi
+  fi
+  current=$(user_dconf_read /org/gnome/shell/favorite-apps)
+  if [[ -n ${current} ]]; then
+    merged=$(swap_dock_aliases "${current}")
+    if [[ ${merged} != "${current}" ]]; then
+      dconf write /org/gnome/shell/favorite-apps "${merged}" \
+        || die "could not update the user's dock favorites"
+      note "favorite-apps: game launchers swapped to the installed packaging"
+    else
+      note "favorite-apps: up to date"
     fi
   fi
   for key in org.gnome.desktop.background:picture-uri org.gnome.desktop.background:picture-uri-dark; do
