@@ -117,6 +117,81 @@ test_fedora_flatpak_inventory_failure() {
   [[ ${rc} == 1 ]]
 }
 
+test_freon_sensors() (
+  load_helpers "$1"
+  local dir=${TEST_ROOT}/freon-${1%.sh} out
+  install -d "${dir}"
+  freon() { render_freon_sensors "$1" "${dir}/$2.json" "${@:3}"; }
+  hot() { freon "$@" | sed -n 's/^hot-sensors=//p'; }
+
+  printf '%s' '{"coretemp-isa-0000":{"Core 0":{"temp2_input":39},"Package id 0":{"temp1_input":40}},
+    "acpitz-acpi-0":{"temp1":{"temp1_input":30}},"nvme-pci-0100":{"Composite":{"temp1_input":33}}}' \
+    >"${dir}/intel.json"
+  [[ $(hot intel intel) == "['Package id 0']" ]]
+  # NVIDIA's proprietary driver: the nvidia-smi name, and Freon must read it.
+  out=$(freon intel intel "NVIDIA GeForce RTX 4070")
+  grep -Fxq "hot-sensors=['Package id 0', 'NVIDIA GeForce RTX 4070']" <<<"${out}"
+  grep -Fxq 'use-gpu-nvidia=true' <<<"${out}"
+  [[ $(hot intel intel "O'Neil \\ GPU") == "['Package id 0', 'O\\'Neil \\\\ GPU']" ]]
+
+  # AMD: Tctl, and the dGPU's edge even when the APU's amdgpu chip lists
+  # first (Freon then names the second "edge" "edge-1").
+  printf '%s' '{"amdgpu-pci-0500":{"edge":{"temp1_input":42}},
+    "k10temp-pci-00c3":{"Tctl":{"temp1_input":45},"Tccd1":{"temp3_input":40}},
+    "amdgpu-pci-0300":{"vddgfx":{"in0_input":0.8},"edge":{"temp1_input":50},"junction":{"temp2_input":55}}}' \
+    >"${dir}/amd-dgpu.json"
+  [[ $(hot amd amd-dgpu) == "['Tctl', 'edge-1']" ]]
+  # An AMD APU alone: its iGPU has a dedicated sensor.
+  printf '%s' '{"k10temp-pci-00c3":{"Tctl":{"temp1_input":45}},"amdgpu-pci-0500":{"edge":{"temp1_input":42}}}' \
+    >"${dir}/amd-apu.json"
+  [[ $(hot amd amd-apu) == "['Tctl', 'edge']" ]]
+  # Intel Arc on xe.
+  printf '%s' '{"coretemp-isa-0000":{"Package id 0":{"temp1_input":40}},"xe-pci-0300":{"pkg":{"temp2_input":48},"vram":{"temp3_input":50}}}' \
+    >"${dir}/intel-arc.json"
+  [[ $(hot intel intel-arc) == "['Package id 0', 'pkg']" ]]
+
+  # Arm thermal zones: unlabeled temp1s, numbered in listing order.
+  printf '%s' '{"gpuss0_thermal-virtual-0":{"temp1":{"temp1_input":30}},
+    "cpu0_top_thermal-virtual-0":{"temp1":{"temp1_input":40}}}' >"${dir}/qcom.json"
+  [[ $(hot qualcomm qcom) == "['temp1-1']" ]]
+  [[ $(hot nvidia qcom) == "['temp1-1']" ]]
+  printf '%s' '{"macsmc_hwmon-isa-0000":{"NAND Flash":{"temp1_input":35},"CPU P-core 1":{"temp2_input":44}}}' \
+    >"${dir}/apple.json"
+  [[ $(hot apple apple) == "['CPU P-core 1']" ]]
+
+  # Nothing recognized: no keyfile, so Freon keeps average/maximum.
+  [[ -z $(freon unknown qcom) ]]
+  [[ -z $(freon intel apple) ]]
+)
+
+test_cpu_platform() (
+  load_helpers "$1"
+  local root=${TEST_ROOT}/cpu-${1%.sh}
+  install -d "${root}"/{intel,amd,arm,qcom,apple,nv}/proc \
+    "${root}/qcom/sys/firmware/devicetree/base" "${root}/apple/sys/firmware/devicetree/base" \
+    "${root}/nv/sys/devices/soc0"
+  printf 'vendor_id\t: GenuineIntel\n' >"${root}/intel/proc/cpuinfo"
+  printf 'vendor_id\t: AuthenticAMD\n' >"${root}/amd/proc/cpuinfo"
+  printf 'CPU implementer\t: 0x41\n' | tee "${root}"/{arm,qcom,apple,nv}/proc/cpuinfo >/dev/null
+  printf 'qcom,x1e80100-crd\0qcom,x1e80100\0' >"${root}/qcom/sys/firmware/devicetree/base/compatible"
+  printf 'apple,j414c\0apple,t6000\0' >"${root}/apple/sys/firmware/devicetree/base/compatible"
+  printf 'jep106:036b:0241\n' >"${root}/nv/sys/devices/soc0/soc_id"
+  [[ $(detect_cpu_platform "${root}/intel") == intel ]]
+  [[ $(detect_cpu_platform "${root}/amd") == amd ]]
+  [[ $(detect_cpu_platform "${root}/qcom") == qualcomm ]]
+  [[ $(detect_cpu_platform "${root}/apple") == apple ]]
+  [[ $(detect_cpu_platform "${root}/nv") == nvidia ]]
+  [[ $(detect_cpu_platform "${root}/arm") == unknown ]]
+)
+
+test_strv_merge() (
+  load_helpers "$1"
+  [[ $(strv_merge "['a', 'old@x', 'b']" "old@x,gone@y" "['c']" a c d) == "['a', 'b', 'd']" ]]
+  [[ $(strv_merge "@as []" "" "@as []" x y) == "['x', 'y']" ]]
+  [[ $(strv_merge "['a']" "a" "@as []") == "@as []" ]]
+  [[ $(strv_merge "['a', 'b']" "" "@as []" b a) == "['a', 'b']" ]]
+)
+
 for script in setup-arch-workstation.sh setup-fedora-workstation.sh; do
   test_put_file "${script}"
   printf 'PASS %s put_file convergence and symlink repair\n' "${script}"
@@ -124,6 +199,12 @@ for script in setup-arch-workstation.sh setup-fedora-workstation.sh; do
   printf 'PASS %s user put_file failure propagation\n' "${script}"
   test_root_put_file_failure "${script}"
   printf 'PASS %s root put_file failure propagation\n' "${script}"
+  test_freon_sensors "${script}"
+  printf 'PASS %s Freon panel sensors per CPU/GPU platform\n' "${script}"
+  test_cpu_platform "${script}"
+  printf 'PASS %s CPU platform detection\n' "${script}"
+  test_strv_merge "${script}"
+  printf 'PASS %s enabled-extensions merge\n' "${script}"
 done
 test_pacman_statuses
 printf 'PASS pacman missing-package status handling\n'

@@ -174,6 +174,9 @@ test_check_exit_codes() (
   # The security checks render files under ${FILES}, which resolves to a
   # /dev/fd path inside load_helpers; they are covered by their own tests.
   check_security_state() { report CURRENT 'security state'; }
+  # The rendered Freon keyfile reads the host's sensors; covered by the
+  # workstation helper tests.
+  freon_sensors_current() { return 0; }
   RUSTUP_HOME=${TEST_ROOT}/rustup
   mkdir -p "${RUSTUP_HOME}/toolchains/${RUST_TOOLCHAIN}/lib/rustlib"
   printf 'default_toolchain = "stable-x86_64-unknown-linux-gnu"\n' >"${RUSTUP_HOME}/settings.toml"

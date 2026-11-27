@@ -1,0 +1,34 @@
+# Workstation GNOME defaults (system dconf database "local"). These are
+# defaults: any value a user has saved still wins. Installed by
+# setup-fedora-workstation.sh and setup-arch-workstation.sh.
+
+# Cantarell for every UI font; Adwaita Mono stays the monospace font.
+[org/gnome/desktop/interface]
+font-name='Cantarell 11'
+document-font-name='Cantarell 12'
+monospace-font-name='Adwaita Mono 11'
+clock-show-weekday=true
+show-battery-percentage=true
+color-scheme='prefer-dark'
+
+[org/gnome/desktop/wm/preferences]
+titlebar-font='Cantarell Bold 11'
+button-layout='appmenu:minimize,maximize,close'
+
+# GNOME's own wallpaper (the upstream schema default) in place of a distro
+# default such as Fedora's. A wallpaper a user picked is a saved value and
+# stays untouched. The lock screen blurs this same image.
+[org/gnome/desktop/background]
+picture-uri='file:///usr/share/backgrounds/gnome/adwaita-l.jxl'
+picture-uri-dark='file:///usr/share/backgrounds/gnome/adwaita-d.jxl'
+
+[org/gnome/desktop/peripherals/touchpad]
+natural-scroll=false
+
+# Never suspend on AC power (workstations serve LAN services).
+[org/gnome/settings-daemon/plugins/power]
+sleep-inactive-ac-type='nothing'
+
+# Dock at the bottom (the extension default); hide when any window overlaps.
+[org/gnome/shell/extensions/dash-to-dock]
+intellihide-mode='ALL_WINDOWS'

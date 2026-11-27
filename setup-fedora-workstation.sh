@@ -99,7 +99,13 @@
 #      --wazuh-manager/WAZUH_MANAGER is supplied; the agent version must not
 #      exceed the future manager's, so the repository stays disabled by
 #      default and upgrades never happen implicitly
-#  15. publishes ~/.config/monitors.xml to GDM and applies the GDM font setting
+#  15. GNOME desktop defaults as system dconf keyfiles (Cantarell UI fonts,
+#      minimize/maximize/close, weekday clock, battery percentage, dark style,
+#      GNOME wallpaper over Fedora's, dock layout and favorites, the enabled
+#      extensions, Freon's per-platform CPU/GPU panel sensors), Desktop Icons
+#      NG from extensions.gnome.org, merges the required extensions into an
+#      existing user list, then publishes ~/.config/monitors.xml to GDM and
+#      applies the GDM font setting
 
 set -euo pipefail
 
@@ -282,8 +288,10 @@ PKGS=(
   @gnome-desktop
   gnome-extensions-app
   gnome-shell-extension-appindicator
+  gnome-shell-extension-apps-menu
   gnome-shell-extension-dash-to-dock
   gnome-shell-extension-freon
+  gnome-shell-extension-places-menu
   gnome-shell-extension-system-monitor
   gnome-tweaks
   gnupg2
@@ -2193,6 +2201,296 @@ ensure_game_packages_repo() {
   fi
 }
 
+#--- GNOME desktop helpers ---------------------------------------------------
+# Desktop defaults ship as system dconf keyfiles under /etc/dconf/db/local.d:
+# they apply to every account and every new account, but any value a user has
+# saved still wins. Two things therefore also touch the invoking user's own
+# database (only when a session bus is reachable): enabled-extensions gains any
+# missing required UUID (one the user switched off stays off: GNOME records
+# that in disabled-extensions), and a saved wallpaper equal to the distro
+# default is reset so the shipped GNOME default shows through.
+DCONF_LOCAL_DIR=/etc/dconf/db/local.d
+FREON_SENSORS_KEYFILE=${DCONF_LOCAL_DIR}/20-freon-sensors
+
+# detect_cpu_platform [root]: prints intel, amd, qualcomm, apple, nvidia, or
+# unknown. x86 trusts vendor_id; Arm checks the device tree, then the SMCCC
+# SoC ID (JEP106 manufacturer), then the MIDR implementer (NVIDIA GB10/N1X use
+# Arm-designed cores, so the implementer alone cannot identify them). The
+# optional root is a test seam.
+detect_cpu_platform() {
+  local root=${1:-} vendor compat soc implementer
+  vendor=$(awk -F': *' '/^vendor_id/ {print $2; exit}' "${root}/proc/cpuinfo" 2>/dev/null) || vendor=
+  case ${vendor} in
+    GenuineIntel) echo intel; return 0 ;;
+    AuthenticAMD|HygonGenuine) echo amd; return 0 ;;
+  esac
+  compat=$(tr '\0' ' ' 2>/dev/null <"${root}/sys/firmware/devicetree/base/compatible") || compat=
+  case ${compat} in
+    *apple,*) echo apple; return 0 ;;
+    *qcom,*) echo qualcomm; return 0 ;;
+    *nvidia,*) echo nvidia; return 0 ;;
+  esac
+  soc=$(cat "${root}/sys/devices/soc0/soc_id" 2>/dev/null) || soc=
+  case ${soc} in
+    jep106:0070:*) echo qualcomm; return 0 ;;
+    jep106:036b:*) echo nvidia; return 0 ;;
+  esac
+  implementer=$(awk -F': *' '/^CPU implementer/ {print $2; exit}' "${root}/proc/cpuinfo" 2>/dev/null) || implementer=
+  case ${implementer,,} in
+    0x51) echo qualcomm ;;
+    0x61) echo apple ;;
+    0x4e) echo nvidia ;;
+    *) echo unknown ;;
+  esac
+}
+
+# render_freon_sensors <platform> <sensors-json-file> [nvidia-gpu-name...]:
+# prints a dconf keyfile choosing Freon's panel sensors, or nothing when no
+# known sensor is present (Freon then keeps its average/maximum default).
+# Sensor keys follow Freon 61's own naming: the lm-sensors feature label,
+# suffixed -1, -2, ... for repeats in Freon's listing order (GPU chips, then
+# nvidia-smi GPUs, then the remaining chips; drive chips last). One CPU
+# package sensor per platform, plus one GPU sensor when a discrete GPU (or an
+# AMD iGPU, which has its own amdgpu sensor) is present. NVIDIA's proprietary
+# driver is read through nvidia-smi, so that case also enables use-gpu-nvidia.
+render_freon_sensors() {
+  local platform=$1 json=$2
+  shift 2
+  jq -r --arg platform "${platform}" --args '
+    def gvstr: ([39] | implode) as $q | ([92] | implode) as $b | $q + (split($b) | join($b + $b) | split($q) | join($b + $q)) + $q;
+    def temps($chips):
+      [$chips[] | .key as $chip | (.value | objects | to_entries[])
+        | select(.value | type == "object" and (keys | any(test("^temp[0-9]+_input"))))
+        | {chip: $chip, label: .key}];
+    def gpuchip: test("radeon|amdgpu|nouveau");
+    def drivechip: test("drivetemp|nvme");
+    def uniq_name($names; $label; $i):
+      (if $i == 0 then $label else "\($label)-\($i)" end) as $n
+      | if ($names | index([$n])) then uniq_name($names; $label; $i + 1) else $n end;
+    to_entries as $chips
+    | (temps([$chips[] | select(.key | gpuchip)])
+       + [$ARGS.positional[] | {chip: "nvidia-smi", label: .}]
+       + temps([$chips[] | select((.key | gpuchip | not) and (.key | drivechip | not))])
+       + temps([$chips[] | select(.key | drivechip)]))
+    | reduce .[] as $s ([]; . + [$s + {key: uniq_name(map(.key); $s.label; 0)}])
+    | . as $all
+    | def pick(f): first($all[] | select(f)) // empty;
+    def chip(re): .chip | test(re);
+    ([ if $platform == "intel" then
+         pick(chip("^coretemp-") and .label == "Package id 0") // pick(chip("^coretemp-"))
+       elif $platform == "amd" then
+         pick(chip("^(k10temp|zenpower)-") and .label == "Tctl")
+         // pick(chip("^(k10temp|zenpower)-") and .label == "Tdie")
+         // pick(chip("^(k10temp|zenpower)-"))
+       elif $platform == "apple" then
+         pick(chip("^macsmc") and (.label | test("cpu|p-?core|pacc"; "i")))
+         // pick(chip("^cpu[a-z0-9_]*-virtual-"))
+       elif $platform == "qualcomm" or $platform == "nvidia" then
+         pick(chip("^cpu[a-z0-9_]*-virtual-"))
+       else empty end ][0]) as $cpu
+    | ([ pick(.chip == "nvidia-smi")
+         // ([$all[] | select(chip("^amdgpu-"))] as $amd
+             | ([$amd[] | select(.label == "junction") | .chip] | first) as $dgpu
+             | if $dgpu then first($amd[] | select(.chip == $dgpu and .label == "edge")) // empty else empty end)
+         // pick(chip("^xe-") and .label == "pkg") // pick(chip("^(xe|i915)-"))
+         // pick(chip("^(nouveau|radeon)-"))
+         // pick(chip("^amdgpu-") and .label == "edge") ][0]) as $gpu
+    | [$cpu, $gpu | select(. != null)] as $hot
+    | if ($hot | length) == 0 then empty else
+        "[org/gnome/shell/extensions/freon]",
+        "hot-sensors=[" + ($hot | map(.key | gvstr) | join(", ")) + "]",
+        (if $gpu.chip == "nvidia-smi" then "use-gpu-nvidia=true" else empty end)
+      end
+  ' "$@" <"${json}"
+}
+
+# nvidia_gpu_names: the names Freon's nvidia-smi reader labels GPUs with.
+nvidia_gpu_names() {
+  [[ -d /proc/driver/nvidia/gpus ]] && command -v nvidia-smi >/dev/null || return 0
+  nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | sed 's/[[:space:]]*$//' || true
+}
+
+# render_freon_sensors_live: render_freon_sensors for this machine.
+render_freon_sensors_live() {
+  local json names=()
+  command -v sensors >/dev/null || return 0
+  json=$(mktemp) || die "could not create a temporary file"
+  if ! sensors -A -j >"${json}" 2>/dev/null; then
+    rm -f -- "${json}"
+    return 0
+  fi
+  mapfile -t names < <(nvidia_gpu_names)
+  render_freon_sensors "$(detect_cpu_platform)" "${json}" "${names[@]}" \
+    || { rm -f -- "${json}"; die "could not render the Freon sensor defaults"; }
+  rm -f -- "${json}"
+}
+
+# strv_merge <current-strv> <remove-csv> <disabled-strv> <uuid>...: prints the
+# GVariant string array of current, minus remove-csv entries, plus each uuid
+# not already present or listed in disabled. Extension UUIDs never contain
+# quotes or commas, so the plain text form is safe to split.
+strv_items() {
+  local s=${1#@as }
+  s=${s#[}; s=${s%]}
+  tr ',' '\n' <<<"${s}" | sed -e "s/^[[:space:]]*'//" -e "s/'[[:space:]]*$//" | sed '/^$/d'
+}
+strv_merge() {
+  local current=$1 remove=$2 disabled=$3 uuid out=() item
+  shift 3
+  while IFS= read -r item; do
+    [[ ,${remove}, == *",${item},"* ]] || out+=("${item}")
+  done < <(strv_items "${current}")
+  for uuid in "$@"; do
+    printf '%s\n' "${out[@]}" | grep -Fxq -- "${uuid}" && continue
+    strv_items "${disabled}" | grep -Fxq -- "${uuid}" && continue
+    out+=("${uuid}")
+  done
+  if (( ${#out[@]} == 0 )); then
+    printf '@as []\n'
+  else
+    printf "'%s', " "${out[@]}" | sed -e 's/, $//' -e 's/^/[/' -e 's/$/]/'
+    printf '\n'
+  fi
+}
+
+# user_dconf_read <key>: the invoking user's own saved value (empty when
+# unset), ignoring every system database.
+user_dconf_read() {
+  local profile
+  profile=$(mktemp) || die "could not create a temporary file"
+  printf 'user-db:user\n' >"${profile}"
+  DCONF_PROFILE=${profile} dconf read "$1" 2>/dev/null || true
+  rm -f -- "${profile}"
+}
+
+session_bus_reachable() {
+  [[ -n ${DBUS_SESSION_BUS_ADDRESS:-} || -S ${XDG_RUNTIME_DIR:-/run/user/${UID}}/bus ]]
+}
+
+# reconcile_user_gnome <remove-csv> <uuid>...: the per-user follow-ups above.
+reconcile_user_gnome() {
+  local remove=$1 current disabled merged key saved vendor schema
+  shift
+  if ! session_bus_reachable; then
+    note "GNOME user settings: no session bus - system defaults only (log in to GNOME and re-run to merge)"
+    return 0
+  fi
+  export DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR:-/run/user/${UID}}/bus}
+  current=$(user_dconf_read /org/gnome/shell/enabled-extensions)
+  if [[ -z ${current} ]]; then
+    note "enabled-extensions: system default (no saved user list)"
+  else
+    disabled=$(user_dconf_read /org/gnome/shell/disabled-extensions)
+    merged=$(strv_merge "${current}" "${remove}" "${disabled:-@as []}" "$@")
+    if [[ ${merged} == "${current}" ]]; then
+      note "enabled-extensions: up to date"
+    else
+      dconf write /org/gnome/shell/enabled-extensions "${merged}" \
+        || die "could not update the user's enabled-extensions"
+      note "enabled-extensions: merged ${merged}"
+    fi
+  fi
+  for key in org.gnome.desktop.background:picture-uri org.gnome.desktop.background:picture-uri-dark; do
+    schema=${key%%:*}
+    saved=$(user_dconf_read "/${schema//.//}/${key#*:}")
+    [[ -n ${saved} ]] || continue
+    vendor=$(GSETTINGS_BACKEND=memory gsettings get "${schema}" "${key#*:}" 2>/dev/null) || continue
+    if [[ ${saved} == "${vendor}" ]]; then
+      dconf reset "/${schema//.//}/${key#*:}" \
+        || die "could not reset ${schema} ${key#*:}"
+      note "${schema} ${key#*:}: distro default reset to the GNOME default"
+    fi
+  done
+}
+
+# apply_freon_sensors: installs (or removes) the rendered Freon keyfile;
+# sets PUT_FILE_CHANGED like put_file.
+apply_freon_sensors() {
+  local rendered=${WORK_DIR}/20-freon-sensors
+  render_freon_sensors_live >"${rendered}"
+  if [[ -s ${rendered} ]]; then
+    put_file -s "${rendered}" "${FREON_SENSORS_KEYFILE}"
+  elif [[ -e ${FREON_SENSORS_KEYFILE} ]]; then
+    sudo rm -f -- "${FREON_SENSORS_KEYFILE}" || die "could not remove ${FREON_SENSORS_KEYFILE}"
+    PUT_FILE_CHANGED=1
+    note "${FREON_SENSORS_KEYFILE}: removed (no known CPU/GPU sensor; Freon default)"
+  else
+    PUT_FILE_CHANGED=0
+    note "Freon sensors: none recognized (Freon default average/maximum)"
+  fi
+}
+
+# freon_sensors_current: read-only mirror of apply_freon_sensors for --check.
+freon_sensors_current() {
+  local rendered
+  rendered=$(render_freon_sensors_live)
+  if [[ -z ${rendered} ]]; then
+    [[ ! -e ${FREON_SENSORS_KEYFILE} ]]
+  else
+    [[ -f ${FREON_SENSORS_KEYFILE} ]] && cmp -s <(printf '%s\n' "${rendered}") "${FREON_SENSORS_KEYFILE}"
+  fi
+}
+
+# Desktop Icons NG has no Fedora package: the newest extensions.gnome.org
+# release for the running GNOME Shell major is installed system-wide under
+# /usr/local/share (on gnome-shell's XDG_DATA_DIRS; nothing RPM owns).
+# extensions.gnome.org publishes no digests, so this download is HTTPS-only
+# and unverified by design. Reruns replace it only when that listed version
+# changes; --no-upgrade keeps any installed copy. The archive ships its
+# GSettings schema uncompiled, so it is compiled before activation.
+DING_UUID=ding@rastersoft.com
+DING_DIR=/usr/local/share/gnome-shell/extensions/${DING_UUID}
+EGO_URL=https://extensions.gnome.org
+
+ding_installed_version() {
+  jq -r '.version // empty' "${DING_DIR}/metadata.json" 2>/dev/null || true
+}
+
+install_ding_extension() {
+  local installed major info version url stage
+  installed=$(ding_installed_version)
+  if [[ -n ${installed} ]] && (( NO_UPGRADE )); then
+    note "${DING_UUID} ${installed}: installed (--no-upgrade)"
+    return 0
+  fi
+  major=$(gnome-shell --version 2>/dev/null | awk '{print $3}')
+  major=${major%%.*}
+  [[ ${major} =~ ^[0-9]+$ ]] || die "could not determine the GNOME Shell version"
+  info=$(fetch_release_document "${EGO_URL}/extension-info/?uuid=${DING_UUID}&shell_version=${major}") \
+    || die "extensions.gnome.org lists no ${DING_UUID} release for GNOME Shell ${major}"
+  version=$(jq -r '.version // empty' <<<"${info}") || version=
+  url=$(jq -r '.download_url // empty' <<<"${info}") || url=
+  [[ ${version} =~ ^[0-9]+$ && ${url} == /download-extension/* ]] \
+    || die "unexpected extensions.gnome.org metadata for ${DING_UUID}"
+  if [[ ${installed} == "${version}" ]]; then
+    note "${DING_UUID} ${version}: up to date"
+    return 0
+  fi
+  stage=${WORK_DIR}/ding
+  rm -rf -- "${stage}"
+  install -d "${stage}/tree"
+  fetch_release_document "${EGO_URL}${url}" >"${stage}/ding.zip" \
+    || die "could not download ${DING_UUID} ${version}"
+  python3 -I -m zipfile -e "${stage}/ding.zip" "${stage}/tree" \
+    || die "could not unpack ${DING_UUID} ${version}"
+  [[ $(jq -r '.uuid // empty' "${stage}/tree/metadata.json" 2>/dev/null) == "${DING_UUID}" ]] \
+    || die "the downloaded archive is not ${DING_UUID}"
+  glib-compile-schemas --strict "${stage}/tree/schemas" \
+    || die "could not compile the ${DING_UUID} schema"
+  sudo rm -rf -- "${DING_DIR}.new"
+  sudo install -d -m 0755 -- "${DING_DIR%/*}"
+  sudo cp -R -- "${stage}/tree" "${DING_DIR}.new" \
+    && sudo chown -R root:root -- "${DING_DIR}.new" \
+    && sudo chmod -R u=rwX,go=rX -- "${DING_DIR}.new" \
+    && sudo rm -rf -- "${DING_DIR}" \
+    && sudo mv -- "${DING_DIR}.new" "${DING_DIR}" \
+    || die "could not install ${DING_DIR}"
+  if command -v restorecon >/dev/null; then
+    sudo restorecon -R "${DING_DIR}" || die "could not restore SELinux labels on ${DING_DIR}"
+  fi
+  note "${DING_UUID}: ${installed:-none} -> ${version} (takes effect at the next GNOME login)"
+}
+
 #--- games profile -----------------------------------------------------------
 # game_packages_primary_xml: the game-packages primary metadata in dnf's
 # system cache (newest repo cache directory), which is world-readable even
@@ -2792,6 +3090,8 @@ select_profile() {
     "etc/dnf/automatic.conf|/etc/dnf/automatic.conf"
     "etc/dnf/libdnf5.conf.d/80-protobuf3-c.conf|/etc/dnf/libdnf5.conf.d/80-protobuf3-c.conf"
     "etc/dconf/db/gdm.d/10-font-settings|/etc/dconf/db/gdm.d/10-font-settings"
+    "etc/dconf/db/local.d/00-workstation|/etc/dconf/db/local.d/00-workstation"
+    "etc/dconf/db/local.d/10-shell-fedora|/etc/dconf/db/local.d/10-shell"
     "etc/audit/rules.d/50-workstation.rules|/etc/audit/rules.d/50-workstation.rules"
     "etc/aide.conf|/etc/aide.conf"
     "etc/firewalld/zones/workstation.xml|/etc/firewalld/zones/workstation.xml"
@@ -2899,6 +3199,11 @@ print_plan() {
   printf 'PLAN: AIDE baseline over /etc, /usr/local, /root (initialized once; daily check timer)\n'
   printf 'PLAN: Wazuh agent from the disabled-by-default wazuh repo%s\n' \
     "$( if [[ -n ${WAZUH_MANAGER} ]]; then printf ', configured for %s and enabled' "${WAZUH_MANAGER}"; else printf '; left disabled (pass --wazuh-manager)'; fi )"
+  printf 'PLAN: GNOME defaults (local.d keyfiles above) + Freon sensors rendered for this CPU/GPU\n'
+  printf '      -> %s; %s from extensions.gnome.org (%s)\n' "${FREON_SENSORS_KEYFILE}" "${DING_UUID}" \
+    "$( (( NO_UPGRADE )) && echo 'missing only' || echo 'newest for this GNOME Shell')"
+  printf 'PLAN: merge required extensions into a saved user enabled-extensions list;\n'
+  printf '      reset a saved wallpaper equal to the distro default\n'
   printf 'PLAN: publish ~/.config/monitors.xml to GDM when present; dconf update\n'
 }
 
@@ -3094,6 +3399,16 @@ check_state() {
       check_report DRIFT "file ${dst}"
     fi
   done
+  if freon_sensors_current; then
+    check_report CURRENT "file ${FREON_SENSORS_KEYFILE} (rendered)"
+  else
+    check_report DRIFT "file ${FREON_SENSORS_KEYFILE} (rendered)"
+  fi
+  if [[ -n $(ding_installed_version) ]]; then
+    check_report CURRENT "extension ${DING_UUID} $(ding_installed_version)"
+  else
+    check_report DRIFT "extension ${DING_UUID}: not installed under ${DING_DIR%/*}"
+  fi
   if rpm -q --quiet "${VENDOR_REPOS_PKG}"; then
     check_report CURRENT "package ${VENDOR_REPOS_PKG} (Chrome/Steam repository definitions)"
   else
@@ -3755,7 +4070,17 @@ else
   wazuh_service_action
 fi
 
-#--- 15. GDM -----------------------------------------------------------------
+#--- 15. GNOME desktop and GDM ----------------------------------------------
+log "GNOME desktop defaults"
+DCONF_CHANGED=0
+put_file -s "${FILES}/etc/dconf/db/local.d/00-workstation" /etc/dconf/db/local.d/00-workstation
+(( PUT_FILE_CHANGED )) && DCONF_CHANGED=1
+put_file -s "${FILES}/etc/dconf/db/local.d/10-shell-fedora" /etc/dconf/db/local.d/10-shell
+(( PUT_FILE_CHANGED )) && DCONF_CHANGED=1
+apply_freon_sensors
+(( PUT_FILE_CHANGED )) && DCONF_CHANGED=1
+install_ding_extension
+
 log "GDM"
 # Give the login screen the user's monitor layout
 if [[ -f ${HOME}/.config/monitors.xml ]]; then
@@ -3765,9 +4090,17 @@ else
 fi
 # Font setting for the login screen; dconf update compiles the gdm database
 put_file -s "${FILES}/etc/dconf/db/gdm.d/10-font-settings" /etc/dconf/db/gdm.d/10-font-settings
-if (( PUT_FILE_CHANGED )) || [[ ! -f /etc/dconf/db/gdm ]]; then
+(( PUT_FILE_CHANGED )) && DCONF_CHANGED=1
+if (( DCONF_CHANGED )) || [[ ! -f /etc/dconf/db/gdm || ! -f /etc/dconf/db/local ]]; then
   sudo dconf update
   sudo restorecon -R /etc/dconf || die "failed to restore SELinux labels under /etc/dconf"
-  note "dconf database updated"
+  note "dconf databases updated"
 fi
+# After dconf update, so the reset wallpaper falls through to the new default.
+reconcile_user_gnome "" \
+  apps-menu@gnome-shell-extensions.gcampax.github.com \
+  places-menu@gnome-shell-extensions.gcampax.github.com \
+  appindicatorsupport@rgcjonas.gmail.com dash-to-dock@micxgx.gmail.com \
+  freon@UshakovVasilii_Github.yahoo.com \
+  system-monitor@gnome-shell-extensions.gcampax.github.com "${DING_UUID}"
 log "Done. Newly enabled services, zram and the default target take effect on the next boot."
