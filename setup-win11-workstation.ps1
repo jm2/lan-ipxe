@@ -451,9 +451,9 @@ $WingetRemoveOkCodes = @{
     0x8A15010B = 'removed - the uninstaller initiated a reboot' # INSTALL_REBOOT_INITIATED
 }
 $WingetExportOkCodes = @(0, 0x8A150035) # success, or NOT_ALL_PACKAGES_FOUND
-# winget refuses to uninstall a user-scope package from an elevated process.
-# Such a package belongs to this account, so the uninstall is retried from a
-# one-shot scheduled task that runs winget unelevated in this account's
+# winget refuses to uninstall or upgrade a user-scope package from an elevated
+# process. Such a package belongs to this account, so the operation is retried
+# from a one-shot scheduled task that runs winget unelevated in this account's
 # interactive session.
 $WingetUserScopeElevatedCode = 0x8A15007D
 $WingetUnelevatedTimeoutSeconds = 600
@@ -566,13 +566,15 @@ function Get-WingetArpEntry {
     return Get-ItemProperty -LiteralPath "$path\$($match.Groups['Key'].Value)" -ErrorAction SilentlyContinue
 }
 
-# Runs `winget uninstall` for $Id unelevated, as this account in its interactive
-# session, and returns winget's exit code; $null when that is not possible (no
-# interactive session for this account, or the task never reported back).
-function Invoke-WingetUninstallUnelevated {
+# Runs winget with $Arguments ($Verb first) for $Id unelevated, as this account
+# in its interactive session, and returns winget's exit code; $null when that
+# is not possible (no interactive session for this account, or the task never
+# reported back).
+function Invoke-WingetUnelevated {
     param(
         [Parameter(Mandatory = $true)][string]$Id,
-        [ValidateSet('winget', 'msstore')][string]$Source = 'winget'
+        [Parameter(Mandatory = $true)][ValidateSet('uninstall', 'upgrade')][string]$Verb,
+        [Parameter(Mandatory = $true)][string[]]$Arguments
     )
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $user = $identity.Name
@@ -582,17 +584,17 @@ function Invoke-WingetUninstallUnelevated {
         try { (Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid).Sid } catch { $null }
     })
     if ($sessionSids -notcontains $identity.User.Value) {
-        Write-Warning "$Id`: installed for $user only, who has no interactive session here to remove it unelevated"
+        Write-Warning "$Id`: installed for $user only, who has no interactive session here to $Verb it unelevated"
         return $null
     }
     $tag = [Guid]::NewGuid().ToString('N')
     $dir = Join-Path ([IO.Path]::GetTempPath()) "winget-unelevated-$tag"
-    $taskName = "lan-ipxe-winget-uninstall-$tag"
+    $taskName = "lan-ipxe-winget-$Verb-$tag"
     New-Item -ItemType Directory -Path $dir | Out-Null
     try {
         $log = Join-Path $dir 'winget.log'
         $codeFile = Join-Path $dir 'exitcode.txt'
-        $runner = Join-Path $dir 'uninstall.ps1'
+        $runner = Join-Path $dir "$Verb.ps1"
         $quote = { param([string]$Text) "'" + $Text.Replace("'", "''") + "'" }
         # The exit code is written to a temporary name and renamed into place,
         # so the poll below never reads a half-written file. A winget that
@@ -601,7 +603,7 @@ function Invoke-WingetUninstallUnelevated {
         @(
             "`$result = 'not-run'"
             "try {"
-            "    & winget uninstall --id $(& $quote $Id) --exact --source $(& $quote $Source) --silent --accept-source-agreements --disable-interactivity *> $(& $quote $log)"
+            "    & winget $(($Arguments | ForEach-Object { & $quote $_ }) -join ' ') *> $(& $quote $log)"
             "    if (`$null -ne `$LASTEXITCODE) { `$result = [string]`$LASTEXITCODE }"
             "}"
             "catch { `$_ | Out-File -LiteralPath $(& $quote $log) -Append }"
@@ -614,7 +616,7 @@ function Invoke-WingetUninstallUnelevated {
         $principal = New-ScheduledTaskPrincipal -UserId $identity.User.Value -LogonType Interactive -RunLevel Limited
         $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Seconds $WingetUnelevatedTimeoutSeconds)
         Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings | Out-Null
-        Write-Note "$Id`: user-scope package; retrying the uninstall unelevated"
+        Write-Note "$Id`: user-scope package; retrying the $Verb unelevated"
         $started = Get-Date
         Start-ScheduledTask -TaskName $taskName
         $deadline = $started.AddSeconds($WingetUnelevatedTimeoutSeconds + 30)
@@ -626,7 +628,7 @@ function Invoke-WingetUninstallUnelevated {
                 # The exit-code line can trail the task's completion by a moment.
                 Start-Sleep -Seconds 2
                 if (Test-Path -LiteralPath $codeFile) { break }
-                Write-Warning ("{0}: the unelevated uninstall task ended without an exit code (task result 0x{1:X8})" -f $Id, $info.LastTaskResult)
+                Write-Warning ("{0}: the unelevated {1} task ended without an exit code (task result 0x{2:X8})" -f $Id, $Verb, $info.LastTaskResult)
                 return $null
             }
             Start-Sleep -Seconds 2
@@ -641,7 +643,7 @@ function Invoke-WingetUninstallUnelevated {
         return $code
     }
     catch {
-        Write-Warning "$Id`: unelevated uninstall failed: $($_.Exception.Message)"
+        Write-Warning "$Id`: unelevated $Verb failed: $($_.Exception.Message)"
         return $null
     }
     finally {
@@ -650,6 +652,27 @@ function Invoke-WingetUninstallUnelevated {
         Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
     }
+}
+
+function Invoke-WingetUninstallUnelevated {
+    param(
+        [Parameter(Mandatory = $true)][string]$Id,
+        [ValidateSet('winget', 'msstore')][string]$Source = 'winget'
+    )
+    return Invoke-WingetUnelevated -Id $Id -Verb uninstall -Arguments @(
+        'uninstall', '--id', $Id, '--exact', '--source', $Source, '--silent',
+        '--accept-source-agreements', '--disable-interactivity')
+}
+
+# The same refusal applies to upgrading a user-scope package (portable ones
+# such as Google.PlatformTools): the upgrade, with its usual arguments, is
+# retried in this account's unelevated session.
+function Invoke-WingetUpgradeUnelevated {
+    param(
+        [Parameter(Mandatory = $true)][string]$Id,
+        [Parameter(Mandatory = $true)][string[]]$Arguments
+    )
+    return Invoke-WingetUnelevated -Id $Id -Verb upgrade -Arguments $Arguments
 }
 
 # `winget uninstall` for $Id, retried unelevated when winget refuses to remove
@@ -879,8 +902,14 @@ function Invoke-WingetPackageSet {
         # may be invoked again on a later setup run; Speedtest is exempt above.
         $extra = @(Get-WingetPackageArgument -Id $id)
         $reinstalled = $false
-        Invoke-Winget upgrade --id $id --exact --source $Source --include-unknown --silent --accept-package-agreements --accept-source-agreements --disable-interactivity @extra | Out-Host
+        $upgradeArgs = @('upgrade', '--id', $id, '--exact', '--source', $Source, '--include-unknown', '--silent',
+            '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity') + $extra
+        Invoke-Winget @upgradeArgs | Out-Host
         $code = $LASTEXITCODE
+        if ($code -eq $WingetUserScopeElevatedCode) {
+            $retry = Invoke-WingetUpgradeUnelevated -Id $id -Arguments $upgradeArgs
+            if ($null -ne $retry) { $code = $retry }
+        }
         if ($code -eq $WingetInstallTechMismatchCode) {
             Write-Note "$id`: the update uses a different installer technology; reinstalling"
             if (-not (Remove-WingetPackageForReinstall -Id $id -Source $Source)) {

@@ -46,7 +46,9 @@ foreach ($functionName in @('Write-Note', 'Invoke-Winget', 'Invoke-WingetUninsta
 
 # The scheduled-task retry is exercised in Test-WingetAntigravity; here a
 # user-scope refusal simply has no unelevated retry available.
-function Invoke-WingetUninstallUnelevated { param($Id, $Source) return $null }
+# No param block: the named arguments the script passes land in $args.
+function Invoke-WingetUninstallUnelevated { return $null }
+function Invoke-WingetUpgradeUnelevated { return $null }
 
 # --- Profile contents --------------------------------------------------------
 $core = @($WingetPackages)
@@ -733,7 +735,8 @@ try {
     # replaced otherwise.
     $markerPath = Join-Path $root $VentoyMarkerName
     $markerText = Get-Content -Raw -LiteralPath $markerPath
-    Remove-Item -LiteralPath $markerPath
+    # -Force: on Linux CI, PowerShell treats the dot-named marker as hidden.
+    Remove-Item -LiteralPath $markerPath -Force
     Assert-True ((Get-VentoyInstall).Managed -eq $false) 'a Ventoy without the marker is reported as unmanaged'
     $script:VentoyCalls = @()
     Assert-True ((Invoke-VentoyStep -NoUpgrade 3>$null) -eq 'current' -and $script:VentoyCalls.Count -eq 0) '-NoUpgrade leaves an unmanaged Ventoy alone'
@@ -826,7 +829,7 @@ function Install-PowerShellMsi {
     if ($script:PwshInstallFails) { throw 'msiexec /i exited with 1603' }
     Set-Content -LiteralPath $script:PwshMsi -Value ''
 }
-function Invoke-Msiexec { param([string[]]$Arguments, [int[]]$ExtraOkCodes) $script:PwshCalls += "msiexec|$($Arguments -join ' ')" }
+function Invoke-Msiexec { param([string[]]$Arguments, [int[]]$ExtraOkCodes) $null = $ExtraOkCodes; $script:PwshCalls += "msiexec|$($Arguments -join ' ')" }
 Set-Item -Path function:Remove-AppxPackage -Value { $script:PwshCalls += 'remove-appx'; $script:PwshStore = @() }
 $script:PwshWarnings = @()
 function Invoke-PwshCase {

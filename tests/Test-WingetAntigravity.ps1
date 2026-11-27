@@ -341,6 +341,29 @@ try {
         -LegacyIds @('VSCodium.VSCodium')
     Assert-Equal $script:UnelevatedCalls.Count 0 'only the user-scope refusal is retried unelevated'
 
+    # The same refusal on an upgrade (a portable user-scope package such as
+    # Google.PlatformTools) is retried unelevated with the same arguments.
+    $script:UpgradeCalls = @()
+    $script:UpgradeResult = [int]0x8A15002B
+    function Invoke-WingetUpgradeUnelevated {
+        param([string]$Id, [string[]]$Arguments)
+        $script:UpgradeCalls += "$Id=$($Arguments -join '|')"
+        return $script:UpgradeResult
+    }
+    $script:WingetCalls = @()
+    $script:ExitCodes = @{ 'upgrade|Google.PlatformTools' = [int]$WingetUserScopeElevatedCode }
+    $result = Invoke-WingetPackageSet -InstalledIds @('Google.PlatformTools') -DesiredIds @('Google.PlatformTools')
+    Assert-Equal ($script:UpgradeCalls -join ',') 'Google.PlatformTools=upgrade|--id|Google.PlatformTools|--exact|--source|winget|--include-unknown|--silent|--accept-package-agreements|--accept-source-agreements|--disable-interactivity' 'user-scope upgrade refusal is retried unelevated with the same arguments'
+    Assert-Equal ($result.UpdatedOrCurrent -join ',') 'Google.PlatformTools' 'the unelevated upgrade result counts'
+    Assert-Equal $result.Failed.Count 0 'a successful unelevated upgrade is not a failure'
+    $script:UpgradeResult = $null
+    $result = Invoke-WingetPackageSet -InstalledIds @('Google.PlatformTools') -DesiredIds @('Google.PlatformTools')
+    Assert-Equal ($result.Failed -join ',') 'upgrade Google.PlatformTools' 'an impossible unelevated upgrade still fails visibly'
+    $script:UpgradeCalls = @()
+    $script:ExitCodes = @{ 'upgrade|Google.PlatformTools' = 7 }
+    Invoke-WingetPackageSet -InstalledIds @('Google.PlatformTools') -DesiredIds @('Google.PlatformTools') 3>$null | Out-Null
+    Assert-Equal $script:UpgradeCalls.Count 0 'only the user-scope upgrade refusal is retried unelevated'
+
     # A package whose manifest leaves updates to its own updater (Android
     # Studio) is current, not a failed upgrade.
     $script:WingetCalls = @()
