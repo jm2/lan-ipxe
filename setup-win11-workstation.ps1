@@ -406,6 +406,26 @@ $GamesReservePercent = 20
 $GamesSizeFactor = 1.25
 $GamesBootstrapWingetPackages = @('GoLang.Go', 'Git.Git')
 
+# The Desktop "Games" folder (full, games and games-repo profiles): copies of
+# the Start menu shortcuts of installed games, like the macOS Dock's Games
+# folder. Every shortcut under a Start menu folder named "Games (<repo>)" is
+# a game (game-packages GooGet packages, and crossdock games installed by
+# hand, use MENU "Games (linux-packages)"); the full profile's WinGet games
+# are found by shortcut name (.lnk base name, Start menu Programs trees of all
+# users then the current user; first match wins). The marker file records the
+# copies this script made, so only those are ever replaced or removed.
+$DesktopGamesFolderName = 'Games'
+$DesktopGamesMarkerName = '.lan-ipxe-games'
+$DesktopGamesMenuPattern = 'Games (*)'
+$DesktopGamesExcludePatterns = @('*uninstall*', '*readme*', '*manual*', '*website*', '*help*')
+$DesktopGamesWingetShortcuts = [ordered]@{
+    'ExtremeTuxRacer.ExtremeTuxRacer' = @{ Include = @('Extreme Tux Racer*', 'ExtremeTuxRacer*'); Exclude = @() }
+    'SuperTux.SuperTux'               = @{ Include = @('SuperTux', 'SuperTux *'); Exclude = @('SuperTuxKart*') }
+    'SuperTuxKart.SuperTuxKart'       = @{ Include = @('SuperTuxKart*'); Exclude = @() }
+    'Unigine.HeavenBenchmark'         = @{ Include = @('Heaven Benchmark*', 'Unigine Heaven*'); Exclude = @() }
+    'GOG.Galaxy'                      = @{ Include = @('GOG GALAXY*', 'GOG Galaxy*'); Exclude = @() }
+}
+
 # The only principals that may own or write anything under
 # %ProgramData%\GooGet, as well-known SIDs (account names are localized):
 # Administrators and SYSTEM. An owner keeps implicit WRITE_DAC, and googet
@@ -3148,6 +3168,7 @@ function Write-GameRepoProfilePlan {
     Write-Step 'Plan (offline; nothing is queried or changed)'
     Write-GameRepoSetupPlan
     Write-Note 'No games: install from the repo by hand with googet install <package>'
+    Write-DesktopGamesPlan
 }
 
 function Write-GameProfilePlan {
@@ -3158,6 +3179,7 @@ function Write-GameProfilePlan {
     Write-Note "    least $GamesReservePercent% of the Program Files drive stays free (size: .goo download x $GamesSizeFactor);"
     Write-Note '    installed games updated first; one googet install per game from that repo only (-sources),'
     Write-Note '    its cached .goo cleared afterwards; stops while enthoo is unreachable'
+    Write-DesktopGamesPlan
 }
 
 # GooGet and its repo configuration, shared by the games and games-repo
@@ -3238,6 +3260,224 @@ function Invoke-GameProfile {
     return $result
 }
 
+#--- Desktop Games folder ----------------------------------------------------
+# $true when the shortcut base name $Name matches an -Include pattern and no
+# -Exclude or $DesktopGamesExcludePatterns pattern (case-insensitive -like).
+function Test-DesktopGameShortcutName {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [string[]]$Include = @('*'),
+        [string[]]$Exclude = @()
+    )
+    foreach ($pattern in @($Exclude) + @($DesktopGamesExcludePatterns)) {
+        if ($pattern -and $Name -like $pattern) { return $false }
+    }
+    foreach ($pattern in @($Include)) {
+        if ($pattern -and $Name -like $pattern) { return $true }
+    }
+    return $false
+}
+
+# The Start menu Programs trees searched, all users first.
+function Get-DesktopGameProgramRoot {
+    $roots = @()
+    foreach ($folder in @('CommonPrograms', 'Programs')) {
+        $path = [Environment]::GetFolderPath($folder)
+        if (-not [string]::IsNullOrWhiteSpace($path) -and (Test-Path -LiteralPath $path -PathType Container)) { $roots += $path }
+    }
+    return $roots
+}
+
+function Get-DesktopGamesFolderPath {
+    $desktop = [Environment]::GetFolderPath('Desktop')
+    if ([string]::IsNullOrWhiteSpace($desktop)) { return $null }
+    return Join-Path $desktop $DesktopGamesFolderName
+}
+
+# The shortcuts the Games folder should hold: [pscustomobject]@{ Name =
+# '<leaf>.lnk'; Source = <full path> }, one per leaf name (first found wins):
+# every shortcut under a "Games (*)" folder of each root, then the first
+# match per $Patterns entry (an ordered map of @{ Include; Exclude }).
+function Get-DesktopGameShortcut {
+    param(
+        [string[]]$ProgramRoots = @(),
+        [System.Collections.IDictionary]$Patterns = $DesktopGamesWingetShortcuts
+    )
+    $desired = New-Object System.Collections.ArrayList
+    $names = @{}
+    $add = {
+        param($file)
+        if ($names.ContainsKey($file.Name.ToLowerInvariant())) { return }
+        $names[$file.Name.ToLowerInvariant()] = $true
+        [void]$desired.Add([pscustomobject]@{ Name = $file.Name; Source = $file.FullName })
+    }
+    $trees = @{}
+    foreach ($root in @($ProgramRoots)) {
+        if (-not $root -or -not (Test-Path -LiteralPath $root -PathType Container)) { continue }
+        $trees[$root] = @(Get-ChildItem -LiteralPath $root -Recurse -File -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -ieq '.lnk' } | Sort-Object FullName)
+        foreach ($menu in @(Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like $DesktopGamesMenuPattern } | Sort-Object Name)) {
+            $prefix = $menu.FullName.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+            foreach ($file in @($trees[$root] | Where-Object { $_.FullName.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) })) {
+                if (Test-DesktopGameShortcutName -Name $file.BaseName) { & $add $file }
+            }
+        }
+    }
+    foreach ($id in @($Patterns.Keys)) {
+        $entry = $Patterns[$id]
+        $match = $null
+        foreach ($root in @($ProgramRoots)) {
+            if (-not $trees.ContainsKey($root)) { continue }
+            $match = @($trees[$root] | Where-Object { Test-DesktopGameShortcutName -Name $_.BaseName -Include $entry.Include -Exclude $entry.Exclude }) | Select-Object -First 1
+            if ($match) { break }
+        }
+        if ($match) { & $add $match }
+    }
+    return @($desired)
+}
+
+function Read-DesktopGamesMarker {
+    param([Parameter(Mandatory = $true)][string]$Folder)
+    $marker = Join-Path $Folder $DesktopGamesMarkerName
+    if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) { return @() }
+    return @([IO.File]::ReadAllLines($marker) | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+
+function Test-SameFileContent {
+    param([string]$Left, [string]$Right)
+    if (-not (Test-Path -LiteralPath $Left -PathType Leaf) -or -not (Test-Path -LiteralPath $Right -PathType Leaf)) { return $false }
+    $a = [IO.File]::ReadAllBytes($Left)
+    $b = [IO.File]::ReadAllBytes($Right)
+    if ($a.Length -ne $b.Length) { return $false }
+    for ($i = 0; $i -lt $a.Length; $i++) { if ($a[$i] -ne $b[$i]) { return $false } }
+    return $true
+}
+
+# What reconciling $Folder with $Desired takes. Add: missing copies; Update:
+# copies this script made whose source changed; Remove: copies this script
+# made whose game is gone; Current: up to date (an identical copy the user
+# made is adopted); Kept: a different item of the same name that the user
+# owns, left alone. Managed is the marker content afterwards.
+function Get-DesktopGamesPlan {
+    param(
+        [object[]]$Desired = @(),
+        [Parameter(Mandatory = $true)][string]$Folder,
+        [string[]]$Managed = @()
+    )
+    $plan = [pscustomobject]@{ Add = @(); Update = @(); Remove = @(); Current = @(); Kept = @(); Managed = @() }
+    $managedSet = @{}
+    foreach ($name in @($Managed)) { if ($name) { $managedSet[$name.ToLowerInvariant()] = $true } }
+    $wanted = @{}
+    foreach ($item in @($Desired)) {
+        $wanted[$item.Name.ToLowerInvariant()] = $true
+        $target = Join-Path $Folder $item.Name
+        $isManaged = $managedSet.ContainsKey($item.Name.ToLowerInvariant())
+        if (-not (Test-Path -LiteralPath $target)) { $plan.Add += $item; $plan.Managed += $item.Name }
+        elseif (Test-SameFileContent -Left $item.Source -Right $target) { $plan.Current += $item; $plan.Managed += $item.Name }
+        elseif ($isManaged) { $plan.Update += $item; $plan.Managed += $item.Name }
+        else { $plan.Kept += $item }
+    }
+    foreach ($name in @($Managed)) {
+        if (-not $name -or $wanted.ContainsKey($name.ToLowerInvariant())) { continue }
+        if (Test-Path -LiteralPath (Join-Path $Folder $name) -PathType Leaf) { $plan.Remove += $name }
+    }
+    return $plan
+}
+
+function Write-DesktopGamesMarker {
+    param([Parameter(Mandatory = $true)][string]$Folder, [string[]]$Names = @())
+    $marker = Join-Path $Folder $DesktopGamesMarkerName
+    if (Test-Path -LiteralPath $marker) { [IO.File]::SetAttributes($marker, [IO.FileAttributes]::Normal) }
+    [IO.File]::WriteAllLines($marker, [string[]]@($Names | Sort-Object -Unique))
+    try { [IO.File]::SetAttributes($marker, [IO.FileAttributes]::Hidden) } catch { Write-Verbose "marker not hidden: $($_.Exception.Message)" }
+}
+
+# Applies Get-DesktopGamesPlan. Returns counts and the names that failed.
+function Invoke-DesktopGamesFolder {
+    param(
+        [Parameter(Mandatory = $true)][string]$Folder,
+        [object[]]$Desired = @()
+    )
+    $result = [pscustomobject]@{ Added = 0; Updated = 0; Removed = 0; Kept = @(); Failed = @() }
+    if (-not (Test-Path -LiteralPath $Folder -PathType Container)) { New-Item -ItemType Directory -Path $Folder -Force | Out-Null }
+    $plan = Get-DesktopGamesPlan -Desired $Desired -Folder $Folder -Managed (Read-DesktopGamesMarker -Folder $Folder)
+    $managed = New-Object System.Collections.ArrayList
+    foreach ($item in @($plan.Current)) { [void]$managed.Add($item.Name) }
+    $copies = @($plan.Add | ForEach-Object { @{ Item = $_; Update = $false } }) + @($plan.Update | ForEach-Object { @{ Item = $_; Update = $true } })
+    foreach ($copy in $copies) {
+        $item = $copy.Item
+        try {
+            Copy-Item -LiteralPath $item.Source -Destination (Join-Path $Folder $item.Name) -Force
+            [void]$managed.Add($item.Name)
+            if ($copy.Update) { $result.Updated++ } else { $result.Added++ }
+        }
+        catch {
+            Write-Warning "Games folder: $($item.Name) not copied: $($_.Exception.Message)"
+            $result.Failed += $item.Name
+            # A failed refresh leaves the old copy, still ours.
+            if ($copy.Update) { [void]$managed.Add($item.Name) }
+        }
+    }
+    foreach ($name in @($plan.Remove)) {
+        try { Remove-Item -LiteralPath (Join-Path $Folder $name) -Force; $result.Removed++ }
+        catch {
+            Write-Warning "Games folder: $name not removed: $($_.Exception.Message)"
+            $result.Failed += $name
+            [void]$managed.Add($name)
+        }
+    }
+    $result.Kept = @($plan.Kept | ForEach-Object { $_.Name })
+    Write-DesktopGamesMarker -Folder $Folder -Names @($managed)
+    return $result
+}
+
+# The apply step shared by the full, games and games-repo profiles.
+function Invoke-DesktopGamesStep {
+    Write-Step "Desktop $DesktopGamesFolderName folder (installed games' Start menu shortcuts)"
+    $result = [pscustomobject]@{ Added = 0; Updated = 0; Removed = 0; Kept = @(); Failed = @() }
+    $folder = Get-DesktopGamesFolderPath
+    if (-not $folder) { Write-Warning 'Games folder: the Desktop folder is unknown'; $result.Failed += $DesktopGamesFolderName; return $result }
+    try {
+        $result = Invoke-DesktopGamesFolder -Folder $folder -Desired (Get-DesktopGameShortcut -ProgramRoots (Get-DesktopGameProgramRoot))
+    }
+    catch {
+        Write-Warning "Games folder: $($_.Exception.Message)"
+        $result.Failed += $DesktopGamesFolderName
+    }
+    foreach ($name in $result.Kept) { Write-Note "kept $name (not made by this script; it differs from the game's shortcut)" }
+    return $result
+}
+
+function Write-DesktopGamesSummary {
+    param([Parameter(Mandatory = $true)]$Result)
+    Write-Note "Games folder: $($Result.Added) added, $($Result.Updated) updated, $($Result.Removed) removed$(if ($Result.Failed.Count) { ", $($Result.Failed.Count) failed" })"
+    if ($Result.Failed.Count) { Write-Note "failed: $($Result.Failed -join ', ')" }
+}
+
+function Invoke-DesktopGamesCheck {
+    Write-Step "Desktop $DesktopGamesFolderName folder"
+    $folder = Get-DesktopGamesFolderPath
+    if (-not $folder) { Write-Note 'NOTE    Games folder: the Desktop folder is unknown'; return }
+    $exists = Test-Path -LiteralPath $folder -PathType Container
+    Write-State $exists "Games folder ($folder)" $(if ($exists) { '' } else { 'missing' })
+    $managed = if ($exists) { @(Read-DesktopGamesMarker -Folder $folder) } else { @() }
+    $plan = Get-DesktopGamesPlan -Desired (Get-DesktopGameShortcut -ProgramRoots (Get-DesktopGameProgramRoot)) -Folder $folder -Managed $managed
+    foreach ($item in $plan.Current) { Write-State $true "Games folder: $($item.Name)" }
+    foreach ($item in $plan.Add) { Write-State $false "Games folder: $($item.Name)" 'missing' }
+    foreach ($item in $plan.Update) { Write-State $false "Games folder: $($item.Name)" 'outdated' }
+    foreach ($name in $plan.Remove) { Write-State $false "Games folder: $name" 'game no longer installed' }
+    foreach ($item in $plan.Kept) { Write-Note "NOTE    Games folder: $($item.Name) kept (not made by this script)" }
+}
+
+function Write-DesktopGamesPlan {
+    Write-Note "Desktop $DesktopGamesFolderName folder (created when missing): copies of every Start menu shortcut under"
+    Write-Note "    `"$DesktopGamesMenuPattern`" folders (game-packages and hand-installed crossdock games), plus these WinGet"
+    Write-Note "    games when installed: $(@($DesktopGamesWingetShortcuts.Keys) -join ', ');"
+    Write-Note "    copies refreshed when their shortcut changes; copies this script made removed once their game is gone"
+    Write-Note "    (recorded in $DesktopGamesMarkerName); items you add are never touched"
+}
+
 # Mirrors enable-openssh-win11.ps1 (which -Check cannot run unelevated):
 # installing the OpenSSH.Server capability registers sshd on the inbox binary.
 function Test-InboxSshdService {
@@ -3280,6 +3520,7 @@ if ($WorkstationProfile -eq 'games-repo') {
     $script:DriftCount = 0
     if ($Check) {
         Invoke-GameRepoCheck | Out-Null
+        Invoke-DesktopGamesCheck
         Write-Step 'Summary'
         Write-Note "$script:DriftCount drifted item(s)"
         if ($script:DriftCount) { exit 2 }
@@ -3293,11 +3534,13 @@ if ($WorkstationProfile -eq 'games-repo') {
         throw 'Apply requires an elevated PowerShell (Run as administrator). -Check and -DryRun do not.'
     }
     $repoSetup = Invoke-GameRepoSetup -NoUpgrade:$NoUpgrade
+    $desktopGamesResult = Invoke-DesktopGamesStep
     Write-Step 'Summary'
     Write-Note "WinGet (GooGet build tools): $($repoSetup.Bootstrap.Installed.Count) installed now, $($repoSetup.Bootstrap.Failed.Count) failed"
     Write-Note "GooGet $($repoSetup.GooGet.Version): $GooGetRepoName repo -> $GooGetRepoUrl; install from it with googet install <package>"
     if (-not (Test-GooGetRepoReachable)) { Write-Note "$GooGetRepoUrl is unreachable right now; googet uses it once the LAN answers" }
-    if ($repoSetup.Bootstrap.Failed.Count) { exit 1 }
+    Write-DesktopGamesSummary -Result $desktopGamesResult
+    if ($repoSetup.Bootstrap.Failed.Count -or $desktopGamesResult.Failed.Count) { exit 1 }
     exit 0
 }
 if ($WorkstationProfile -eq 'games') {
@@ -3308,6 +3551,7 @@ if ($WorkstationProfile -eq 'games') {
     $script:DriftCount = 0
     if ($Check) {
         Invoke-GameProfileCheck
+        Invoke-DesktopGamesCheck
         Write-Step 'Summary'
         Write-Note "$script:DriftCount drifted item(s)"
         if ($script:DriftCount) { exit 2 }
@@ -3321,11 +3565,13 @@ if ($WorkstationProfile -eq 'games') {
         throw 'Apply requires an elevated PowerShell (Run as administrator). -Check and -DryRun do not.'
     }
     $gamesResult = Invoke-GameProfile -NoUpgrade:$NoUpgrade
+    $desktopGamesResult = Invoke-DesktopGamesStep
     Write-Step 'Summary'
     Write-Note "WinGet (GooGet build tools): $($gamesResult.Bootstrap.Installed.Count) installed now, $($gamesResult.Bootstrap.Failed.Count) failed"
     Write-Note "games: $($gamesResult.Installed) installed now, $($gamesResult.Kept) already installed, $($gamesResult.Skipped) skipped, $($gamesResult.Failed.Count) failed"
     if ($gamesResult.Failed.Count) { Write-Note "failed: $($gamesResult.Failed -join ', ')" }
-    if ($gamesResult.Failed.Count -or $gamesResult.Bootstrap.Failed.Count) { exit 1 }
+    Write-DesktopGamesSummary -Result $desktopGamesResult
+    if ($gamesResult.Failed.Count -or $gamesResult.Bootstrap.Failed.Count -or $desktopGamesResult.Failed.Count) { exit 1 }
     exit 0
 }
 
@@ -3393,6 +3639,7 @@ if ($DryRun) {
     $gooPolicy = if ($NoUpgrade) { 'install if missing (-NoUpgrade)' } else { 'install if missing, otherwise update to the repo''s latest' }
     Write-Note "game-packages GooGet packages ($gooPolicy; deferred while enthoo is unreachable):"
     foreach ($name in $GooGetPackages) { Write-Note "    $name" }
+    if ($WorkstationProfile -eq 'full') { Write-DesktopGamesPlan }
     exit 0
 }
 
@@ -3553,6 +3800,7 @@ if ($Check) {
     else {
         Write-Note "NOTE    game-packages packages ($($GooGetPackages -join ', ')): googet is not installed; they install after it"
     }
+    if ($WorkstationProfile -eq 'full') { Invoke-DesktopGamesCheck }
 
     Write-Step 'Summary'
     Write-Note "$script:DriftCount drifted item(s)"
@@ -3692,6 +3940,9 @@ Write-Note "GooGet: $googetResult"
 Write-Step "game-packages GooGet packages ($($GooGetPackages.Count) entries)"
 $gooResult = Invoke-GooGetPackageSet -Packages $GooGetPackages -NoUpgrade:$NoUpgrade
 
+#--- 8. Desktop Games folder (full profile) ---------------------------------
+$desktopGamesResult = if ($WorkstationProfile -eq 'full') { Invoke-DesktopGamesStep } else { $null }
+
 #--- Summary ----------------------------------------------------------------
 Write-Step 'Summary'
 Write-Note "winget: $($wingetResult.Installed.Count) installed now, $($wingetResult.UpdatedOrCurrent.Count) updated/current, $($wingetResult.Present.Count) presence-only, $($wingetResult.RemovedLegacy.Count) legacy removed, $($wingetResult.Deferred.Count) deferred, $($wingetResult.Failed.Count) failed"
@@ -3711,4 +3962,5 @@ if ($googetResult -eq 'deferred') { Write-Note 'deferred (re-run once Go is inst
 Write-Note "game-packages: $($gooResult.Installed.Count) installed now, $($gooResult.Current.Count) current, $($gooResult.Deferred.Count) deferred, $($gooResult.Failed.Count) failed"
 if ($gooResult.Deferred.Count) { Write-Note "deferred (install once enthoo answers): $($gooResult.Deferred -join ', ')" }
 if ($gooResult.Failed.Count) { Write-Note "failed: $($gooResult.Failed -join ', ')" }
-if ($wingetResult.Failed.Count -or $openCodeResult.Failed.Count -or $nativeResult.Failed.Count -or $rustResult -eq 'failed' -or @($releaseAppResults.Values) -contains 'failed' -or $ventoyResult -eq 'failed' -or $gooseDesktopResult -eq 'failed' -or $pwshResult -eq 'failed' -or $googetResult -eq 'failed' -or $gooResult.Failed.Count) { exit 1 }
+if ($desktopGamesResult) { Write-DesktopGamesSummary -Result $desktopGamesResult }
+if (($desktopGamesResult -and $desktopGamesResult.Failed.Count) -or $wingetResult.Failed.Count -or $openCodeResult.Failed.Count -or $nativeResult.Failed.Count -or $rustResult -eq 'failed' -or @($releaseAppResults.Values) -contains 'failed' -or $ventoyResult -eq 'failed' -or $gooseDesktopResult -eq 'failed' -or $pwshResult -eq 'failed' -or $googetResult -eq 'failed' -or $gooResult.Failed.Count) { exit 1 }

@@ -971,6 +971,99 @@ swap_dock_aliases() {
   fi
 }
 
+# The app-grid Games folder (full, games and games-repo profiles) gathers
+# every launcher in the freedesktop Game category, whatever installed it:
+# game-packages, Flathub, or a package installed by hand. Dash to Dock cannot
+# pin a folder, so, as with the macOS Dock's Games folder, the games stay out
+# of the dock and its Show Applications button leads to the folder.
+GAMES_FOLDER_KEYFILE=${DCONF_LOCAL_DIR}/30-games-folder
+# Game launchers earlier releases pinned to the dock, dropped from a saved
+# favorites list once the folder is in place.
+RETIRED_DOCK_GAMES=bugdom.desktop,io.jor.bugdom.desktop,io.jor.cromagrally.desktop,mightymike.desktop,io.jor.mightymike.desktop
+GAMES_FOLDER_VENDOR_FALLBACK="['Utilities', 'YaST', 'Pardus']"
+
+# strv_print <item>...: a GVariant string array.
+strv_print() {
+  if (( $# == 0 )); then
+    printf '@as []\n'
+  else
+    printf "'%s', " "$@" | sed -e 's/, $//' -e 's/^/[/' -e 's/$/]/'
+    printf '\n'
+  fi
+}
+
+# games_folder_children <strv>: the folder list with Games first.
+games_folder_children() {
+  local items=(Games) item
+  while IFS= read -r item; do
+    [[ ${item} == Games ]] || items+=("${item}")
+  done < <(strv_items "$1")
+  strv_print "${items[@]}"
+}
+
+# render_games_folder: the keyfile: GNOME's own folders (the schema default,
+# vendor overrides included) after Games.
+render_games_folder() {
+  local vendor
+  vendor=$(GSETTINGS_BACKEND=memory gsettings get org.gnome.desktop.app-folders folder-children 2>/dev/null) \
+    || vendor=${GAMES_FOLDER_VENDOR_FALLBACK}
+  [[ -n ${vendor} ]] || vendor=${GAMES_FOLDER_VENDOR_FALLBACK}
+  cat <<KEYFILE
+# Managed by the workstation setup (full, games and games-repo profiles):
+# an app-grid Games folder holding every launcher in the Game category.
+[org/gnome/desktop/app-folders]
+folder-children=$(games_folder_children "${vendor}")
+
+[org/gnome/desktop/app-folders/folders/Games]
+name='Games'
+categories=['Game']
+translate=false
+KEYFILE
+}
+
+# apply_games_folder: installs the rendered keyfile; sets PUT_FILE_CHANGED
+# like put_file.
+apply_games_folder() {
+  local rendered=${WORK_DIR}/30-games-folder
+  render_games_folder >"${rendered}"
+  put_file -s "${rendered}" "${GAMES_FOLDER_KEYFILE}"
+}
+
+# games_folder_current: read-only mirror of apply_games_folder for --check.
+games_folder_current() {
+  [[ -f ${GAMES_FOLDER_KEYFILE} && ! -L ${GAMES_FOLDER_KEYFILE} ]] \
+    && cmp -s <(render_games_folder) "${GAMES_FOLDER_KEYFILE}"
+}
+
+# reconcile_user_games_folder: once the folder is installed, a folder list
+# the user saved (GNOME writes one when folders are edited) gains Games, and
+# the game launchers earlier releases pinned leave a saved dock. Needs the
+# session bus.
+reconcile_user_games_folder() {
+  local current merged
+  [[ -f ${GAMES_FOLDER_KEYFILE} ]] || return 0
+  current=$(user_dconf_read /org/gnome/desktop/app-folders/folder-children)
+  if [[ -n ${current} ]]; then
+    if strv_items "${current}" | grep -Fxq Games; then
+      note "app folders: Games folder listed"
+    else
+      merged=$(games_folder_children "${current}")
+      dconf write /org/gnome/desktop/app-folders/folder-children "${merged}" \
+        || die "could not add the Games folder to the user's app folders"
+      note "app folders: Games folder added to ${merged}"
+    fi
+  fi
+  current=$(user_dconf_read /org/gnome/shell/favorite-apps)
+  if [[ -n ${current} ]]; then
+    merged=$(strv_merge "${current}" "${RETIRED_DOCK_GAMES}" "@as []")
+    if [[ ${merged} != "${current}" ]]; then
+      dconf write /org/gnome/shell/favorite-apps "${merged}" \
+        || die "could not update the user's dock favorites"
+      note "favorite-apps: game launchers moved to the Games folder"
+    fi
+  fi
+}
+
 session_bus_reachable() {
   [[ -n ${DBUS_SESSION_BUS_ADDRESS:-} || -S ${XDG_RUNTIME_DIR:-/run/user/${UID}}/bus ]]
 }
@@ -1009,6 +1102,7 @@ reconcile_user_gnome() {
       note "favorite-apps: up to date"
     fi
   fi
+  reconcile_user_games_folder
   for key in org.gnome.desktop.background:picture-uri org.gnome.desktop.background:picture-uri-dark; do
     schema=${key%%:*}
     saved=$(user_dconf_read "/${schema//.//}/${key#*:}")
@@ -1152,6 +1246,8 @@ print_games_repo_plan_lines() {
   printf 'PLAN: enable [multilib] in /etc/pacman.conf if disabled (backup /etc/pacman.conf.pre-workstation)\n'
   printf 'PLAN: game-packages repository: trust key %s (pacman-key --add/--lsign-key), install %s and its NetworkManager dispatcher hook, append "%s" to /etc/pacman.conf\n' \
     "${GAME_PACKAGES_KEY_FPR}" "${GAME_PACKAGES_TOGGLE}" "${GAME_PACKAGES_INCLUDE}"
+  printf 'PLAN: GNOME app-grid Games folder (every launcher in the Game category) -> %s;\n' "${GAMES_FOLDER_KEYFILE}"
+  printf '      dconf profile + update; add it to a saved user folder list and drop retired game launchers from a saved dock\n'
 }
 
 # print_games_repo_plan: the offline --dry-run plan of the games-repo profile.
@@ -1197,6 +1293,13 @@ check_games_repo() {
     report CURRENT "/etc/pacman.conf: includes ${GAME_PACKAGES_CONF}"
   else
     report DRIFT "/etc/pacman.conf: missing '${GAME_PACKAGES_INCLUDE}'"
+  fi
+  if ! command -v gnome-shell >/dev/null; then
+    report NOTE "Games folder: GNOME Shell is not installed"
+  elif games_folder_current; then
+    report CURRENT "${GAMES_FOLDER_KEYFILE} (rendered)"
+  else
+    report DRIFT "${GAMES_FOLDER_KEYFILE} (rendered)"
   fi
 }
 
@@ -1356,6 +1459,32 @@ games_repo_reachable() {
 # is emptied after each transaction, so neither / nor the space check has to
 # hold the downloads. The games install from game-packages in batches
 # (install_games); the run stops if crossdock drops off the network.
+# setup_games_folder: the app-grid Games folder for the games and games-repo
+# profiles (the full profile installs it with the GNOME defaults).
+setup_games_folder() {
+  log "GNOME Games folder"
+  if ! command -v gnome-shell >/dev/null || ! command -v dconf >/dev/null; then
+    note "GNOME Shell is not installed - no Games folder"
+    return 0
+  fi
+  local changed=0
+  # Arch ships no dconf profile; without it the system database is not read.
+  put_file -s "${FILES}/etc/dconf/profile/user" /etc/dconf/profile/user
+  (( PUT_FILE_CHANGED )) && changed=1
+  apply_games_folder
+  (( PUT_FILE_CHANGED )) && changed=1
+  if (( changed )) || [[ ! -f /etc/dconf/db/local ]]; then
+    sudo dconf update || die "dconf update failed"
+    note "dconf databases updated"
+  fi
+  if session_bus_reachable; then
+    export DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR:-/run/user/${UID}}/bus}
+    reconcile_user_games_folder
+  else
+    note "GNOME user settings: no session bus - system defaults only (log in to GNOME and re-run to merge)"
+  fi
+}
+
 # run_games_repo_apply: the games-repo profile: [multilib] and game-packages,
 # then pacman -Syu (unless --no-upgrade) so pacman can install from both. Off
 # the LAN it still succeeds; the NetworkManager hook enables game-packages
@@ -1372,6 +1501,7 @@ run_games_repo_apply() {
     log "Syncing databases and applying updates (pacman -Syu)"
     sudo pacman -Syu --noconfirm
   fi
+  setup_games_folder
   log "Done: game-packages is configured; install from it with: sudo pacman -S <package>"
 }
 
@@ -1418,6 +1548,7 @@ run_games_apply() {
   fi
   sudo rm -rf -- "${GAMES_CACHE}"
   trap cleanup EXIT
+  setup_games_folder
 
   log "Done: $(( ${#GAMES_INSTALL[@]} - ${#GAMES_FAILED[@]} )) installed now, ${#GAMES_KEEP[@]} already installed, ${#GAMES_SKIP[@]} skipped, ${#GAMES_FAILED[@]} failed"
   # Report failed installs before the firewall step, which can die on its own.
@@ -2952,6 +3083,13 @@ run_check() {
   else
     report DRIFT "${FREON_SENSORS_KEYFILE} (rendered)"
   fi
+  if [[ ${PROFILE} == full ]]; then
+    if games_folder_current; then
+      report CURRENT "${GAMES_FOLDER_KEYFILE} (rendered)"
+    else
+      report DRIFT "${GAMES_FOLDER_KEYFILE} (rendered)"
+    fi
+  fi
   for package in "${RETIRED_GNOME_EXTENSION_PKGS[@]}"; do
     pacman -Q "${package}" &>/dev/null \
       && report DRIFT "${package}: installed (replaced by Dash to Dock and Freon)"
@@ -3037,6 +3175,10 @@ print_plan() {
   printf '      for this CPU/GPU -> %s; remove %s\n' "${FREON_SENSORS_KEYFILE}" "${RETIRED_GNOME_EXTENSION_PKGS[*]}"
   printf 'PLAN: merge required extensions into a saved user enabled-extensions list;\n'
   printf '      reset a saved wallpaper equal to the distro default\n'
+  if [[ ${PROFILE} == full ]]; then
+    printf 'PLAN: GNOME app-grid Games folder (every launcher in the Game category) -> %s;\n' "${GAMES_FOLDER_KEYFILE}"
+    printf '      dconf update; add it to a saved user folder list and drop retired game launchers from a saved dock\n'
+  fi
   printf 'PLAN: dconf update when the GDM font or GNOME defaults change\n'
   printf 'PLAN: native self-updating AI tools (%s):\n' \
     "$( (( NO_UPGRADE )) && echo 'missing only' || echo 'latest verified release')"
@@ -3331,6 +3473,10 @@ put_file -s "${FILES}/etc/dconf/db/local.d/10-shell-arch" /etc/dconf/db/local.d/
 (( PUT_FILE_CHANGED )) && DCONF_CHANGED=1
 apply_freon_sensors
 (( PUT_FILE_CHANGED )) && DCONF_CHANGED=1
+if [[ ${PROFILE} == full ]]; then
+  apply_games_folder
+  (( PUT_FILE_CHANGED )) && DCONF_CHANGED=1
+fi
 put_file -s "${FILES}/usr/local/share/icons/gnome-adwaita/index.theme" /usr/local/share/icons/gnome-adwaita/index.theme
 
 log "GDM"

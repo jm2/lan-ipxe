@@ -251,6 +251,18 @@ for software with its own COPR. Fedora and Arch also install Switchworks, the co
 the release's published SHA-256 and installed with `pacman -U`). Fedora and Arch also install Cockpit with file management, package
 updates, Podman containers, and storage/LVM support, and start `cockpit.socket` for access at `https://localhost:9090`.
 
+On GNOME (Fedora and Arch), full, games and games-repo runs add a **Games** folder to
+the app grid, the counterpart of the macOS Dock's Games folder. It is defined in
+`/etc/dconf/db/local.d/30-games-folder` and gathers every launcher in the freedesktop
+`Game` category, so game-packages games, Flatpaks, and games installed by hand from
+crossdock outside the script all land in it as they appear. Dash to Dock cannot pin a
+folder, so games are no longer pinned to the dock: the dock's Show Applications
+button leads to the folder. A folder list or dock you have saved is merged, not
+replaced. The folder is added to your list, and the game launchers earlier releases
+pinned are taken off your dock. The folder lives in the app grid rather than as a
+DING desktop folder because Nautilus, which opens desktop folders, no longer launches
+`.desktop` files.
+
 - `setup-arch-workstation.sh` — run as your normal user; sudo is used for the
   privileged steps (AUR builds refuse to run as root). Requires an existing GRUB
   installation, safely enables `[multilib]`, runs `pacman -Syu`, installs the official
@@ -461,6 +473,13 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   and Google Drive from WinGet, plus Apple Music and Apple TV from the Microsoft Store
   (WinGet's `msstore` source; per-user apps, installed for the account running apply).
   iTunes is no longer installed; an existing copy is left in place.
+  Full, games and games-repo runs keep a `Games` folder on your Desktop (the counterpart
+  of the macOS Dock's Games folder): copies of every Start menu shortcut under a
+  `Games (*)` folder (game-packages GooGet games, including crossdock games installed by
+  hand outside the script), plus full's WinGet games when installed (Extreme Tux Racer,
+  SuperTux, SuperTuxKart, Heaven Benchmark, GOG Galaxy). Each run adds missing copies,
+  refreshes changed ones and removes the copies it made once their game is gone (recorded
+  in a hidden `.lan-ipxe-games` file); anything you put in the folder is left alone.
 
 Missing package-set entries are installed and existing Arch/AUR packages are updated.
 Config files are rewritten only when their content, type, mode, or ownership differs;

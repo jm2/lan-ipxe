@@ -252,19 +252,56 @@ test_games_repo_apply() {
         ensure_multilib() { printf 'multilib %s\n' "$1" >>"${log}"; }
         ensure_game_packages_repo() { printf 'repo\n' >>"${log}"; GAME_PACKAGES_REACHABLE=0; }
         command() { [[ $1 == -v ]] && return 0; builtin command "$@"; }
+        setup_games_folder() { printf 'games-folder\n' >>"${log}"; }
         for fn in select_games install_games apply_games_firewall games_sudo_keepalive; do
           eval "${fn}() { fail '${script}: games-repo ran ${fn}'; }"
         done
         run_games_repo_apply >/dev/null
         case ${script}:${no_upgrade} in
-          setup-arch*:0) want='sudo -v|multilib 1|repo|sudo pacman -Syu --noconfirm|' ;;
-          setup-arch*:1) want='sudo -v|multilib 1|repo|' ;;
-          setup-fedora*) want='sudo -v|repo|' ;;
+          setup-arch*:0) want='sudo -v|multilib 1|repo|sudo pacman -Syu --noconfirm|games-folder|' ;;
+          setup-arch*:1) want='sudo -v|multilib 1|repo|games-folder|' ;;
+          setup-fedora*) want='sudo -v|repo|games-folder|' ;;
         esac
         [[ $(tr '\n' '|' <"${log}") == "${want}" ]] \
           || fail "${script} (--no-upgrade=${no_upgrade}): games-repo steps (got: $(tr '\n' '|' <"${log}"))"
       )
     done
+  done
+}
+
+# setup_games_folder (games and games-repo): installs the rendered keyfile and
+# compiles dconf, merges the user's saved lists over a session bus, and does
+# nothing without GNOME Shell.
+test_games_folder_setup() {
+  local script
+  for script in setup-arch-workstation.sh setup-fedora-workstation.sh; do
+    (
+      set --
+      rpm() { [[ $1 == -E ]] && printf '45\n'; }
+      # shellcheck disable=SC1090
+      source <(sed '/^#--- Preflight/,$d' "${REPO_ROOT}/${script}")
+      local log=${TEST_ROOT}/games-folder.log
+      : >"${log}"
+      log() { :; }
+      note() { :; }
+      sudo() { printf 'sudo %s\n' "$*" >>"${log}"; }
+      put_file() { printf 'put %s\n' "${*: -1}" >>"${log}"; PUT_FILE_CHANGED=1; }
+      # shellcheck disable=SC2034 # read by the sourced setup_games_folder
+      apply_games_folder() { printf 'folder\n' >>"${log}"; PUT_FILE_CHANGED=1; }
+      reconcile_user_games_folder() { printf 'user\n' >>"${log}"; }
+      session_bus_reachable() { return 0; }
+      command() { [[ $1 == -v && $2 == gnome-shell ]] && return 1; builtin command "$@"; }
+      setup_games_folder
+      [[ ! -s ${log} ]] || fail "${script}: Games folder set up without GNOME Shell"
+      command() { [[ $1 == -v ]] && return 0; builtin command "$@"; }
+      setup_games_folder
+      case ${script} in
+        setup-arch*) want='put /etc/dconf/profile/user|folder|sudo dconf update|user|' ;;
+        setup-fedora*) want='folder|sudo dconf update|sudo restorecon -R /etc/dconf|user|' ;;
+      esac
+      [[ $(tr '\n' '|' <"${log}") == "${want}" ]] \
+        || fail "${script}: Games folder steps (got: $(tr '\n' '|' <"${log}"))"
+    )
   done
 }
 
@@ -287,6 +324,7 @@ test_dry_runs() {
     grep -q 'game-packages repository: .*38C92DEA894BB3E48C50D6F0B48EFCBE62AAFAB2' <<<"${out}" \
       || fail "${script} games-repo dry run sets up the pinned game-packages repository"
     grep -q 'no games and no firewalld policy' <<<"${out}" || fail "${script} games-repo dry run installs no games"
+    grep -q 'GNOME app-grid Games folder' <<<"${out}" || fail "${script} games-repo dry run adds the Games folder"
     ! grep -Eqi 'GOG, Steam|/opt filesystem|stop unless|rustup|antigravity|clamav' <<<"${out}" \
       || fail "${script} games-repo dry run goes beyond the repository setup"
   done
@@ -302,5 +340,6 @@ test_arch_records
 test_fedora_records
 test_batches
 test_games_repo_apply
+test_games_folder_setup
 test_dry_runs
 printf 'games profile: PASS (awk: %s)\n' "$(awk -W version 2>/dev/null | head -n 1 || awk --version | head -n 1)"

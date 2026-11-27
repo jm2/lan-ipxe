@@ -202,6 +202,55 @@ test_dock_aliases() (
   [[ $(swap_dock_aliases "['chrome.desktop']") == "['chrome.desktop']" ]]
 )
 
+test_games_folder() (
+  load_helpers "$1"
+  local root=${TEST_ROOT}/games-folder-${1%.sh}
+  install -d "${root}"
+  [[ $(games_folder_children "['Utilities', 'YaST']") == "['Games', 'Utilities', 'YaST']" ]]
+  [[ $(games_folder_children "['Utilities', 'Games']") == "['Games', 'Utilities']" ]]
+  [[ $(games_folder_children "@as []") == "['Games']" ]]
+
+  # The keyfile keeps GNOME's own folders (vendor default) after Games and
+  # gathers launchers by category; without gsettings, upstream's default.
+  gsettings() { [[ $* == 'get org.gnome.desktop.app-folders folder-children' ]] && printf "['System', 'Utilities']\n"; }
+  render_games_folder >"${root}/keyfile"
+  grep -Fxq "folder-children=['Games', 'System', 'Utilities']" "${root}/keyfile"
+  grep -Fxq '[org/gnome/desktop/app-folders/folders/Games]' "${root}/keyfile"
+  grep -Fxq "categories=['Game']" "${root}/keyfile"
+  grep -Fxq 'translate=false' "${root}/keyfile"
+  gsettings() { return 1; }
+  [[ $(render_games_folder | grep '^folder-children=') == "folder-children=['Games', 'Utilities', 'YaST', 'Pardus']" ]]
+
+  # The user's saved lists: Games joins a saved folder list once; the
+  # previously pinned game launchers leave a saved dock; nothing happens
+  # before the folder is installed.
+  local -A saved=()
+  user_dconf_read() { printf '%s\n' "${saved[$1]:-}"; }
+  dconf() { [[ $1 == write ]] || return 1; saved[$2]=$3; }
+  note() { :; }
+  # shellcheck disable=SC2034 # read by the sourced reconcile_user_games_folder
+  GAMES_FOLDER_KEYFILE=${root}/missing
+  saved[/org/gnome/desktop/app-folders/folder-children]="['Utilities']"
+  saved[/org/gnome/shell/favorite-apps]="['chrome.desktop', 'bugdom.desktop', 'io.jor.mightymike.desktop', 'supertux2.desktop']"
+  reconcile_user_games_folder
+  [[ ${saved[/org/gnome/desktop/app-folders/folder-children]} == "['Utilities']" ]]
+  # shellcheck disable=SC2034 # read by the sourced reconcile_user_games_folder
+  GAMES_FOLDER_KEYFILE=${root}/keyfile
+  reconcile_user_games_folder
+  [[ ${saved[/org/gnome/desktop/app-folders/folder-children]} == "['Games', 'Utilities']" ]]
+  [[ ${saved[/org/gnome/shell/favorite-apps]} == "['chrome.desktop', 'supertux2.desktop']" ]]
+  reconcile_user_games_folder
+  [[ ${saved[/org/gnome/desktop/app-folders/folder-children]} == "['Games', 'Utilities']" ]]
+  # Unset keys stay unset (the system default applies).
+  saved=()
+  reconcile_user_games_folder
+  [[ -z ${saved[/org/gnome/desktop/app-folders/folder-children]:-} ]]
+  [[ -z ${saved[/org/gnome/shell/favorite-apps]:-} ]]
+  # Neither shipped dock pins a game any more.
+  ! grep -E "favorite-apps=.*(bugdom|mightymike|cromagrally)" \
+    "${REPO_ROOT}"/files/etc/dconf/db/local.d/10-shell-{fedora,arch}
+)
+
 test_strv_merge() (
   load_helpers "$1"
   [[ $(strv_merge "['a', 'old@x', 'b']" "old@x,gone@y" "['c']" a c d) == "['a', 'b', 'd']" ]]
@@ -225,6 +274,8 @@ for script in setup-arch-workstation.sh setup-fedora-workstation.sh; do
   printf 'PASS %s dock launcher aliases\n' "${script}"
   test_strv_merge "${script}"
   printf 'PASS %s enabled-extensions merge\n' "${script}"
+  test_games_folder "${script}"
+  printf 'PASS %s GNOME app-grid Games folder\n' "${script}"
 done
 test_pacman_statuses
 printf 'PASS pacman missing-package status handling\n'

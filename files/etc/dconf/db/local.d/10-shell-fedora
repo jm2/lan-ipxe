@@ -1,7 +1,7 @@
 # Installed as /etc/dconf/db/local.d/10-shell by setup-fedora-workstation.sh.
-# Dock entries whose .desktop file is absent are skipped: games on core, and
-# whichever of a game's package (LAN) or Flatpak (off-LAN) launcher is not
-# installed.
+# Dock entries whose .desktop file is absent are skipped. Games are not
+# pinned: the full, games and games-repo profiles add an app-grid Games
+# folder (30-games-folder) that collects every launcher in the Game category.
 [org/gnome/shell]
 enabled-extensions=['apps-menu@gnome-shell-extensions.gcampax.github.com', 'places-menu@gnome-shell-extensions.gcampax.github.com', 'appindicatorsupport@rgcjonas.gmail.com', 'dash-to-dock@micxgx.gmail.com', 'freon@UshakovVasilii_Github.yahoo.com', 'system-monitor@gnome-shell-extensions.gcampax.github.com', 'ding@rastersoft.com']
-favorite-apps=['google-chrome.desktop', 'chromium-browser.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.Ptyxis.desktop', 'org.gnome.TextEditor.desktop', 'com.microsoft.VSCode.desktop', 'antigravity.desktop', 'io.github.jm2.tributary.desktop', 'io.github.jm2.Balun.desktop', 'io.github.jm2.Transom.desktop', 'org.gnome.Software.desktop', 'bugdom.desktop', 'io.jor.bugdom.desktop', 'io.jor.cromagrally.desktop', 'mightymike.desktop', 'io.jor.mightymike.desktop']
+favorite-apps=['google-chrome.desktop', 'chromium-browser.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.Ptyxis.desktop', 'org.gnome.TextEditor.desktop', 'com.microsoft.VSCode.desktop', 'antigravity.desktop', 'io.github.jm2.tributary.desktop', 'io.github.jm2.Balun.desktop', 'io.github.jm2.Transom.desktop', 'org.gnome.Software.desktop']

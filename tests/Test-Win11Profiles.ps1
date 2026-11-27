@@ -20,7 +20,8 @@ $tokens.Count | Out-Null
 
 foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetFullStorePackages', 'WingetStorePackageNames', 'WingetLegacyPackages', 'WingetPresenceOnlyPackages',
                               'RustComponents', 'ReleaseApps', 'ReleaseAppInstallerArgs', 'PowerShellRepo', 'PowerShellMetadataUrl', 'PowerShellMsiProperties', 'PowerShellMsiLog', 'MsiOkCodes', 'MsiRebootCodes', 'MsiBusyCode', 'MsiBusyAttempts', 'MsiBusyRetrySeconds', 'WingetOkCodes', 'WingetNoChangeCodes', 'WingetRebootCodes', 'WingetDeferredCodes', 'WingetRemoveOkCodes', 'WingetUserScopeElevatedCode', 'WingetSelfUpdatingCode', 'WingetLaunchAttempts', 'WingetLaunchRetrySeconds', 'WingetInstallTechMismatchCode', 'WingetUninstallWaitSeconds', 'WingetUninstallPollSeconds', 'NativeCliTools', 'WingetPackageArgs', 'GooGetGitHubRepo', 'GooGetPatchedRepo', 'GooGetPatchedCommit', 'GooGetPatchedPulls', 'GooGetRepoName', 'GooGetRepoUrl', 'GooGetRetiredRepos', 'GooGetAclTrustedSids', 'GooGetPackages', 'GooGetFullPackages', 'GooGetProbeTimeoutSeconds',
-                              'GamesExcludePattern', 'GamesReservePercent', 'GamesSizeFactor', 'GamesBootstrapWingetPackages', 'VentoyRepo', 'VentoyMarkerName')) {
+                              'GamesExcludePattern', 'GamesReservePercent', 'GamesSizeFactor', 'GamesBootstrapWingetPackages', 'VentoyRepo', 'VentoyMarkerName',
+                              'DesktopGamesFolderName', 'DesktopGamesMarkerName', 'DesktopGamesMenuPattern', 'DesktopGamesExcludePatterns', 'DesktopGamesWingetShortcuts')) {
     $assignmentAst = $ast.Find({
         param($node)
         $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
@@ -35,7 +36,8 @@ foreach ($functionName in @('Write-Note', 'Invoke-Winget', 'Invoke-WingetUninsta
                             'Get-NativeProcessorArchitecture', 'Get-WindowsArchitectureName', 'Get-VerifiedReleaseAsset', 'Get-ReleaseAppRelease', 'Invoke-ReleaseAppStep', 'Get-VentoyRoot', 'Get-VentoyInstall', 'Restore-InterruptedTreeSwap', 'Switch-StagedTree', 'Get-VentoyShortcutTarget', 'Select-VentoyAsset', 'Get-VentoyRelease', 'Find-VentoyAppDirectory', 'Get-VentoyNativeExeName', 'Install-Ventoy', 'Invoke-VentoyStep', 'Get-PowerShellLtsVersion', 'Get-PowerShellLtsRelease', 'Invoke-Msiexec',
                             'Invoke-PowerShellMsiSwitch', 'Select-GooGetSource', 'Test-GooGetPatchPending', 'Get-GooGetConfText', 'Get-GooGetRepoFileText', 'Get-GooGetRetiredRepoFile', 'Read-TextOrEmpty', 'Test-GooGetWriteRight',
                             'Get-GooGetInstalledName', 'Get-GooGetInstalledPackage', 'Invoke-GooGetPackageSet',
-                            'Get-GameSourceRank', 'Get-GameKey', 'Select-GamePackage', 'Get-GooGetArchPreference', 'Compare-GooGetVersion', 'Select-GooGetIndexEntry')) {
+                            'Get-GameSourceRank', 'Get-GameKey', 'Select-GamePackage', 'Get-GooGetArchPreference', 'Compare-GooGetVersion', 'Select-GooGetIndexEntry',
+                            'Test-DesktopGameShortcutName', 'Get-DesktopGameShortcut', 'Read-DesktopGamesMarker', 'Test-SameFileContent', 'Get-DesktopGamesPlan', 'Write-DesktopGamesMarker', 'Invoke-DesktopGamesFolder')) {
     $functionAst = $ast.Find({
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $functionName
@@ -141,6 +143,7 @@ try {
         Assert-True ($text -match 'removes repos\\linux-packages\.repo while it still points at http://192\.168\.1\.11:8080/goo/linux-packages') "$profileName dry run lists the retired repo removal"
         Assert-True ($text.IndexOf('SST.opencode') -gt $text.IndexOf('Legacy packages removed') -and $text -match 'SST\.OpenCodeDesktop') "$profileName dry run purges, not installs, OpenCode"
         Assert-True (($text -match 'Valve\.Steam') -eq ($profileName -eq 'full')) "Steam listed only for full ($profileName)"
+        Assert-True (($text -match 'Desktop Games folder') -eq ($profileName -eq 'full')) "Desktop Games folder planned only for full ($profileName)"
         $gooPlan = @($output | Select-Object -Skip ([Array]::FindIndex([string[]]$output, [Predicate[string]]{ param($l) $l -match 'game-packages GooGet packages' }) + 1) |
             ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^[a-z0-9-]+$' })
         $expectedGoo = if ($profileName -eq 'full') { 'crossdock,carryout,bugdom,bugdom2,cro-mag-rally-net,mightymike,nanosaur,nanosaur2,ottomatic' } else { 'crossdock,carryout' }
@@ -157,6 +160,7 @@ try {
     Assert-True ($text -match 'GoLang\.Go, Git\.Git') 'games dry run installs what the GooGet build needs'
     Assert-True ($text -match 'repo game-packages -> http://192\.168\.1\.11:8080/goo/game-packages') 'games dry run lists the GooGet repo'
     Assert-True ($text -match 'GOG, Steam, other sources' -and $text -match '20% of the Program Files drive') 'games dry run states source order and reserve'
+    Assert-True ($text -match 'Desktop Games folder' -and $text -match '"Games \(\*\)" folders') 'games dry run plans the Desktop Games folder'
     foreach ($id in @('Rustlang.Rustup', 'Valve.Steam', 'Google.Chrome', 'Hyper-V', 'OpenSSH')) {
         Assert-True ($text.IndexOf($id) -lt 0) "games dry run leaves out $id"
     }
@@ -171,6 +175,7 @@ try {
     Assert-True ($text -match 'GoLang\.Go, Git\.Git') 'games-repo dry run installs what the GooGet build needs'
     Assert-True ($text -match 'repo game-packages -> http://192\.168\.1\.11:8080/goo/game-packages') 'games-repo dry run lists the GooGet repo'
     Assert-True ($text -match 'No games') 'games-repo dry run installs no games'
+    Assert-True ($text -match 'Desktop Games folder') 'games-repo dry run plans the Desktop Games folder'
     foreach ($id in @('GOG, Steam', 'Program Files drive', 'Rustlang.Rustup', 'Valve.Steam', 'Google.Chrome', 'Hyper-V', 'OpenSSH')) {
         Assert-True ($text.IndexOf($id) -lt 0) "games-repo dry run leaves out $id"
     }
@@ -1064,5 +1069,105 @@ $script:ProbeOk = @("$GooGetRepoUrl/index")
 Assert-True (Test-GooGetRepoReachable) 'an uncompressed index counts as reachable'
 Remove-Item -Path function:Invoke-WebRequest, function:Test-GooGetRepoReachable -ErrorAction SilentlyContinue
 Write-Output 'GAME-PACKAGES GOOGET PASSED'
+
+# --- Desktop Games folder ------------------------------------------------------
+Assert-True (Test-DesktopGameShortcutName -Name 'Bugdom') 'any shortcut in a Games (*) folder counts'
+Assert-True (-not (Test-DesktopGameShortcutName -Name 'Uninstall Bugdom')) 'uninstall shortcuts never count'
+$superTux = $DesktopGamesWingetShortcuts['SuperTux.SuperTux']
+Assert-True (Test-DesktopGameShortcutName -Name 'SuperTux' -Include $superTux.Include -Exclude $superTux.Exclude) 'SuperTux matches its pattern'
+Assert-True (Test-DesktopGameShortcutName -Name 'SuperTux 0.6.3' -Include $superTux.Include -Exclude $superTux.Exclude) 'a versioned SuperTux matches'
+Assert-True (-not (Test-DesktopGameShortcutName -Name 'SuperTuxKart' -Include $superTux.Include -Exclude $superTux.Exclude)) 'SuperTuxKart is not SuperTux'
+Assert-True (-not (Test-DesktopGameShortcutName -Name 'GOG GALAXY' -Include $superTux.Include)) 'unrelated names do not match'
+foreach ($id in @($DesktopGamesWingetShortcuts.Keys)) {
+    Assert-True ($WingetFullPackages -contains $id) "$id (Games folder pattern) is a full-profile WinGet package"
+}
+Assert-True ($DesktopGamesWingetShortcuts.Keys -notcontains 'Valve.Steam') 'Steam is a store, not a game, and stays out of the Games folder'
+
+$gamesRoot = Join-Path ([IO.Path]::GetTempPath()) ("desktop-games-test-{0}" -f [Guid]::NewGuid().ToString('N'))
+try {
+    $common = Join-Path $gamesRoot 'common'
+    $user = Join-Path $gamesRoot 'user'
+    $desk = Join-Path $gamesRoot 'Desktop\Games'
+    function Write-TestShortcut {
+        param([string]$Path, [string]$Content = 'lnk')
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) | Out-Null
+        [IO.File]::WriteAllText($Path, $Content)
+    }
+    Write-TestShortcut (Join-Path $common 'Games (linux-packages)\Bugdom.lnk') 'bugdom'
+    Write-TestShortcut (Join-Path $common 'Games (linux-packages)\Nanosaur\Nanosaur.lnk') 'nanosaur'
+    Write-TestShortcut (Join-Path $common 'Games (linux-packages)\Uninstall Bugdom.lnk')
+    Write-TestShortcut (Join-Path $common 'Games (linux-packages)\notes.txt')
+    Write-TestShortcut (Join-Path $common 'Accessories\Notepad.lnk')
+    Write-TestShortcut (Join-Path $common 'SuperTuxKart 1.4\SuperTuxKart.lnk') 'stk'
+    Write-TestShortcut (Join-Path $common 'SuperTux\SuperTux.lnk') 'st'
+    Write-TestShortcut (Join-Path $common 'SuperTux\Uninstall SuperTux.lnk')
+    Write-TestShortcut (Join-Path $user 'GOG.com\GOG GALAXY.lnk') 'gog'
+    Write-TestShortcut (Join-Path $user 'Games (crossdock)\Bugdom.lnk') 'user bugdom'
+    Write-TestShortcut (Join-Path $user 'Games (crossdock)\Mighty Mike.lnk') 'mike'
+
+    $desired = @(Get-DesktopGameShortcut -ProgramRoots @($common, $user, (Join-Path $gamesRoot 'missing')))
+    $names = @($desired | ForEach-Object { $_.Name })
+    Assert-True (($names -join ',') -eq 'Bugdom.lnk,Nanosaur.lnk,Mighty Mike.lnk,SuperTux.lnk,SuperTuxKart.lnk,GOG GALAXY.lnk') "desired Games folder shortcuts (got $($names -join ','))"
+    Assert-True ($desired[0].Source -eq (Join-Path $common 'Games (linux-packages)\Bugdom.lnk')) 'all-users shortcuts win a name clash'
+    Assert-True (@(Get-DesktopGameShortcut -ProgramRoots @()).Count -eq 0) 'no roots, no shortcuts'
+
+    # First run: folder created, everything added, marker hidden in the folder.
+    $result = Invoke-DesktopGamesFolder -Folder $desk -Desired $desired
+    Assert-True ($result.Added -eq 6 -and $result.Updated -eq 0 -and $result.Removed -eq 0 -and $result.Failed.Count -eq 0) 'first run adds every shortcut'
+    Assert-True ([IO.File]::ReadAllText((Join-Path $desk 'Nanosaur.lnk')) -eq 'nanosaur') 'shortcuts are byte copies'
+    Assert-True (@(Read-DesktopGamesMarker -Folder $desk).Count -eq 6) 'the marker records every copy'
+    Assert-True (@(Get-ChildItem -LiteralPath $desk -Force | Where-Object { $_.Name -eq $DesktopGamesMarkerName }).Count -eq 1) 'the marker lives in the folder'
+
+    # A second run changes nothing.
+    $result = Invoke-DesktopGamesFolder -Folder $desk -Desired $desired
+    Assert-True ($result.Added + $result.Updated + $result.Removed -eq 0) 'a converged folder is left alone'
+
+    # User items are never touched; changed sources refresh; gone games go.
+    Write-TestShortcut (Join-Path $desk 'My Game.lnk') 'mine'
+    Write-TestShortcut (Join-Path $desk 'Notes.txt') 'notes'
+    Write-TestShortcut (Join-Path $common 'SuperTux\SuperTux.lnk') 'st v2'
+    Remove-Item -LiteralPath (Join-Path $common 'Games (linux-packages)\Nanosaur') -Recurse -Force
+    Write-TestShortcut (Join-Path $user 'Games (crossdock)\Otto Matic.lnk') 'otto'
+    Remove-Item -LiteralPath (Join-Path $desk 'GOG GALAXY.lnk')
+    $desired = @(Get-DesktopGameShortcut -ProgramRoots @($common, $user))
+    $plan = Get-DesktopGamesPlan -Desired $desired -Folder $desk -Managed (Read-DesktopGamesMarker -Folder $desk)
+    Assert-True ((@($plan.Add | ForEach-Object { $_.Name }) -join ',') -eq 'Otto Matic.lnk,GOG GALAXY.lnk') "plan adds new and missing copies (got $(@($plan.Add | ForEach-Object { $_.Name }) -join ','))"
+    Assert-True ((@($plan.Update | ForEach-Object { $_.Name }) -join ',') -eq 'SuperTux.lnk') 'plan refreshes a changed shortcut'
+    Assert-True (($plan.Remove -join ',') -eq 'Nanosaur.lnk') 'plan removes the copy of an uninstalled game'
+    $result = Invoke-DesktopGamesFolder -Folder $desk -Desired $desired
+    Assert-True ($result.Added -eq 2 -and $result.Updated -eq 1 -and $result.Removed -eq 1) "reconcile counts (got $($result.Added)/$($result.Updated)/$($result.Removed))"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $desk 'Nanosaur.lnk'))) 'stale copy removed'
+    Assert-True ([IO.File]::ReadAllText((Join-Path $desk 'SuperTux.lnk')) -eq 'st v2') 'changed shortcut refreshed'
+    Assert-True ([IO.File]::ReadAllText((Join-Path $desk 'My Game.lnk')) -eq 'mine' -and (Test-Path -LiteralPath (Join-Path $desk 'Notes.txt'))) 'user items are kept'
+    Assert-True (@(Read-DesktopGamesMarker -Folder $desk) -notcontains 'My Game.lnk') 'user items are never recorded as ours'
+
+    # A user's own different item under a game's name is kept, never replaced
+    # or removed; an identical one is adopted.
+    Write-TestShortcut (Join-Path $desk 'Mighty Mike.lnk') 'my own mike'
+    Write-DesktopGamesMarker -Folder $desk -Names @(Read-DesktopGamesMarker -Folder $desk | Where-Object { $_ -ne 'Mighty Mike.lnk' })
+    $result = Invoke-DesktopGamesFolder -Folder $desk -Desired $desired
+    Assert-True (($result.Kept -join ',') -eq 'Mighty Mike.lnk' -and $result.Updated -eq 0) 'a differing user item of the same name is kept'
+    Assert-True ([IO.File]::ReadAllText((Join-Path $desk 'Mighty Mike.lnk')) -eq 'my own mike') 'the user item is unchanged'
+    Remove-Item -LiteralPath (Join-Path $user 'Games (crossdock)\Mighty Mike.lnk')
+    $result = Invoke-DesktopGamesFolder -Folder $desk -Desired @(Get-DesktopGameShortcut -ProgramRoots @($common, $user))
+    Assert-True ($result.Removed -eq 0 -and (Test-Path -LiteralPath (Join-Path $desk 'Mighty Mike.lnk'))) 'a user item is not removed when its game goes'
+    Write-TestShortcut (Join-Path $user 'Games (crossdock)\Mighty Mike.lnk') 'my own mike'
+    $result = Invoke-DesktopGamesFolder -Folder $desk -Desired @(Get-DesktopGameShortcut -ProgramRoots @($common, $user))
+    Assert-True (@(Read-DesktopGamesMarker -Folder $desk) -contains 'Mighty Mike.lnk') 'an identical user copy is adopted'
+
+    # Nothing installed: the folder is still created, empty.
+    $empty = Join-Path $gamesRoot 'Desktop2\Games'
+    $result = Invoke-DesktopGamesFolder -Folder $empty -Desired @()
+    Assert-True ((Test-Path -LiteralPath $empty -PathType Container) -and $result.Added -eq 0) 'the folder is created even with no games'
+}
+finally {
+    Remove-Item -LiteralPath $gamesRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+$scriptText = Get-Content -Raw -LiteralPath $ScriptPath
+Assert-True ($scriptText -match '(?s)\$googetResult = Invoke-GooGetStep.*Invoke-GooGetPackageSet -Packages \$GooGetPackages.*\{ Invoke-DesktopGamesStep \}') 'the full profile maintains the Games folder after the game-packages step'
+Assert-True ($scriptText -match '(?s)\$gamesResult = Invoke-GameProfile -NoUpgrade:\$NoUpgrade\s+\$desktopGamesResult = Invoke-DesktopGamesStep') 'the games profile maintains the Games folder after installing games'
+Assert-True ($scriptText -match '(?s)\$repoSetup = Invoke-GameRepoSetup -NoUpgrade:\$NoUpgrade\s+\$desktopGamesResult = Invoke-DesktopGamesStep') 'the games-repo profile maintains the Games folder'
+Assert-True (([regex]::Matches($scriptText, 'Invoke-DesktopGamesCheck\b').Count) -eq 4) 'full, games and games-repo -Check report the Games folder'
+Write-Output 'DESKTOP GAMES FOLDER PASSED'
 
 Write-Output 'ALL WIN11 PROFILE ASSERTIONS PASSED'
