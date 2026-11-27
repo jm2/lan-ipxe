@@ -83,8 +83,8 @@
 #  11. firewalld: a custom workstation default zone (SSH and Plex Remote
 #      Access on 32400/tcp broadly reachable because WAN port forwarding is in
 #      use; everything else rejected) plus a
-#      source-bound workstation-lan zone for the LAN 192.168.0.0/23 and the
-#      SD-WAN 192.168.2.0/23 with the profile's LAN services (full adds
+#      source-bound workstation-lan zone for the LAN 192.168.0.0/23 (plus its
+#      IPv6 ULA prefix and link-local) and the SD-WAN 192.168.2.0/23 with the profile's LAN services (full adds
 #      Cro-Mag Rally's; the games profile opens every game's through its
 #      own workstation-lan-games policy)
 #  12. auditd with curated high-signal rules (identity/auth files, sudoers,
@@ -699,18 +699,27 @@ ensure_started_unit() {
   systemctl is-active --quiet "${unit}" || die "${unit} did not become active"
 }
 
+# Sources the workstation-lan zone trusts: the LAN and SD-WAN IPv4 ranges,
+# the LAN's on-link IPv6 ULA prefix (the router's RA, which mDNS advertises
+# hosts under) and IPv6 link-local (HDHomeRun's IPv6 discovery replies come
+# from it). Without the IPv6 sources, a LAN peer connecting over IPv6 falls
+# into the default workstation zone and every LAN service rejects it. ULA
+# prefixes routed through other routers on the segment are not trusted.
+LAN_SOURCES=(192.168.0.0/23 192.168.2.0/23 fd58:f926:7f80:d778::/64 fe80::/10)
+
 # render_lan_zone <service>...: print the source-bound workstation-lan zone.
 # The service list is decided by select_profile, so profile-gated ports never
 # open for profiles that do not install the service behind them. Apply
 # installs this exact rendering; --check compares against it.
 render_lan_zone() {
-  local service
+  local service source
   printf '<?xml version="1.0" encoding="utf-8"?>\n'
   printf '<zone>\n'
   printf '  <short>Workstation LAN</short>\n'
-  printf '  <description>Trusted LAN (192.168.0.0/23) and SD-WAN (192.168.2.0/23) sources: services that must never be reachable from the Internet. firewalld classifies each packet into exactly one zone, so SSH is listed here too: LAN peers never fall through to the default workstation zone, which keeps SSH reachable for WAN port forwarding.</description>\n'
-  printf '  <source address="192.168.0.0/23"/>\n'
-  printf '  <source address="192.168.2.0/23"/>\n'
+  printf '  <description>Trusted LAN (192.168.0.0/23, IPv6 fd58:f926:7f80:d778::/64 and link-local) and SD-WAN (192.168.2.0/23) sources: services that must never be reachable from the Internet. firewalld classifies each packet into exactly one zone, so SSH is listed here too: LAN peers never fall through to the default workstation zone, which keeps SSH reachable for WAN port forwarding.</description>\n'
+  for source in "${LAN_SOURCES[@]}"; do
+    printf '  <source address="%s"/>\n' "${source}"
+  done
   for service in "$@"; do
     printf '  <service name="%s"/>\n' "${service}"
   done
@@ -3137,8 +3146,11 @@ select_profile() {
   # in the core package set. LanCache, NFS (v4 plus the v3 mountd/rpcbind
   # surface) and Samba are not installed by this script but are run by hand
   # on some of these hosts, so their ports open in every profile.
+  # hdhomerun-discovery and jellyfin-discovery admit the replies to
+  # Balun's and Tributary's (core) broadcast discovery, which connection
+  # tracking does not match.
   FIREWALL_LAN_SERVICES=(ssh cockpit rdp ipp-client mdns iperf3
-    lancache nfs mountd rpc-bind samba)
+    hdhomerun-discovery jellyfin-discovery lancache nfs mountd rpc-bind samba)
   # Config payloads as source under files/|destination (no owner/mode fields:
   # --check only compares content). The *rendered* security configs
   # (/etc/clamd.d/scan.conf, /etc/firewalld/zones/workstation-lan.xml, and
@@ -3174,6 +3186,8 @@ select_profile() {
     "etc/firewalld/services/iperf3.xml|/etc/firewalld/services/iperf3.xml"
     "etc/firewalld/services/lancache.xml|/etc/firewalld/services/lancache.xml"
     "etc/firewalld/services/plex-remote.xml|/etc/firewalld/services/plex-remote.xml"
+    "etc/firewalld/services/hdhomerun-discovery.xml|/etc/firewalld/services/hdhomerun-discovery.xml"
+    "etc/firewalld/services/jellyfin-discovery.xml|/etc/firewalld/services/jellyfin-discovery.xml"
     "etc/systemd/system/clamav-clamonacc.service.d/50-fedora-workstation.conf|/etc/systemd/system/clamav-clamonacc.service.d/50-fedora-workstation.conf"
     "etc/systemd/system/clamav-media-scan.service|/etc/systemd/system/clamav-media-scan.service"
     "usr/local/libexec/clamav-media-scan|/usr/local/libexec/clamav-media-scan"
@@ -3262,7 +3276,7 @@ print_plan() {
   printf 'PLAN: ClamAV: freshclam daemon + one-time DB bootstrap, clamd@scan,\n'
   printf '      notify-only on-access for ~/Downloads, /run/media mount watcher (read-only scans)\n'
   printf 'PLAN: firewalld workstation default zone (ssh, plex-remote, dhcpv6-client, mdns; reject\n'
-  printf '      otherwise) + workstation-lan source zone (192.168.0.0/23, 192.168.2.0/23):\n'
+  printf '      otherwise) + workstation-lan source zone (%s):\n' "${LAN_SOURCES[*]}"
   printf '  %s\n' "${FIREWALL_LAN_SERVICES[*]}"
   printf 'PLAN: game firewalld service definitions (opened only where the zone or the games policy names them):\n'
   printf '  %s\n' "$(game_firewall_services | paste -sd ' ')"
@@ -3993,6 +4007,10 @@ put_file -s "${FILES}/etc/firewalld/services/lancache.xml" /etc/firewalld/servic
 (( PUT_FILE_CHANGED )) && FIREWALL_CHANGED=1
 put_file -s "${FILES}/etc/firewalld/services/plex-remote.xml" /etc/firewalld/services/plex-remote.xml
 (( PUT_FILE_CHANGED )) && FIREWALL_CHANGED=1
+put_file -s "${FILES}/etc/firewalld/services/hdhomerun-discovery.xml" /etc/firewalld/services/hdhomerun-discovery.xml
+(( PUT_FILE_CHANGED )) && FIREWALL_CHANGED=1
+put_file -s "${FILES}/etc/firewalld/services/jellyfin-discovery.xml" /etc/firewalld/services/jellyfin-discovery.xml
+(( PUT_FILE_CHANGED )) && FIREWALL_CHANGED=1
 install_game_firewall_services
 enable_unit firewalld.service
 systemctl is-active --quiet firewalld.service || sudo systemctl start firewalld.service
@@ -4054,9 +4072,9 @@ fi
 # Fail closed: verify the effective policy.
 [[ $(firewall-cmd --get-default-zone 2>/dev/null) == workstation ]] \
   || die "the default firewalld zone is not workstation"
-for lan_source in 192.168.0.0/23 192.168.2.0/23; do
+for lan_source in "${LAN_SOURCES[@]}"; do
   firewall-cmd --zone=workstation-lan --list-sources 2>/dev/null \
-    | grep -qw "${lan_source}" \
+    | tr ' ' '\n' | grep -Fxq -- "${lan_source}" \
     || die "workstation-lan does not include ${lan_source}"
 done
 while read -r zone interface; do

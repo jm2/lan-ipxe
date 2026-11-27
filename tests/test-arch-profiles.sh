@@ -410,6 +410,19 @@ test_security_renders() (
   done
   grep -Fq '<service name="cockpit"/>' <<<"${out_core}" \
     || fail 'core LAN zone omits cockpit'
+  # Balun (core) discovers tuners by broadcast; their replies need this.
+  grep -Fq '<service name="hdhomerun-discovery"/>' <<<"${out_core}" \
+    || fail 'core LAN zone omits HDHomeRun discovery replies (Balun)'
+  grep -Fq '<service name="jellyfin-discovery"/>' <<<"${out_core}" \
+    || fail 'core LAN zone omits Jellyfin discovery replies (Tributary)'
+  # LAN peers reaching a host over IPv6 must land in this zone too, or every
+  # LAN service rejects them from the default zone.
+  for item in fd58:f926:7f80:d778::/64 fe80::/10; do
+    grep -Fq "<source address=\"${item}\"/>" <<<"${out_core}" \
+      || fail "LAN zone omits the IPv6 source ${item}"
+  done
+  ! grep -Fq 'hdhomerun' "${wan_zone}" \
+    || fail 'default zone admits HDHomeRun discovery replies from the WAN'
   grep -Fq '<service name="rdp"/>' <<<"${out_core}" \
     || fail 'core LAN zone omits rdp (GNOME Remote Desktop)'
   grep -Fq '<service name="ipp-client"/>' <<<"${out_core}" \

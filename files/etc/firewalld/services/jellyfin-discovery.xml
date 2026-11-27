@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Jellyfin discovery replies</short>
+  <description>Replies to Tributary's Jellyfin discovery. The request
+("Who is JellyfinServer?") goes to the IPv4 broadcast address on 7359/udp, and
+each server answers from its own address and port 7359. Connection tracking
+does not match that reply to the broadcast request, so it arrives as new
+traffic: this accepts UDP from source port 7359.</description>
+  <source-port protocol="udp" port="7359"/>
+</service>

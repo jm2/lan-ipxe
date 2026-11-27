@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>HDHomeRun discovery replies</short>
+  <description>Replies to Balun's HDHomeRun discovery. The request goes to the
+IPv4 broadcast address (or the IPv6 link-local multicast group) on 65001/udp,
+and each tuner answers from its own address and port 65001. Connection
+tracking does not match that reply to the broadcast request, so it arrives as
+new traffic: this accepts UDP from source port 65001. Unicast discovery of a
+known tuner needs no rule.</description>
+  <source-port protocol="udp" port="65001"/>
+</service>

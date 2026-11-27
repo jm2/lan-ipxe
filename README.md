@@ -354,7 +354,8 @@ updates, Podman containers, and storage/LVM support, and start `cockpit.socket` 
   FedoraWorkstation default: a custom `workstation` zone keeps SSH and Plex Remote
   Access (32400/tcp only) broadly reachable (WAN port forwarding is in use) and
   rejects everything else, while the
-  source-bound `workstation-lan` zone (192.168.0.0/23 + SD-WAN 192.168.2.0/23) opens
+  source-bound `workstation-lan` zone (192.168.0.0/23 with its IPv6 ULA prefix and
+  link-local, + SD-WAN 192.168.2.0/23) opens
   SSH (firewalld puts each packet in exactly one zone, so LAN peers never fall
   through to the default zone) plus the LAN services — Cockpit, GNOME Remote
   Desktop, mDNS/printer discovery, iperf3, and the hand-run LanCache (HTTP/HTTPS/DNS),
