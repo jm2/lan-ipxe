@@ -2505,7 +2505,7 @@ ding_installed_version() {
 install_ding_extension() {
   local installed major info version url stage
   installed=$(ding_installed_version)
-  if [[ -n ${installed} ]] && (( NO_UPGRADE )); then
+  if [[ -n ${installed} && -x ${DING_DIR}/app/ding.js ]] && (( NO_UPGRADE )); then
     note "${DING_UUID} ${installed}: installed (--no-upgrade)"
     return 0
   fi
@@ -2518,7 +2518,7 @@ install_ding_extension() {
   url=$(jq -r '.download_url // empty' <<<"${info}") || url=
   [[ ${version} =~ ^[0-9]+$ && ${url} == /download-extension/* ]] \
     || die "unexpected extensions.gnome.org metadata for ${DING_UUID}"
-  if [[ ${installed} == "${version}" ]]; then
+  if [[ ${installed} == "${version}" && -x ${DING_DIR}/app/ding.js ]]; then
     note "${DING_UUID} ${version}: up to date"
     return 0
   fi
@@ -2527,8 +2527,20 @@ install_ding_extension() {
   install -d "${stage}/tree"
   fetch_release_document "${EGO_URL}${url}" >"${stage}/ding.zip" \
     || die "could not download ${DING_UUID} ${version}"
-  python3 -I -m zipfile -e "${stage}/ding.zip" "${stage}/tree" \
+  # python's zipfile drops the archive's Unix modes; DING spawns app/ding.js
+  # (and app/createThumbnail.js) directly, so their execute bits must survive.
+  python3 -I -c '
+import os, sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as z:
+    for info in z.infolist():
+        path = z.extract(info, sys.argv[2])
+        mode = (info.external_attr >> 16) & 0o777
+        if info.create_system == 3 and mode and not info.is_dir():
+            os.chmod(path, mode)
+' "${stage}/ding.zip" "${stage}/tree" \
     || die "could not unpack ${DING_UUID} ${version}"
+  [[ -x ${stage}/tree/app/ding.js ]] \
+    || die "${DING_UUID} ${version}: app/ding.js is not executable after unpacking"
   [[ $(jq -r '.uuid // empty' "${stage}/tree/metadata.json" 2>/dev/null) == "${DING_UUID}" ]] \
     || die "the downloaded archive is not ${DING_UUID}"
   glib-compile-schemas --strict "${stage}/tree/schemas" \
