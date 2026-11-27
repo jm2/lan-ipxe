@@ -19,7 +19,7 @@ if ($parseErrors.Count) {
 $tokens.Count | Out-Null
 
 foreach ($assignmentName in @('WingetPackages', 'WingetFullPackages', 'WingetFullStorePackages', 'WingetStorePackageNames', 'WingetLegacyPackages', 'WingetPresenceOnlyPackages',
-                              'RustComponents', 'ReleaseApps', 'ReleaseAppInstallerArgs', 'PowerShellRepo', 'PowerShellMetadataUrl', 'PowerShellMsiProperties', 'PowerShellMsiLog', 'MsiOkCodes', 'MsiRebootCodes', 'MsiBusyCode', 'MsiBusyAttempts', 'MsiBusyRetrySeconds', 'WingetOkCodes', 'WingetRebootCodes', 'WingetDeferredCodes', 'WingetRemoveOkCodes', 'WingetUserScopeElevatedCode', 'WingetSelfUpdatingCode', 'WingetLaunchAttempts', 'WingetLaunchRetrySeconds', 'WingetInstallTechMismatchCode', 'WingetUninstallWaitSeconds', 'WingetUninstallPollSeconds', 'NativeCliTools', 'WingetPackageArgs', 'GooGetGitHubRepo', 'GooGetPatchedRepo', 'GooGetPatchedCommit', 'GooGetPatchedPulls', 'GooGetRepoName', 'GooGetRepoUrl', 'GooGetRetiredRepos', 'GooGetAclTrustedSids', 'GooGetPackages', 'GooGetFullPackages', 'GooGetProbeTimeoutSeconds',
+                              'RustComponents', 'ReleaseApps', 'ReleaseAppInstallerArgs', 'PowerShellRepo', 'PowerShellMetadataUrl', 'PowerShellMsiProperties', 'PowerShellMsiLog', 'MsiOkCodes', 'MsiRebootCodes', 'MsiBusyCode', 'MsiBusyAttempts', 'MsiBusyRetrySeconds', 'WingetOkCodes', 'WingetNoChangeCodes', 'WingetRebootCodes', 'WingetDeferredCodes', 'WingetRemoveOkCodes', 'WingetUserScopeElevatedCode', 'WingetSelfUpdatingCode', 'WingetLaunchAttempts', 'WingetLaunchRetrySeconds', 'WingetInstallTechMismatchCode', 'WingetUninstallWaitSeconds', 'WingetUninstallPollSeconds', 'NativeCliTools', 'WingetPackageArgs', 'GooGetGitHubRepo', 'GooGetPatchedRepo', 'GooGetPatchedCommit', 'GooGetPatchedPulls', 'GooGetRepoName', 'GooGetRepoUrl', 'GooGetRetiredRepos', 'GooGetAclTrustedSids', 'GooGetPackages', 'GooGetFullPackages', 'GooGetProbeTimeoutSeconds',
                               'GamesExcludePattern', 'GamesReservePercent', 'GamesSizeFactor', 'GamesBootstrapWingetPackages', 'VentoyRepo', 'VentoyMarkerName')) {
     $assignmentAst = $ast.Find({
         param($node)
@@ -49,6 +49,7 @@ foreach ($functionName in @('Write-Note', 'Invoke-Winget', 'Invoke-WingetUninsta
 # No param block: the named arguments the script passes land in $args.
 function Invoke-WingetUninstallUnelevated { return $null }
 function Invoke-WingetUpgradeUnelevated { return $null }
+function Invoke-WingetInstallUnelevated { return $null }
 
 # --- Profile contents --------------------------------------------------------
 $core = @($WingetPackages)
@@ -546,6 +547,12 @@ try {
 
     $status = Invoke-BalunCase $true $old @('jm2.Balun') $false
     Assert-True (@($script:BalunCalls | Where-Object { $_ -like 'upgrade|--id|jm2.Balun|*' }).Count -eq 1) 'WinGet-owned Balun gets an upgrade check'
+    Assert-True ($status -eq 'updated') "an applied WinGet upgrade is an update (got $status)"
+    # "No applicable update" changed nothing: current, not updated.
+    $script:BalunWingetExit = [int]0x8A15002B
+    $status = Invoke-BalunCase $true $old @('jm2.Balun') $false
+    Assert-True ($status -eq 'current') "a WinGet no-op upgrade is current, not updated (got $status)"
+    $script:BalunWingetExit = 0
 
     $status = Invoke-BalunCase $true $old @('jm2.Balun') $true
     Assert-True ($status -eq 'current' -and @($script:BalunCalls | Where-Object { $_ -match '^(install|upgrade)\|' }).Count -eq 0) '-NoUpgrade leaves WinGet-owned Balun alone'

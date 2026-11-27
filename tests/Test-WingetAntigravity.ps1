@@ -27,6 +27,7 @@ $assignmentNames = @(
     'WingetDeferredCodes'
     'WingetRemoveOkCodes'
     'WingetUserScopeElevatedCode'
+    'WingetNoChangeCodes'
     'WingetSelfUpdatingCode'
     'WingetLaunchAttempts'
     'WingetLaunchRetrySeconds'
@@ -363,6 +364,27 @@ try {
     $script:ExitCodes = @{ 'upgrade|Google.PlatformTools' = 7 }
     Invoke-WingetPackageSet -InstalledIds @('Google.PlatformTools') -DesiredIds @('Google.PlatformTools') 3>$null | Out-Null
     Assert-Equal $script:UpgradeCalls.Count 0 'only the user-scope upgrade refusal is retried unelevated'
+
+    # An install refused because this account already has the package in user
+    # scope (charmbracelet.crush) is retried unelevated too.
+    $script:InstallCalls = @()
+    function Invoke-WingetInstallUnelevated {
+        param([string]$Id, [string[]]$Arguments)
+        $script:InstallCalls += "$Id=$($Arguments -join '|')"
+        return 0
+    }
+    $script:ExitCodes = @{ 'install|charmbracelet.crush' = [int]$WingetUserScopeElevatedCode }
+    $result = Invoke-WingetPackageSet -InstalledIds @('Example.Unrelated') -DesiredIds @('charmbracelet.crush')
+    Assert-Equal ($script:InstallCalls -join ',') 'charmbracelet.crush=install|--id|charmbracelet.crush|--exact|--source|winget|--no-upgrade|--silent|--accept-package-agreements|--accept-source-agreements|--disable-interactivity' 'user-scope install refusal is retried unelevated with the same arguments'
+    Assert-Equal ($result.Installed -join ',') 'charmbracelet.crush' 'the unelevated install result counts'
+    Assert-Equal $result.Failed.Count 0 'a successful unelevated install is not a failure'
+
+    # Another signed-in user holding an MSIX package (Microsoft.WSL) defers the
+    # upgrade to a later run instead of failing it.
+    $script:ExitCodes = @{ 'upgrade|Microsoft.WSL' = [int]0x80073D25 }
+    $result = Invoke-WingetPackageSet -InstalledIds @('Microsoft.WSL') -DesiredIds @('Microsoft.WSL') 3>$null
+    Assert-Equal ($result.Deferred -join ',') 'upgrade Microsoft.WSL' 'a package in use by another user is deferred'
+    Assert-Equal $result.Failed.Count 0 'a package in use by another user is not a failure'
 
     # A package whose manifest leaves updates to its own updater (Android
     # Studio) is current, not a failed upgrade.

@@ -439,10 +439,15 @@ $WingetOkCodes = @{
 # updater (Android Studio). Accepted as current on the upgrade path only: on an
 # install it would mean nothing was installed.
 $WingetSelfUpdatingCode = 0x8A150114 # INSTALL_UPGRADE_NOT_SUPPORTED
+# Accepted results that changed nothing (no applicable update, already installed).
+$WingetNoChangeCodes = @(0x8A15002B, 0x8A150061, 0x8A15010D)
 $WingetRebootCodes = @(0x8A150109, 0x8A15010A, 0x8A15010B)
 # Not installed yet, but only a reboot stands in the way: re-run afterwards
 $WingetDeferredCodes = @{
     0x8A15010A = 'a reboot is required before this can be installed'  # INSTALL_REBOOT_REQUIRED_FOR_INSTALL
+    # MSIX installer result passed through by winget (Microsoft.WSL): another
+    # signed-in user has the package, so it cannot be replaced right now.
+    0x80073D25 = 'another signed-in user has this package; sign them out (or reboot) and re-run'  # ERROR_PACKAGES_IN_USE
 }
 $WingetRemoveOkCodes = @{
     0          = 'removed'
@@ -451,7 +456,7 @@ $WingetRemoveOkCodes = @{
     0x8A15010B = 'removed - the uninstaller initiated a reboot' # INSTALL_REBOOT_INITIATED
 }
 $WingetExportOkCodes = @(0, 0x8A150035) # success, or NOT_ALL_PACKAGES_FOUND
-# winget refuses to uninstall or upgrade a user-scope package from an elevated
+# winget refuses to install, uninstall or upgrade a user-scope package from an elevated
 # process. Such a package belongs to this account, so the operation is retried
 # from a one-shot scheduled task that runs winget unelevated in this account's
 # interactive session.
@@ -573,7 +578,7 @@ function Get-WingetArpEntry {
 function Invoke-WingetUnelevated {
     param(
         [Parameter(Mandatory = $true)][string]$Id,
-        [Parameter(Mandatory = $true)][ValidateSet('uninstall', 'upgrade')][string]$Verb,
+        [Parameter(Mandatory = $true)][ValidateSet('install', 'uninstall', 'upgrade')][string]$Verb,
         [Parameter(Mandatory = $true)][string[]]$Arguments
     )
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -673,6 +678,16 @@ function Invoke-WingetUpgradeUnelevated {
         [Parameter(Mandatory = $true)][string[]]$Arguments
     )
     return Invoke-WingetUnelevated -Id $Id -Verb upgrade -Arguments $Arguments
+}
+
+# And to installing one that this account already has in user scope outside
+# winget's inventory (charmbracelet.crush, for example).
+function Invoke-WingetInstallUnelevated {
+    param(
+        [Parameter(Mandatory = $true)][string]$Id,
+        [Parameter(Mandatory = $true)][string[]]$Arguments
+    )
+    return Invoke-WingetUnelevated -Id $Id -Verb install -Arguments $Arguments
 }
 
 # `winget uninstall` for $Id, retried unelevated when winget refuses to remove
@@ -878,8 +893,14 @@ function Invoke-WingetPackageSet {
     foreach ($id in $missing) {
         Write-Note "installing $id"
         $extra = @(Get-WingetPackageArgument -Id $id)
-        Invoke-Winget install --id $id --exact --source $Source --no-upgrade --silent --accept-package-agreements --accept-source-agreements --disable-interactivity @extra | Out-Host
+        $installArgs = @('install', '--id', $id, '--exact', '--source', $Source, '--no-upgrade', '--silent',
+            '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity') + $extra
+        Invoke-Winget @installArgs | Out-Host
         $code = $LASTEXITCODE
+        if ($code -eq $WingetUserScopeElevatedCode) {
+            $retry = Invoke-WingetInstallUnelevated -Id $id -Arguments $installArgs
+            if ($null -ne $retry) { $code = $retry }
+        }
         if ($WingetRebootCodes -contains $code) { $script:RebootNeeded = $true }
         if ($WingetOkCodes.ContainsKey($code)) {
             $installedNow += $id
@@ -1027,6 +1048,11 @@ function Invoke-NativeCliInstaller {
         # Some installers (goose) download their archive into the working
         # directory; keep that inside the scratch directory.
         Push-Location -LiteralPath $dir
+        # Vendor installers print UTF-8 (the Claude Code installer's ellipses and
+        # check marks); read through the pipe with the console's legacy code page
+        # they turn into mojibake, so decode UTF-8 for the installer's run.
+        $savedEncoding = $null
+        try { $savedEncoding = [Console]::OutputEncoding; [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { $savedEncoding = $null }
         try {
             & $hostPath -NoProfile -ExecutionPolicy Bypass -File $installer | Out-Host
             $code = $LASTEXITCODE
@@ -1034,6 +1060,7 @@ function Invoke-NativeCliInstaller {
         finally {
             Pop-Location
             $env:Path = $savedPath
+            if ($null -ne $savedEncoding) { try { [Console]::OutputEncoding = $savedEncoding } catch { $null = $_ } }
         }
         if ($code -ne 0) {
             throw "the official $($Tool.Name) installer exited with $code"
@@ -1576,6 +1603,7 @@ function Invoke-ReleaseAppStep {
             if ($WingetRebootCodes -contains $code) { $script:RebootNeeded = $true }
             if ($WingetOkCodes.ContainsKey($code)) {
                 Write-Note "$($App.Name): $($WingetOkCodes[$code])"
+                if ($WingetNoChangeCodes -contains $code) { return 'current' }
                 if ($existing) { return 'updated' }
                 return 'installed'
             }
