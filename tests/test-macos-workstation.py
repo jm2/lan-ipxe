@@ -134,7 +134,10 @@ class ConfigurationTests(unittest.TestCase):
         self.assertFalse(managed({'tile-type': 'spacer-tile', 'tile-data': {}}))
         self.obj.args = w.arguments(['--profile', 'full', '--no-upgrade'])
         desired, _ = self.obj.dock_plan()
-        self.assertEqual([app['id'] for app in desired][-1], 'com.valvesoftware.steam')
+        # Steam and Battle.net live in the Games folder; an existing tile is dropped.
+        self.assertNotIn('com.valvesoftware.steam', [app['id'] for app in desired])
+        self.assertTrue(managed({'tile-data': {'bundle-identifier': 'com.valvesoftware.steam'}}))
+        self.assertTrue(managed({'tile-data': {'bundle-identifier': 'net.battle.app'}}))
 
     def test_games_folder_links_games_and_adds_one_dock_folder(self):
         self.obj.args = w.arguments(['--profile', 'full', '--no-upgrade'])
@@ -152,7 +155,8 @@ class ConfigurationTests(unittest.TestCase):
                 patch.object(self.obj, 'preference') as mock_pref:
             self.obj.games_folder()
         self.assertEqual(os.readlink(folder / 'Bugdom.app'), str(bugdom))
-        self.assertFalse((folder / 'Steam.app').exists(), 'launchers stay out of the Games folder')
+        self.assertEqual(os.readlink(folder / 'Steam.app'), str(self.obj.applications / 'Steam.app'))
+        self.assertFalse((folder / 'Battle.net.app').exists(), 'games not installed are not linked')
         self.assertFalse(stale.is_symlink())
         self.assertNotIn(str(stale), self.obj.receipts['links'])
         others = mock_pref.call_args.args[2]

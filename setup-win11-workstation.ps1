@@ -424,6 +424,10 @@ $DesktopGamesWingetShortcuts = [ordered]@{
     'SuperTuxKart.SuperTuxKart'       = @{ Include = @('SuperTuxKart*'); Exclude = @() }
     'Unigine.HeavenBenchmark'         = @{ Include = @('Heaven Benchmark*', 'Unigine Heaven*'); Exclude = @() }
     'GOG.Galaxy'                      = @{ Include = @('GOG GALAXY*', 'GOG Galaxy*'); Exclude = @() }
+    'Valve.Steam'                     = @{ Include = @('Steam'); Exclude = @() }
+    # Not installed by the script (its installer is interactive); picked up
+    # when installed by hand.
+    'Blizzard.BattleNet'              = @{ Include = @('Battle.net'); Exclude = @() }
 }
 
 # The only principals that may own or write anything under
@@ -3472,8 +3476,9 @@ function Invoke-DesktopGamesCheck {
 
 function Write-DesktopGamesPlan {
     Write-Note "Desktop $DesktopGamesFolderName folder (created when missing): copies of every Start menu shortcut under"
-    Write-Note "    `"$DesktopGamesMenuPattern`" folders (game-packages and hand-installed crossdock games), plus these WinGet"
-    Write-Note "    games when installed: $(@($DesktopGamesWingetShortcuts.Keys) -join ', ');"
+    Write-Note "    `"$DesktopGamesMenuPattern`" folders (game-packages and hand-installed crossdock games), plus these game and launcher"
+    $names = @($DesktopGamesWingetShortcuts.Values | ForEach-Object { ($_.Include | Select-Object -First 1) -replace '\*', '' })
+    Write-Note "    shortcuts when installed: $($names -join ', ');"
     Write-Note "    copies refreshed when their shortcut changes; copies this script made removed once their game is gone"
     Write-Note "    (recorded in $DesktopGamesMarkerName); items you add are never touched"
 }

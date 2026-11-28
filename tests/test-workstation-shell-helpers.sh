@@ -217,6 +217,7 @@ test_games_folder() (
   grep -Fxq "folder-children=['Games', 'System', 'Utilities']" "${root}/keyfile"
   grep -Fxq '[org/gnome/desktop/app-folders/folders/Games]' "${root}/keyfile"
   grep -Fxq "categories=['Game']" "${root}/keyfile"
+  grep -Fxq "apps=['steam.desktop', 'com.valvesoftware.Steam.desktop', 'wine-Programs-Battle.net-Battle.net.desktop']" "${root}/keyfile"
   grep -Fxq 'translate=false' "${root}/keyfile"
   gsettings() { return 1; }
   [[ $(render_games_folder | grep '^folder-children=') == "folder-children=['Games', 'Utilities', 'YaST', 'Pardus']" ]]

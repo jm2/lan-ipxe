@@ -1079,9 +1079,14 @@ Assert-True (Test-DesktopGameShortcutName -Name 'SuperTux 0.6.3' -Include $super
 Assert-True (-not (Test-DesktopGameShortcutName -Name 'SuperTuxKart' -Include $superTux.Include -Exclude $superTux.Exclude)) 'SuperTuxKart is not SuperTux'
 Assert-True (-not (Test-DesktopGameShortcutName -Name 'GOG GALAXY' -Include $superTux.Include)) 'unrelated names do not match'
 foreach ($id in @($DesktopGamesWingetShortcuts.Keys)) {
-    Assert-True ($WingetFullPackages -contains $id) "$id (Games folder pattern) is a full-profile WinGet package"
+    Assert-True ($WingetFullPackages -contains $id -or $id -eq 'Blizzard.BattleNet') "$id (Games folder pattern) is a full-profile WinGet package"
 }
-Assert-True ($DesktopGamesWingetShortcuts.Keys -notcontains 'Valve.Steam') 'Steam is a store, not a game, and stays out of the Games folder'
+foreach ($pair in @(@('Valve.Steam', 'Steam'), @('Blizzard.BattleNet', 'Battle.net'))) {
+    $entry = $DesktopGamesWingetShortcuts[$pair[0]]
+    Assert-True (Test-DesktopGameShortcutName -Name $pair[1] -Include $entry.Include -Exclude $entry.Exclude) "$($pair[1]) joins the Games folder when installed"
+}
+$steam = $DesktopGamesWingetShortcuts['Valve.Steam']
+Assert-True (-not (Test-DesktopGameShortcutName -Name 'Steam Support Center' -Include $steam.Include -Exclude $steam.Exclude)) 'only the Steam client shortcut matches'
 
 $gamesRoot = Join-Path ([IO.Path]::GetTempPath()) ("desktop-games-test-{0}" -f [Guid]::NewGuid().ToString('N'))
 try {

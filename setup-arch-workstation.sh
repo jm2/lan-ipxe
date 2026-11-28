@@ -980,6 +980,10 @@ GAMES_FOLDER_KEYFILE=${DCONF_LOCAL_DIR}/30-games-folder
 # Game launchers earlier releases pinned to the dock, dropped from a saved
 # favorites list once the folder is in place.
 RETIRED_DOCK_GAMES=bugdom.desktop,io.jor.bugdom.desktop,io.jor.cromagrally.desktop,mightymike.desktop,io.jor.mightymike.desktop
+# Launchers listed by ID as well: Steam (package and Flathub) is in the Game
+# category already, and Battle.net installed under Wine gets a launcher with
+# no category. GNOME skips IDs that are not installed.
+GAMES_FOLDER_APPS="['steam.desktop', 'com.valvesoftware.Steam.desktop', 'wine-Programs-Battle.net-Battle.net.desktop']"
 GAMES_FOLDER_VENDOR_FALLBACK="['Utilities', 'YaST', 'Pardus']"
 
 # strv_print <item>...: a GVariant string array.
@@ -1017,6 +1021,7 @@ folder-children=$(games_folder_children "${vendor}")
 [org/gnome/desktop/app-folders/folders/Games]
 name='Games'
 categories=['Game']
+apps=${GAMES_FOLDER_APPS}
 translate=false
 KEYFILE
 }

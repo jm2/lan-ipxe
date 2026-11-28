@@ -255,7 +255,9 @@ On GNOME (Fedora and Arch), full, games and games-repo runs add a **Games** fold
 the app grid, the counterpart of the macOS Dock's Games folder. It is defined in
 `/etc/dconf/db/local.d/30-games-folder` and gathers every launcher in the freedesktop
 `Game` category, so game-packages games, Flatpaks, and games installed by hand from
-crossdock outside the script all land in it as they appear. Dash to Dock cannot pin a
+crossdock outside the script all land in it as they appear. Steam (package or Flatpak) and
+Battle.net installed under Wine are listed by launcher ID as well, since Wine's launcher has no
+category. Dash to Dock cannot pin a
 folder, so games are no longer pinned to the dock: the dock's Show Applications
 button leads to the folder. A folder list or dock you have saved is merged, not
 replaced. The folder is added to your list, and the game launchers earlier releases
@@ -476,8 +478,9 @@ DING desktop folder because Nautilus, which opens desktop folders, no longer lau
   Full, games and games-repo runs keep a `Games` folder on your Desktop (the counterpart
   of the macOS Dock's Games folder): copies of every Start menu shortcut under a
   `Games (*)` folder (game-packages GooGet games, including crossdock games installed by
-  hand outside the script), plus full's WinGet games when installed (Extreme Tux Racer,
-  SuperTux, SuperTuxKart, Heaven Benchmark, GOG Galaxy). Each run adds missing copies,
+  hand outside the script), plus these shortcuts when installed: full's WinGet games and
+  launchers (Extreme Tux Racer, SuperTux, SuperTuxKart, Heaven Benchmark, GOG Galaxy, Steam)
+  and Battle.net, which is installed by hand. Each run adds missing copies,
   refreshes changed ones and removes the copies it made once their game is gone (recorded
   in a hidden `.lan-ipxe-games` file); anything you put in the folder is left alone.
 
